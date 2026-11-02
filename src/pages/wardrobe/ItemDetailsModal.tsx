@@ -262,7 +262,7 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
 
         <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="item-details-title" tabIndex={-1} className="relative inline-block px-4 pt-5 pb-4 overflow-hidden text-left align-bottom transition-all transform bg-white rounded-xl shadow-xl sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
           <div className="absolute top-0 right-0 pt-4 pr-4">
-            <button onClick={onClose} className="text-gray-400 bg-white rounded-md hover:text-gray-500 focus:outline-none">
+            <button onClick={onClose} className="text-gray-400 bg-white rounded-md hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
               <span className="sr-only">Close</span>
               <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
@@ -305,10 +305,12 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
                 {/* Per-image controls: view + primary */}
                 {currentImage && (
                   <div className="mt-2 flex items-center gap-3 justify-center text-xs">
+                    <label htmlFor="item-details-view" className="text-gray-600">View</label>
                     <select
+                      id="item-details-view"
                       value={currentImage.view || ''}
                       onChange={(e) => handleViewChange(selectedImageIndex, e.target.value)}
-                      className="border border-gray-300 rounded px-2 py-1 text-xs"
+                      className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                     >
                       {VIEW_OPTIONS.map((v) => (
                         <option key={v} value={v}>{v || '(no view)'}</option>
@@ -319,7 +321,7 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
                         type="checkbox"
                         checked={currentImage.isPrimary === true}
                         onChange={() => handleSetPrimary(selectedImageIndex)}
-                        className="rounded"
+                        className="rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
                       />
                       Primary
                     </label>
@@ -333,8 +335,9 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
                       <div key={idx} className="relative">
                         <button
                           type="button"
+                          aria-label={`Show image ${idx + 1}`}
                           onClick={() => setSelectedImageIndex(idx)}
-                          className={`w-16 h-16 rounded border-2 overflow-hidden flex-shrink-0 transition ${idx === selectedImageIndex ? 'border-indigo-500' : 'border-gray-200 hover:border-gray-400'}`}
+                          className={`w-16 h-16 rounded border-2 overflow-hidden flex-shrink-0 transition focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${idx === selectedImageIndex ? 'border-indigo-500' : 'border-gray-200 hover:border-gray-400'}`}
                         >
                           {img.url ? (
                             <CachedImage src={img.url} cacheKey={img.imageId} alt={`Image ${idx + 1}`} className="w-full h-full object-cover" />
@@ -344,8 +347,9 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
                         </button>
                         <button
                           type="button"
+                          aria-label={`Remove image ${idx + 1}`}
                           onClick={(e) => { e.stopPropagation(); handleRemoveImage(idx); }}
-                          className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full w-4 h-4 flex items-center justify-center text-[10px] leading-none hover:bg-red-600 transition"
+                          className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full w-4 h-4 flex items-center justify-center text-[10px] leading-none hover:bg-red-600 transition focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                         >
                           ×
                         </button>
@@ -353,9 +357,10 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
                     ))}
                     <button
                       type="button"
+                      aria-label="Add image"
                       onClick={() => addImageInputRef.current?.click()}
                       disabled={isAddingImage}
-                      className="w-16 h-16 rounded border-2 border-dashed border-gray-300 flex items-center justify-center text-gray-400 hover:border-gray-500 hover:text-gray-600 transition flex-shrink-0 disabled:opacity-50"
+                      className="w-16 h-16 rounded border-2 border-dashed border-gray-300 flex items-center justify-center text-gray-400 hover:border-gray-500 hover:text-gray-600 transition flex-shrink-0 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                     >
                       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
@@ -376,58 +381,58 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
               <form onSubmit={handleUpdate} className="mt-4 space-y-3 max-h-[50vh] overflow-y-auto">
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs font-medium text-gray-700">Name</label>
-                    <input type="text" value={name} onChange={(e) => setName(e.target.value)}
+                    <label htmlFor="item-details-name" className="block text-xs font-medium text-gray-700">Name</label>
+                    <input type="text" id="item-details-name" value={name} onChange={(e) => setName(e.target.value)}
                       placeholder="e.g. My favorite hoodie"
-                      className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-2 text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" />
+                      className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-2 text-sm focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 focus:border-indigo-500" />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-gray-700">Category *</label>
-                    <input type="text" value={category} onChange={(e) => setCategory(e.target.value)}
+                    <label htmlFor="item-details-category" className="block text-xs font-medium text-gray-700">Category<span aria-hidden="true"> *</span></label>
+                    <input type="text" id="item-details-category" value={category} onChange={(e) => setCategory(e.target.value)}
                       placeholder="e.g. Top"
-                      className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-2 text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" />
+                      className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-2 text-sm focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 focus:border-indigo-500" />
                   </div>
                 </div>
 
                 {ATTRIBUTE_FIELDS.map(({ key, label, placeholder }) => (
                   <div key={key}>
-                    <label className="block text-xs font-medium text-gray-700">
-                      {label}{key === 'color' || key === 'material' ? ' *' : ''}
+                    <label htmlFor={`item-details-attr-${key}`} className="block text-xs font-medium text-gray-700">
+                      {label}{(key === 'color' || key === 'material') && <span aria-hidden="true"> *</span>}
                     </label>
-                    <input type="text" value={attrs[key]} onChange={(e) => setAttrs((prev) => ({ ...prev, [key]: e.target.value }))}
+                    <input type="text" id={`item-details-attr-${key}`} value={attrs[key]} onChange={(e) => setAttrs((prev) => ({ ...prev, [key]: e.target.value }))}
                       placeholder={placeholder}
-                      className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-2 text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" />
+                      className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-2 text-sm focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 focus:border-indigo-500" />
                   </div>
                 ))}
 
                 <div>
-                  <label className="block text-xs font-medium text-gray-700">Weather Tags</label>
-                  <input type="text" value={weatherTagsInput}
+                  <label htmlFor="item-details-weather-tags" className="block text-xs font-medium text-gray-700">Weather Tags</label>
+                  <input type="text" id="item-details-weather-tags" value={weatherTagsInput}
                     onChange={(e) => setWeatherTagsInput(e.target.value)}
                     placeholder="e.g. Cold, Windy, Warm"
-                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-2 text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" />
+                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-1.5 px-2 text-sm focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 focus:border-indigo-500" />
                   <p className="mt-0.5 text-xs text-gray-400">Comma-separated</p>
                 </div>
 
                 <div className="flex flex-wrap gap-2 pt-3 border-t">
                   <button type="submit" disabled={isUpdating || isProcessing}
-                    className="inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none disabled:opacity-50">
+                    className="inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
                     {isUpdating ? 'Saving...' : 'Save Changes'}
                   </button>
                   {!isUnsupportedFormatFailure && (
                     <button type="button" disabled={isRetagging || isProcessing}
                       onClick={handleRetag}
-                      className="inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none disabled:opacity-50">
+                      className="inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
                       {isRetagging ? 'Re-tagging...' : 'Re-tag'}
                     </button>
                   )}
                   <button type="button" disabled={isDeleting}
                     onClick={handleDelete}
-                    className="inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-red-600 text-sm font-medium text-white hover:bg-red-700 focus:outline-none disabled:opacity-50">
+                    className="inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-red-600 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
                     {isDeleting ? 'Deleting...' : 'Delete'}
                   </button>
                   <button type="button" onClick={onClose}
-                    className="inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none">
+                    className="inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500">
                     Cancel
                   </button>
                 </div>

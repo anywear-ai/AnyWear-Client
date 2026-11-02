@@ -14,7 +14,7 @@ export default function AddItemModal({ isOpen, onClose, onSuccess }: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useAccessibleDialog(onClose);
+  const dialogRef = useAccessibleDialog(onClose, isOpen);
 
   const { mutateAsync: getUploadUrl } = usePostWardrobeUploadUrl();
   const { mutateAsync: confirmUpload } = usePostWardrobeUpload();
@@ -72,7 +72,7 @@ export default function AddItemModal({ isOpen, onClose, onSuccess }: Props) {
           <div className="absolute top-0 right-0 pt-4 pr-4">
             <button
               onClick={onClose}
-              className="text-gray-400 bg-white rounded-md hover:text-gray-500 focus:outline-none"
+              className="text-gray-400 bg-white rounded-md hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
             >
               <span className="sr-only">Close</span>
               <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -90,7 +90,7 @@ export default function AddItemModal({ isOpen, onClose, onSuccess }: Props) {
 
               <form onSubmit={handleSubmit} className="mt-6 space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700">Image</label>
+                  <label htmlFor="add-item-image" className="block text-sm font-medium text-gray-700">Image</label>
                   <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-md">
                     <div className="space-y-1 text-center">
                       <svg className="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48">
@@ -101,6 +101,7 @@ export default function AddItemModal({ isOpen, onClose, onSuccess }: Props) {
                           <span>Upload a file or take a photo</span>
                           <input
                             ref={fileInputRef}
+                            id="add-item-image"
                             type="file"
                             accept="image/jpeg,image/png,image/webp"
                             capture="environment"

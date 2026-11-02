@@ -31,7 +31,7 @@ export default function GenerateLookDialog({
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto">
       <div className="flex min-h-screen items-center justify-center px-4">
-        <div className="fixed inset-0 bg-gray-500 bg-opacity-75" onClick={onCancel} />
+        <div className="fixed inset-0 bg-gray-500/75" onClick={onCancel} />
         <div
           ref={dialogRef}
           role="dialog"

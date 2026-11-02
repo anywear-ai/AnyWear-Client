@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import '@testing-library/jest-dom/vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import CreateOutfitModal from '../../pages/wardrobe/CreateOutfitModal';
 
 const mockItems = [
@@ -43,6 +43,25 @@ function setupMocks(items: typeof mockItems = mockItems) {
   } as any);
 }
 
+const FOCUSABLE = 'a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])';
+
+/** The tokens jsdom cannot paint: both the width and the colour must be authored. */
+function expectRingTokens(element: HTMLElement, state = 'focus:') {
+  const tokens = element.className.split(/\s+/);
+  expect(tokens, `${element.tagName} is missing ${state}ring-2`).toContain(`${state}ring-2`);
+  expect(tokens, `${element.tagName} is missing ${state}ring-indigo-500`).toContain(`${state}ring-indigo-500`);
+}
+
+function expectEveryStopRings(dialog: HTMLElement) {
+  const stops = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE))
+    .filter((element) => !element.classList.contains('hidden'));
+  expect(stops.length).toBeGreaterThan(0);
+
+  for (const stop of stops) {
+    expectRingTokens(stop);
+  }
+}
+
 describe('CreateOutfitModal', () => {
   const defaultProps = {
     isOpen: true,
@@ -51,8 +70,9 @@ describe('CreateOutfitModal', () => {
   };
 
   beforeEach(() => {
-    vi.clearAllMocks();
     cleanup();
+    vi.clearAllMocks();
+    document.body.style.overflow = '';
   });
 
   it('renders nothing when isOpen is false', () => {
@@ -356,5 +376,62 @@ describe('CreateOutfitModal', () => {
     setupMocks();
     render(<CreateOutfitModal {...defaultProps} />);
     expect(screen.queryByRole('button', { name: 'Delete Outfit' })).toBeNull();
+  });
+
+  it('names the close control, the outfit name field, and the select-items group with its count', () => {
+    setupMocks();
+    render(<CreateOutfitModal {...defaultProps} />);
+
+    expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Outfit Name (optional)' })).toBeInTheDocument();
+
+    const group = screen.getByRole('group', { name: 'Select Items (0 selected)' });
+    fireEvent.click(within(group).getByRole('button', { name: 'T-Shirt' }));
+    expect(screen.getByRole('group', { name: 'Select Items (1 selected)' })).toBeInTheDocument();
+  });
+
+  it('paints the 2px indigo ring tokens on every focus stop in create mode', () => {
+    setupMocks();
+    render(<CreateOutfitModal {...defaultProps} />);
+
+    expectEveryStopRings(screen.getByRole('dialog', { name: 'Create Outfit' }));
+  });
+
+  it('keeps the ring tokens on the delete confirmation controls', () => {
+    setupMocks();
+    render(<CreateOutfitModal {...defaultProps} outfit={editOutfit} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
+    expectEveryStopRings(screen.getByRole('dialog', { name: 'Edit Outfit' }));
+  });
+
+  it('keeps the ring tokens on the disabled create control while a request is in flight', () => {
+    setupMocks();
+    vi.mocked(usePostOutfits).mockReturnValue({ mutate: vi.fn(), isPending: true } as any);
+    render(<CreateOutfitModal {...defaultProps} />);
+    fireEvent.click(screen.getByText('T-Shirt'));
+
+    const create = screen.getByRole('button', { name: 'Creating...' });
+    expect(create).toBeDisabled();
+    expectRingTokens(create);
+    expectEveryStopRings(screen.getByRole('dialog', { name: 'Create Outfit' }));
+  });
+
+  it('locks the body while open and releases it when closed or unmounted', () => {
+    setupMocks();
+    const { rerender, unmount } = render(<CreateOutfitModal {...defaultProps} isOpen={false} />);
+    expect(document.body.style.overflow).toBe('');
+
+    rerender(<CreateOutfitModal {...defaultProps} isOpen />);
+    expect(document.body.style.overflow).toBe('hidden');
+
+    rerender(<CreateOutfitModal {...defaultProps} isOpen={false} />);
+    expect(document.body.style.overflow).toBe('');
+
+    rerender(<CreateOutfitModal {...defaultProps} isOpen />);
+    expect(document.body.style.overflow).toBe('hidden');
+
+    unmount();
+    expect(document.body.style.overflow).toBe('');
   });
 });

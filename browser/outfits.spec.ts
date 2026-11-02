@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import type { GetOutfits200OutfitsItem } from '../src/api/model/getOutfits200OutfitsItem';
 import type { GetWardrobe200Item } from '../src/api/model/getWardrobe200Item';
 import { mockClientBoundaries, expectOnlyMockedCalls } from './mock-boundaries';
@@ -83,6 +83,122 @@ async function setupOutfitMocks(page: Page, state: MockState) {
 
 function outfitCard(page: Page, name: string) {
   return page.getByRole('heading', { name, exact: true }).locator('..').locator('..');
+}
+
+/** The dialogs' focusable stops, matching the shared dialog hook's selector. */
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled]):not([type="hidden"])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+/** Enough outfit cards that the mocked wardrobe page scrolls at a 520px-tall viewport. */
+function scrollingOutfits(count: number) {
+  return Array.from({ length: count }, (_, index) => ({
+    ...structuredClone(mockOutfit),
+    id: `ffffffff-ffff-4fff-8fff-${String(index).padStart(12, '0')}`,
+    name: `Outfit ${index + 1}`,
+  }));
+}
+
+/**
+ * Scrolls the opener to the middle of the viewport and returns the resulting
+ * non-zero offset. A top-of-document opener would otherwise leave scrollY at 0;
+ * a short downward scroll keeps it clickable and proves the lock preserves a
+ * non-zero position.
+ */
+async function scrollOpenerIntoView(page: Page, opener: Locator) {
+  await opener.evaluate((element) => element.scrollIntoView({ block: 'center' }));
+  let offset = await page.evaluate(() => window.scrollY);
+  if (offset === 0) {
+    await page.evaluate(() => window.scrollTo(0, 40));
+    offset = await page.evaluate(() => window.scrollY);
+  }
+  return offset;
+}
+
+/** Clicks at the opener's current viewport position so Playwright cannot scroll it into view. */
+async function clickByPointer(page: Page, opener: Locator) {
+  const box = await opener.boundingBox();
+  expect(box, 'the opener has no layout box').not.toBeNull();
+  await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height / 2);
+}
+
+/** Wheels over the backdrop area, outside every dialog panel. */
+async function wheelOutsidePanel(page: Page) {
+  await page.mouse.move(20, 20);
+  await page.mouse.wheel(0, 400);
+  await page.waitForTimeout(150);
+}
+
+/**
+ * The computed focus treatment of the active stop. The Add Item file input is
+ * visually hidden, so its ring is the wrapping label's `focus-within` shadow.
+ */
+async function activeStopRing(page: Page) {
+  return page.evaluate(() => {
+    const active = document.activeElement as HTMLElement | null;
+    if (!active) return null;
+    const target = active instanceof HTMLInputElement && active.type === 'file'
+      ? (active.closest('label') as HTMLElement | null)
+      : active;
+    if (!target) return null;
+
+    const token = getComputedStyle(document.documentElement).getPropertyValue('--color-indigo-500').trim()
+      || 'oklch(58.5% 0.233 277.117)';
+    const probe = document.createElement('div');
+    probe.style.color = token;
+    document.body.appendChild(probe);
+    const indigo = getComputedStyle(probe).color;
+    probe.remove();
+
+    return {
+      tag: active.tagName,
+      name: active.getAttribute('aria-label') ?? active.textContent?.trim().slice(0, 48) ?? '',
+      boxShadow: getComputedStyle(target).boxShadow,
+      indigo,
+    };
+  });
+}
+
+async function expectActiveStopRing(page: Page, context: string) {
+  // Some dialog controls carry Tailwind's `transition`, so the page's computed
+  // box-shadow settles a frame or two after focus moves. Poll for the settled
+  // value instead of sampling the transition's first frame.
+  await expect
+    .poll(
+      async () => {
+        const ring = await activeStopRing(page);
+        if (!ring) return 'nothing is focused';
+        const hasWidth = ring.boxShadow.includes('2px');
+        const hasIndigo = ring.boxShadow.includes(ring.indigo);
+        return hasWidth && hasIndigo
+          ? 'ring'
+          : `${ring.tag} "${ring.name}" box-shadow: ${ring.boxShadow} (expected 2px and ${ring.indigo})`;
+      },
+      { message: `${context}: the active stop never painted a 2px indigo ring`, timeout: 2000 },
+    )
+    .toBe('ring');
+}
+
+/** Tabs once through every stop and asserts the painted ring on each, including the wrap. */
+async function expectEveryTabStopRing(page: Page, panel: Locator, context: string) {
+  const stopCount = await panel.evaluate(
+    (dialog, selector) => Array.from(dialog.querySelectorAll(selector))
+      // A `display: none` input matches the selector but is not a tab stop.
+      .filter((element) => element.getClientRects().length > 0).length,
+    FOCUSABLE_SELECTOR,
+  );
+  expect(stopCount, `${context}: no focusable stops`).toBeGreaterThan(0);
+
+  for (let index = 0; index < stopCount; index += 1) {
+    await expectActiveStopRing(page, `${context} stop ${index + 1}/${stopCount}`);
+    await page.keyboard.press('Tab');
+  }
+  await expectActiveStopRing(page, `${context} wrap`);
 }
 
 /**
@@ -322,5 +438,106 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     await expect(empty.getByText('No look yet', { exact: true })).toBeVisible();
     // The outfit's first garment is never used as the outfit's image.
     await expect(empty.getByRole('img')).toHaveCount(0);
+  });
+});
+
+// jsdom cannot scroll or paint, so the scroll lock and the focus treatment are
+// observed here: the wheel must not move a pre-scrolled page behind any dialog,
+// the offset must survive the close, and every stop must compute a 2px indigo
+// ring even on the first programmatically focused stop after a pointer open.
+test.describe('Wardrobe dialog scroll lock and focus rings (mocked Client integration)', () => {
+  test.beforeEach(async ({ page }) => {
+    await mockAmplifySession(page);
+  });
+  test.afterEach(({ page }) => expectOnlyMockedCalls(page));
+
+  test('holds a pre-scrolled offset through all four dialogs and rings every tab stop', async ({ page }) => {
+    await page.setViewportSize({ width: 900, height: 520 });
+    const state: MockState = { outfits: scrollingOutfits(6), mutations: [] };
+    await setupOutfitMocks(page, state);
+    await page.goto('/wardrobe');
+    await expect(page.getByRole('heading', { name: 'Wardrobe', exact: true })).toBeVisible();
+
+    const dialogs = [
+      { name: 'Add Wardrobe Item', opener: page.getByRole('button', { name: 'Add Item', exact: true }) },
+      { name: 'Item Details', opener: page.getByRole('button', { name: 'View T-Shirt details' }) },
+      { name: 'Create Outfit', opener: page.getByRole('button', { name: '+ Create Outfit', exact: true }) },
+      { name: 'Generate a look for Outfit 1?', opener: page.getByRole('button', { name: 'New look for Outfit 1', exact: true }) },
+    ];
+
+    for (const dialog of dialogs) {
+      const before = await scrollOpenerIntoView(page, dialog.opener);
+      expect(before, `${dialog.name}: the mocked page did not scroll`).toBeGreaterThan(0);
+
+      // A real pointer click sets the pointer modality, so the first stop's ring
+      // proves `:focus` paints where `:focus-visible` would not.
+      await clickByPointer(page, dialog.opener);
+      const panel = page.getByRole('dialog', { name: dialog.name });
+      await expect(panel).toBeVisible();
+
+      expect(await page.evaluate(() => document.body.style.overflow), `${dialog.name}: body overflow`).toBe('hidden');
+      expect(await page.evaluate(() => window.scrollY), `${dialog.name}: opening moved the page`).toBe(before);
+
+      await expectActiveStopRing(page, `${dialog.name}: pointer-opened first stop`);
+
+      await wheelOutsidePanel(page);
+      expect(await page.evaluate(() => window.scrollY), `${dialog.name}: wheel moved the locked page`).toBe(before);
+
+      await expectEveryTabStopRing(page, panel, dialog.name);
+
+      await page.keyboard.press('Escape');
+      await expect(panel).not.toBeVisible();
+
+      // The offset survives the close before any further wheel, exactly.
+      expect(await page.evaluate(() => document.body.style.overflow), `${dialog.name}: body overflow after close`).toBe('');
+      expect(await page.evaluate(() => window.scrollY), `${dialog.name}: closing moved the page`).toBe(before);
+
+      await wheelOutsidePanel(page);
+      expect(await page.evaluate(() => window.scrollY), `${dialog.name}: the page did not scroll after close`).toBeGreaterThan(before);
+    }
+
+    expect(state.mutations).toEqual([]);
+  });
+
+  test('stays locked through the real outfit-save to look-dialog handoff', async ({ page }) => {
+    await page.setViewportSize({ width: 900, height: 520 });
+    const state: MockState = { outfits: scrollingOutfits(6), mutations: [] };
+    await setupOutfitMocks(page, state);
+    await page.goto('/wardrobe');
+
+    const createButton = page.getByRole('button', { name: '+ Create Outfit', exact: true });
+    const before = await scrollOpenerIntoView(page, createButton);
+    expect(before, 'the mocked page did not scroll').toBeGreaterThan(0);
+    await clickByPointer(page, createButton);
+
+    const outfitDialog = page.getByRole('dialog', { name: 'Create Outfit' });
+    await expect(outfitDialog).toBeVisible();
+    await outfitDialog.getByRole('button', { name: 'T-Shirt', exact: true }).click();
+    await outfitDialog.getByRole('button', { name: 'Jeans', exact: true }).click();
+    await page.getByPlaceholder('e.g. Weekend Casual').fill('Office Ready');
+    await outfitDialog.getByRole('button', { name: 'Create Outfit', exact: true }).click();
+
+    // The save closes the outfit dialog and opens the look confirmation; the
+    // page must stay locked because the look dialog still holds the count.
+    const lookDialog = page.getByRole('dialog', { name: 'Generate a look for Office Ready?' });
+    await expect(lookDialog).toBeVisible();
+    await expect(outfitDialog).not.toBeVisible();
+    expect(await page.evaluate(() => document.body.style.overflow)).toBe('hidden');
+    expect(await page.evaluate(() => window.scrollY)).toBe(before);
+
+    await wheelOutsidePanel(page);
+    expect(await page.evaluate(() => window.scrollY)).toBe(before);
+
+    await lookDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(lookDialog).not.toBeVisible();
+    expect(await page.evaluate(() => document.body.style.overflow)).toBe('');
+    expect(await page.evaluate(() => window.scrollY)).toBe(before);
+
+    await wheelOutsidePanel(page);
+    expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(before);
+
+    expect(state.mutations).toEqual([
+      { method: 'POST', path: '/outfits', body: { name: 'Office Ready', wearable_item_ids: [ITEM_ID_1, ITEM_ID_2] } },
+    ]);
   });
 });

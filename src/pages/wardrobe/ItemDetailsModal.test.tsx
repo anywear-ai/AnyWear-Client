@@ -36,6 +36,42 @@ import type { GetWardrobe200Item } from '../../api/model/getWardrobe200Item';
 
 const postMock = vi.mocked(AXIOS_INSTANCE.post);
 
+const FOCUSABLE = 'a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])';
+
+const FIELD_NAMES = [
+  'Name',
+  'Category',
+  'Color',
+  'Material',
+  'Design',
+  'Fit',
+  'Pattern',
+  'Neckline',
+  'Sleeve Length',
+  'Pockets',
+  'Hemline',
+  'Vibe',
+  'Brand',
+  'Weather Tags',
+];
+
+/** The tokens jsdom cannot paint: both the width and the colour must be authored. */
+function expectRingTokens(element: HTMLElement, state = 'focus:') {
+  const tokens = element.className.split(/\s+/);
+  expect(tokens, `${element.tagName} is missing ${state}ring-2`).toContain(`${state}ring-2`);
+  expect(tokens, `${element.tagName} is missing ${state}ring-indigo-500`).toContain(`${state}ring-indigo-500`);
+}
+
+function expectEveryStopRings(dialog: HTMLElement) {
+  const stops = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE))
+    .filter((element) => !element.classList.contains('hidden'));
+  expect(stops.length).toBeGreaterThan(0);
+
+  for (const stop of stops) {
+    expectRingTokens(stop);
+  }
+}
+
 function makeItem(overrides: Partial<GetWardrobe200Item> = {}): GetWardrobe200Item {
   return {
     id: 'item-1',
@@ -64,8 +100,9 @@ function renderModal(item: GetWardrobe200Item) {
 
 describe('ItemDetailsModal', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
     cleanup();
+    vi.clearAllMocks();
+    document.body.style.overflow = '';
     vi.mocked(usePatchWardrobeItemsId).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as any);
     vi.mocked(useDeleteWardrobeItemsId).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as any);
     vi.mocked(usePostWardrobeItemsItemIdRetag).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as any);
@@ -74,6 +111,8 @@ describe('ItemDetailsModal', () => {
   });
 
   afterEach(() => {
+    cleanup();
+    document.body.style.overflow = '';
     vi.restoreAllMocks();
   });
 
@@ -159,5 +198,67 @@ describe('ItemDetailsModal', () => {
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByText('Auto-tagging failed unexpectedly')).toBeNull();
     expect(screen.getByRole('button', { name: /re-tag/i })).toBeInTheDocument();
+  });
+
+  it('announces all 14 field labels without the required asterisk, plus the View and Primary controls', () => {
+    renderModal(makeItem());
+
+    for (const name of FIELD_NAMES) {
+      expect(screen.getByRole('textbox', { name }), `${name} is not a named textbox`).toBeInTheDocument();
+    }
+    expect(screen.getByRole('combobox', { name: 'View' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Primary' })).toBeInTheDocument();
+  });
+
+  it('gives every icon-only gallery control an authored name', () => {
+    renderModal(makeItem());
+
+    expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Show image 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove image 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add image' })).toBeInTheDocument();
+  });
+
+  it('paints the 2px indigo ring tokens on every focus stop in the dialog', () => {
+    renderModal(makeItem());
+
+    expectEveryStopRings(screen.getByRole('dialog', { name: 'Item Details' }));
+  });
+
+  it('keeps the ring tokens on the disabled save control while a save is in flight', () => {
+    vi.mocked(usePatchWardrobeItemsId).mockReturnValue({ mutateAsync: vi.fn(), isPending: true } as any);
+    renderModal(makeItem());
+
+    const save = screen.getByRole('button', { name: 'Saving...' });
+    expect(save).toBeDisabled();
+    expectRingTokens(save);
+    expectEveryStopRings(screen.getByRole('dialog', { name: 'Item Details' }));
+  });
+
+  it('still rings every remaining stop when the item has no images', () => {
+    renderModal(makeItem({ images: [] }));
+
+    expect(screen.queryByRole('button', { name: /Show image/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add image' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'View' })).toBeNull();
+    expectEveryStopRings(screen.getByRole('dialog', { name: 'Item Details' }));
+  });
+
+  it('locks the body while open and restores it on unmount', () => {
+    const { unmount } = renderModal(makeItem());
+    expect(document.body.style.overflow).toBe('hidden');
+
+    unmount();
+    expect(document.body.style.overflow).toBe('');
+  });
+
+  it('locks nothing while closed or without an item', () => {
+    const { rerender } = render(
+      <ItemDetailsModal item={makeItem()} isOpen={false} onClose={vi.fn()} onSuccess={vi.fn()} />,
+    );
+    expect(document.body.style.overflow).toBe('');
+
+    rerender(<ItemDetailsModal item={null} isOpen onClose={vi.fn()} onSuccess={vi.fn()} />);
+    expect(document.body.style.overflow).toBe('');
   });
 });

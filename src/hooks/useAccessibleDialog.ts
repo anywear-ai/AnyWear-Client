@@ -9,7 +9,31 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 
-/** Adds basic keyboard focus management to the Client's existing modal overlays. */
+// The page behind a dialog must not scroll. One lock is shared by every open
+// dialog: the first acquisition captures the body's inline overflow and hides
+// it, and only the last release restores that exact value. Counting rather than
+// saving per instance keeps the outfit-save handoff locked: the look dialog can
+// acquire before or after the outfit dialog releases without unlocking early.
+let lockCount = 0;
+let savedBodyOverflow: string | null = null;
+
+function lockBodyScroll() {
+  if (lockCount === 0) {
+    savedBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+  }
+  lockCount += 1;
+}
+
+function unlockBodyScroll() {
+  lockCount = Math.max(0, lockCount - 1);
+  if (lockCount === 0 && savedBodyOverflow !== null) {
+    document.body.style.overflow = savedBodyOverflow;
+    savedBodyOverflow = null;
+  }
+}
+
+/** Adds keyboard focus management and a counted body scroll lock to the Client's existing modal overlays. */
 export default function useAccessibleDialog(onClose: () => void, enabled = true) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
@@ -20,6 +44,7 @@ export default function useAccessibleDialog(onClose: () => void, enabled = true)
 
   useEffect(() => {
     if (!enabled) return;
+    lockBodyScroll();
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
     const focusable = dialog?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
@@ -54,6 +79,7 @@ export default function useAccessibleDialog(onClose: () => void, enabled = true)
     document.addEventListener('keydown', handleKeyDown);
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
+      unlockBodyScroll();
       previousFocus?.focus();
     };
   }, [enabled]);

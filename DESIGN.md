@@ -294,8 +294,8 @@ composes the utilities below.
 | Destructive action | `bg-red-600 text-white rounded-md`, hover `bg-red-700` |
 | Card | `bg-white rounded-lg shadow`, `p-6` for page-level cards; `hover:shadow-md` where the card is a link or tile |
 | History card actions | `bg-black/50` overlay over the whole card, revealed by pointer hover or by focus within the overlay itself; the actions stay in the tab order and the accessibility tree while hidden, and Delete keeps the overlay visible while it swaps the action set in place for a confirmation (`Yes, Delete` / `Cancel`) rather than opening a dialog |
-| Dialog panel | White surface, `rounded-xl shadow-xl`, `z-10` for Add/Details and `z-50` for outfit dialogs and the history image viewer, whose panel is the image itself; dismissed by backdrop click and Escape, with focus moved into the panel on open and restored to the control that opened it on close |
-| Text input | White surface with `border-gray-300` and `rounded-md`; focus moves the border and ring color to indigo |
+| Dialog panel | White surface, `rounded-xl shadow-xl`, `z-10` for Add/Details and `z-50` for outfit dialogs and the history image viewer, whose panel is the image itself; dismissed by backdrop click and Escape, with focus moved into the panel on open and restored to the control that opened it on close. While any panel is open the page behind it does not scroll: the shared dialog hook hides body overflow on the first open panel and restores the previous inline value when the last one closes. |
+| Text input | White surface with `border-gray-300` and `rounded-md`; focus moves the border to indigo and, in the dialogs, paints the 2px indigo ring inset where a scrolling form would clip an offset. |
 | Status badge | `rounded-full` pill with `text-xs`, one of the pending, processing, or failed pairs from [Colors](#colors), always paired with text |
 | Selection card | `aspect-[4/5]` image with `rounded-lg`; unselected uses a gray border, selected uses an indigo border with `ring` and a text label |
 | Credit pill | `rounded-full px-3 py-1.5 text-sm font-medium`, colored by remaining balance: green above 2, amber at 1–2, red at 0 |
@@ -307,9 +307,16 @@ Tailwind's `focus-within` and `group-hover` utilities instead of naming a projec
 recorded because the reveal is the component's new interaction state, and an undocumented
 interaction state is the larger cost.
 
-Focus is `focus:ring-2` with an indigo ring, usually with `focus:ring-offset-2`, defined
-per control rather than inherited from a shared component. A ring color without a ring
-width is not a focus treatment.
+Focus in the four Wardrobe dialogs is a 2px indigo ring, defined per control rather
+than inherited from a shared component: `focus:` on controls, `focus-within:` on the label
+that paints for AddItem's `sr-only` file input, `ring-offset-2` on buttons outside a clipping
+container, `ring-inset` where a scrolling form or list would clip an offset, and
+`focus:border-indigo-500` on the text inputs and the View select; `:focus` also paints on the
+panel's opening focus and on a pointer click. The dialogs set both a width and a color, so the
+ring is indigo whatever the control's text color. A ring color without a ring width is not a
+focus treatment, and a width alone falls back to `currentColor`, which does not reliably
+contrast; both are set here. Other surfaces keep their own focus rules and are not changed
+here.
 
 Motion uses Tailwind's defaults: `transition-*` utilities at 150ms with `cubic-bezier(0.4, 0,
 0.2, 1)`, plus `animate-spin` for busy spinners and `animate-pulse` for skeletons. No custom
@@ -327,6 +334,9 @@ duration, easing, or animation library is defined.
 - Do keep the fixed image proportions: `aspect-[4/5]` covers for garments and base photos,
   contain for generated results.
 - Do pair every colored state with text, because color alone does not carry the meaning.
+- Do name every control from its own text: `htmlFor`/`id` or a wrapping `<label>` for one
+  control, `role="group"` with `aria-labelledby` (or `<fieldset>`/`<legend>`) for a group, and
+  `sr-only` text or `aria-label` for an icon-only control.
 - Don't describe a role such as "primary action" as a CSS custom property. The project
   declares no `@theme` layer, and the token layer is documentation.
 - Don't add a color, font, spacing step, or radius without a source definition in the same

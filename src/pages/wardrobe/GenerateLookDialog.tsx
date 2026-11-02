@@ -59,7 +59,7 @@ export default function GenerateLookDialog({
               type="button"
               onClick={onCancel}
               disabled={isSubmitting}
-              className="rounded-lg bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50"
+              className="rounded-lg bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
             >
               Cancel
             </button>
@@ -67,7 +67,7 @@ export default function GenerateLookDialog({
               type="button"
               onClick={onConfirm}
               disabled={isSubmitting}
-              className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isSubmitting ? 'Starting...' : 'Generate look (1 credit)'}
             </button>

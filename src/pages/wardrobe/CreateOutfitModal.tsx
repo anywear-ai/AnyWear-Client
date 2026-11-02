@@ -91,7 +91,8 @@ export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved,
             <h2 id="outfit-dialog-title" className="text-lg font-semibold text-gray-900">
               {isEditMode ? 'Edit Outfit' : 'Create Outfit'}
             </h2>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-500">
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+              <span className="sr-only">Close</span>
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
               </svg>
@@ -99,22 +100,23 @@ export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved,
           </div>
 
           <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Outfit Name (optional)</label>
+            <label htmlFor="outfit-dialog-name" className="block text-sm font-medium text-gray-700 mb-1">Outfit Name (optional)</label>
             <input
               type="text"
+              id="outfit-dialog-name"
               maxLength={200}
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Weekend Casual"
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
             />
           </div>
 
           <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <div id="outfit-dialog-items-label" className="block text-sm font-medium text-gray-700 mb-2">
               Select Items ({selectedIds.length} selected)
-            </label>
-            <div className="max-h-64 overflow-y-auto space-y-1 border border-gray-200 rounded-lg p-2">
+            </div>
+            <div role="group" aria-labelledby="outfit-dialog-items-label" className="max-h-64 overflow-y-auto space-y-1 border border-gray-200 rounded-lg p-2">
               {wardrobeData.length === 0 ? (
                 <p className="text-sm text-gray-400 text-center py-4">No items in wardrobe yet.</p>
               ) : (
@@ -124,7 +126,7 @@ export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved,
                     <button
                       key={item.id}
                       onClick={() => toggleItem(item.id)}
-                      className={`w-full flex items-center gap-3 p-2 rounded-lg text-left text-sm transition-colors ${isSelected ? 'bg-indigo-50 border border-indigo-200' : 'hover:bg-gray-50 border border-transparent'}`}
+                      className={`w-full flex items-center gap-3 p-2 rounded-lg text-left text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 ${isSelected ? 'bg-indigo-50 border border-indigo-200' : 'hover:bg-gray-50 border border-transparent'}`}
                     >
                       <div className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 ${isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-gray-300'}`}>
                         {isSelected && (
@@ -149,13 +151,13 @@ export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved,
                   <button
                     onClick={handleDelete}
                     disabled={isDeleting}
-                    className="px-3 py-1.5 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50"
+                    className="px-3 py-1.5 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
                   >
                     {isDeleting ? 'Deleting...' : 'Confirm'}
                   </button>
                   <button
                     onClick={() => setShowDeleteConfirm(false)}
-                    className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+                    className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                   >
                     Cancel
                   </button>
@@ -163,7 +165,7 @@ export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved,
               ) : (
                 <button
                   onClick={() => setShowDeleteConfirm(true)}
-                  className="px-3 py-1.5 text-sm font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100"
+                  className="px-3 py-1.5 text-sm font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                 >
                   Delete Outfit
                 </button>
@@ -174,14 +176,14 @@ export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved,
             <div className="flex gap-3">
               <button
                 onClick={onClose}
-                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
               >
                 Cancel
               </button>
               <button
                 onClick={handleSubmit}
                 disabled={selectedIds.length === 0 || isPending}
-                className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {submitLabel}
               </button>

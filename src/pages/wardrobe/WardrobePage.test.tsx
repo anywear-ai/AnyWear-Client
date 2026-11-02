@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import '@testing-library/jest-dom/vitest';
-import { act, render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import WardrobePage from './WardrobePage';
 
@@ -10,6 +10,7 @@ const ITEM_URL = 'https://anywear-beta.s3.amazonaws.com/wardrobe/coat.jpg?X-Amz-
 
 interface CreateOutfitModalMockProps {
   isOpen: boolean;
+  onClose?: () => void;
   onSaved?: (outfit: { id: string; name?: string | null }) => void;
   outfit?: { id: string; name?: string | null } | null;
 }
@@ -40,25 +41,40 @@ vi.mock('../../components/CachedImage', () => ({
 
 vi.mock('./AddItemModal', () => ({ default: () => null }));
 vi.mock('./ItemDetailsModal', () => ({ default: () => null }));
-vi.mock('./CreateOutfitModal', () => ({
-  default: (props: CreateOutfitModalMockProps) => {
-    // Record the real props so the tests can call the page's own onSaved wiring
-    // in both create and edit mode instead of relying on this stand-in.
-    createOutfitModal.props = props;
+vi.mock('./CreateOutfitModal', async () => {
+  const { default: useAccessibleDialog } = await import('../../hooks/useAccessibleDialog');
+
+  function StandInCreateOutfitModal(props: CreateOutfitModalMockProps) {
+    // The real dialog holds one counted body lock while it is open; the stand-in
+    // runs the same hook so the page's overlap wiring is exercised against real
+    // locking instead of a stub that never locks.
+    const dialogRef = useAccessibleDialog(() => {}, props.isOpen);
     if (!props.isOpen) return null;
     return (
-      <button
-        type="button"
-        onClick={() => props.onSaved?.({
-          id: props.outfit?.id ?? 'outfit-1',
-          name: props.outfit?.name ?? 'Rainy Day',
-        })}
-      >
-        Save outfit
-      </button>
+      <div ref={dialogRef} data-testid="create-outfit-stand-in" tabIndex={-1}>
+        <button
+          type="button"
+          onClick={() => props.onSaved?.({
+            id: props.outfit?.id ?? 'outfit-1',
+            name: props.outfit?.name ?? 'Rainy Day',
+          })}
+        >
+          Save outfit
+        </button>
+        <button type="button" onClick={() => props.onClose?.()}>Close outfit</button>
+      </div>
     );
-  },
-}));
+  }
+
+  return {
+    default: (props: CreateOutfitModalMockProps) => {
+      // Record the real props so the tests can call the page's own onSaved wiring
+      // in both create and edit mode instead of relying on this stand-in.
+      createOutfitModal.props = props;
+      return <StandInCreateOutfitModal {...props} />;
+    },
+  };
+});
 vi.mock('../../lib/sse', () => ({ connectSse: () => ({ close: () => {} }) }));
 
 import { useGetOutfits } from '../../api/endpoints/outfits/outfits';
@@ -311,5 +327,77 @@ describe('WardrobePage saved outfit look cards', () => {
     expect(dialog).toHaveTextContent('Generate a look for Rainy Day Updated?');
     expect(dialog).toHaveTextContent('This uses 1 of your daily credits.');
     expect(generateLook).not.toHaveBeenCalled();
+  });
+});
+
+describe('WardrobePage dialog scroll lock', () => {
+  beforeEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    createOutfitModal.props = null;
+    generateLook.mockReset();
+    generateLook.mockResolvedValue({ generation_id: 'gen-2', outfit_id: 'outfit-1' });
+    vi.mocked(useGetWardrobe).mockReturnValue({ data: [], isLoading: false } as any);
+    vi.mocked(useGetWardrobeCategories).mockReturnValue({ data: { categories: [] } } as any);
+    vi.mocked(useDeleteWardrobeItemsId).mockReturnValue({ mutate: vi.fn() } as any);
+    vi.mocked(usePostVtoGenerations).mockReturnValue({ mutateAsync: generateLook, isPending: false } as any);
+    mockOutfits(outfitResponse(outfit()));
+    document.body.style.overflow = '';
+  });
+
+  afterEach(() => {
+    cleanup();
+    document.body.style.overflow = '';
+    vi.clearAllMocks();
+  });
+
+  it('does not lock while the look dialog is mounted but closed', () => {
+    renderPage();
+
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.body.style.overflow).toBe('');
+  });
+
+  it('locks from the look dialog open until Cancel and rings both buttons', () => {
+    renderPage();
+    expect(document.body.style.overflow).toBe('');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate look for Rainy Day' }));
+    const dialog = screen.getByRole('dialog', { name: 'Generate a look for Rainy Day?' });
+    expect(document.body.style.overflow).toBe('hidden');
+
+    const cancel = within(dialog).getByRole('button', { name: 'Cancel' });
+    const confirm = within(dialog).getByRole('button', { name: 'Generate look (1 credit)' });
+    for (const button of [cancel, confirm]) {
+      const tokens = button.className.split(/\s+/);
+      expect(tokens).toContain('focus:ring-2');
+      expect(tokens).toContain('focus:ring-indigo-500');
+    }
+
+    fireEvent.click(cancel);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.body.style.overflow).toBe('');
+  });
+
+  it('stays locked while the outfit dialog closes under the look dialog', () => {
+    mockOutfits({ outfits: [] });
+    renderPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create Outfit' }));
+    const outfitDialog = screen.getByTestId('create-outfit-stand-in');
+    expect(document.body.style.overflow).toBe('hidden');
+
+    // The save opens the look confirmation before the outfit dialog closes: the
+    // real CreateOutfitModal calls onSaved, then onClose.
+    fireEvent.click(within(outfitDialog).getByRole('button', { name: 'Save outfit' }));
+    const lookDialog = screen.getByRole('dialog', { name: 'Generate a look for Rainy Day?' });
+    expect(document.body.style.overflow).toBe('hidden');
+
+    fireEvent.click(within(outfitDialog).getByRole('button', { name: 'Close outfit' }));
+    expect(document.body.style.overflow).toBe('hidden');
+    expect(screen.getByRole('dialog', { name: 'Generate a look for Rainy Day?' })).toBeInTheDocument();
+
+    fireEvent.click(within(lookDialog).getByRole('button', { name: 'Cancel' }));
+    expect(document.body.style.overflow).toBe('');
   });
 });

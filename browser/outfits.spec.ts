@@ -85,6 +85,31 @@ function outfitCard(page: Page, name: string) {
   return page.getByRole('heading', { name, exact: true }).locator('..').locator('..');
 }
 
+/**
+ * The dialog's backdrop is the `[role="dialog"]` panel's preceding sibling. The
+ * computed `background-color` serializes as `oklab(… / 0.75)` rather than
+ * `rgba(…)`, so the rendered alpha is read by painting the computed color onto a
+ * 1×1 canvas and multiplying the pixel alpha by the computed opacity.
+ */
+async function backdropPaint(page: Page, dialogName: string) {
+  const backdrop = page
+    .getByRole('dialog', { name: dialogName })
+    .locator('xpath=preceding-sibling::*[1]');
+  return backdrop.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const canvas = document.createElement('canvas');
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext('2d')!;
+    context.fillStyle = style.backgroundColor;
+    context.fillRect(0, 0, 1, 1);
+    return {
+      color: style.backgroundColor,
+      alpha: (context.getImageData(0, 0, 1, 1).data[3] / 255) * Number(style.opacity),
+    };
+  });
+}
+
 test.describe('Outfit Management (mocked Client integration)', () => {
   test.beforeEach(async ({ page }) => {
     await mockAmplifySession(page);
@@ -209,6 +234,38 @@ test.describe('Outfit Management (mocked Client integration)', () => {
 
     await expect(dialog).not.toBeVisible();
     await expect(opener).toBeFocused();
+    expect(state.mutations).toEqual([]);
+  });
+
+  // The jsdom suite cannot paint, so the backdrop's intended appearance is only
+  // observable here: each of the four wardrobe dialogs dims the page to the same
+  // gray-500 at 75% alpha. A retired spelling leaves the backdrop opaque and fails.
+  test('renders a translucent backdrop behind every wardrobe dialog', async ({ page }) => {
+    const state: MockState = { outfits: [structuredClone(mockOutfit)], mutations: [] };
+    await setupOutfitMocks(page, state);
+    await page.goto('/wardrobe');
+
+    const dialogs = [
+      { name: 'Add Wardrobe Item', open: () => page.getByRole('button', { name: 'Add Item', exact: true }).click() },
+      { name: 'Item Details', open: () => page.getByRole('button', { name: 'View T-Shirt details' }).click() },
+      { name: 'Create Outfit', open: () => page.getByRole('button', { name: /Create Outfit/ }).first().click() },
+      { name: 'Generate a look for Weekend Casual?', open: () => page.getByRole('button', { name: 'New look for Weekend Casual', exact: true }).click() },
+    ];
+
+    const paints: Array<{ name: string; color: string; alpha: number }> = [];
+    for (const dialog of dialogs) {
+      await dialog.open();
+      await expect(page.getByRole('dialog', { name: dialog.name })).toBeVisible();
+      paints.push({ name: dialog.name, ...(await backdropPaint(page, dialog.name)) });
+      await page.keyboard.press('Escape');
+      await expect(page.getByRole('dialog', { name: dialog.name })).not.toBeVisible();
+    }
+
+    // Every dialog paints the same color at 75% alpha, and none paints opaque.
+    for (const paint of paints) {
+      expect(paint.alpha, `${paint.name} backdrop alpha`).toBeCloseTo(0.75, 2);
+    }
+    expect(new Set(paints.map((paint) => paint.color)).size).toBe(1);
     expect(state.mutations).toEqual([]);
   });
 

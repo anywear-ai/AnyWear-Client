@@ -85,7 +85,7 @@ export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved,
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto">
       <div className="flex items-center justify-center min-h-screen px-4">
-        <div className="fixed inset-0 bg-gray-500 bg-opacity-75" onClick={onClose} />
+        <div className="fixed inset-0 bg-gray-500/75" onClick={onClose} />
         <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="outfit-dialog-title" tabIndex={-1} className="relative bg-white rounded-xl shadow-xl max-w-lg w-full p-5 sm:p-6">
           <div className="flex items-center justify-between mb-4">
             <h2 id="outfit-dialog-title" className="text-lg font-semibold text-gray-900">

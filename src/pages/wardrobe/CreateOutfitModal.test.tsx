@@ -174,9 +174,11 @@ describe('CreateOutfitModal', () => {
     setupMocks();
     render(<CreateOutfitModal {...defaultProps} onClose={onClose} />);
 
-    // Click the backdrop (first fixed inset div before the modal content)
-    const backdrop = document.querySelector('.bg-gray-500.bg-opacity-75');
-    if (backdrop) fireEvent.click(backdrop);
+    // The backdrop is the dialog panel's immediately preceding sibling; the
+    // test asserts the dismissal, not the styling class that produced it.
+    const backdrop = screen.getByRole('dialog').previousElementSibling;
+    expect(backdrop).not.toBeNull();
+    fireEvent.click(backdrop!);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

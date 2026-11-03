@@ -1,16 +1,16 @@
-name: Release Beta Web Client
+name: Deploy Beta Web Client
 
-# The one manual entry for this repository: `operation: release` builds the
+# The one manual entry for this repository: `operation: deploy` builds the
 # reviewed main revision, verifies it without credentials, and only then assumes
 # the dedicated publish role to sync the built assets and record the publication.
 on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Release operation
+        description: Deploy operation
         type: choice
         required: true
-        options: [release]
+        options: [deploy]
 
       # The interface values are declared here, at dispatch time, because the
       # credential-free build cannot resolve them from CloudFormation or SSM.
@@ -42,7 +42,7 @@ jobs:
     name: Build the reviewed Beta web client
     # The stage switch and the main ref gate the chain. `build` and `verify`
     # hold no AWS credential; `deploy` waits for `verify`.
-    if: vars.ENABLE_BETA_MUTATION == 'true' && github.ref == 'refs/heads/main' && inputs.operation == 'release'
+    if: vars.ENABLE_BETA_MUTATION == 'true' && github.ref == 'refs/heads/main' && inputs.operation == 'deploy'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -144,7 +144,7 @@ jobs:
         run: pnpm run test:run
 
       # The browser suite also runs in check.yml on every push to main. It is
-      # repeated here so the release chain verifies the exact revision it is
+      # repeated here so the deploy chain verifies the exact revision it is
       # about to publish instead of relying on an earlier run.
       - name: Install Chromium
         run: pnpm exec playwright install chromium --with-deps

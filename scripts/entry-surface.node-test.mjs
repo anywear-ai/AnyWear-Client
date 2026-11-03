@@ -5,8 +5,8 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 // #163: the repository-side census of the entry face. Client ends this change with
-// exactly two entries — one automatic check and one manual release — one manual
-// dispatch surface and one activation switch, and the release chain keeps the only
+// exactly two entries — one automatic check and one manual deploy — one manual
+// dispatch surface and one activation switch, and the deploy chain keeps the only
 // AWS-credential job behind the credential-free verify job with a credential-free
 // record job after it. These are source assertions, read as text with no YAML
 // dependency, so the next change cannot drift the entry face without failing
@@ -81,7 +81,7 @@ test('the workflow directory contains exactly the five repository workflows', ()
   assert.deepEqual(workflowFiles, ['browser.yml', 'build.yml', 'check.yml', 'release.yml', 'test.yml']);
 });
 
-test('the repository exposes exactly two entries: one automatic check and one manual release', () => {
+test('the repository exposes exactly two entries: one automatic check and one manual deploy', () => {
   // An entry is a workflow with a repository event or a dispatch surface. Everything
   // else must be a called workflow, which has no entry identity of its own.
   const entries = workflowFiles.filter((name) => {
@@ -105,12 +105,12 @@ test('the manual dispatch surface is exactly one workflow, release.yml', () => {
   assert.doesNotMatch(check, /workflow_dispatch/, 'the automatic check has no dispatch surface');
 });
 
-test('release.yml offers exactly one required choice operation: release', () => {
+test('release.yml offers exactly one required choice operation: deploy', () => {
   const release = read(manualEntry);
   const operation = inputBlock(release, 'operation');
   assert.match(operation, /^ {8}type: choice$/m);
   assert.match(operation, /^ {8}required: true$/m);
-  assert.match(operation, /^ {8}options: \[release\]$/m);
+  assert.match(operation, /^ {8}options: \[deploy\]$/m);
 });
 
 test('only deploy holds an environment and an OIDC token, after verify, with a credential-free record', () => {
@@ -192,12 +192,12 @@ test('check.yml wires the three called workflows and maps the App secret only on
 // stack, which owns both CloudFront distributions and the `ApiBaseUrl` output.
 // The retired workload stack read was denied and left the publish with no asset
 // sync, no invalidation and no publication record.
-test('#188: the release deploy reads the Beta Base stack only and resolves its interface', () => {
+test('#188: the deploy job reads the Beta Base stack only and resolves its interface', () => {
   const release = read(manualEntry);
   // Assembled from its parts so this guard does not itself defeat the issue's
   // repository-wide census that the retired stack name has zero occurrences.
   const retiredStack = ['AnyWearWorkloadStack', 'beta'].join('-');
-  assert.ok(!release.includes(retiredStack), 'the release path must not name the retired stack');
+  assert.ok(!release.includes(retiredStack), 'the deploy path must not name the retired stack');
 
   const settings = stepSection(release, 'Resolve Beta deployment settings');
   assert.deepEqual(

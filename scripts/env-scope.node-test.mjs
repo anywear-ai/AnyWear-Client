@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 // the same class as Infra and E2E. The fix was at the configuration layer
 // (repository-scoped variables, no stale beta switch); this file makes the
 // structure that prevented the defect visible in source, so a regression fails
-// `pnpm run test:run` instead of the next release.
+// `pnpm run test:run` instead of the next deploy.
 //
 // The text is sliced without a YAML dependency, in the same style as the other
 // repository source guards.
@@ -40,7 +40,7 @@ const REPOSITORY_SCOPED = {
     'AWS_REGION',
     // Repository-scoped: dedicated Beta publish-role ARN; resolvable before any environment exists.
     'CLIENT_PUBLISH_ROLE_ARN',
-    // Repository-scoped: the single stage switch that gates the release chain; resolvable before any environment exists.
+    // Repository-scoped: the single stage switch that gates the deploy chain; resolvable before any environment exists.
     'ENABLE_BETA_MUTATION',
   ],
   secrets: [
@@ -126,7 +126,7 @@ test('a job without an environment reads only repository-scoped configuration', 
   assert.ok(jobsWithEnvironment > 0, 'at least one job must declare an environment for this guard to be meaningful');
 });
 
-test('the release chain keeps the publish role at repository scope until the single environment job', () => {
+test('the deploy chain keeps the publish role at repository scope until the single environment job', () => {
   const release = read('release.yml');
   const jobs = Object.fromEntries(jobEntries(release).map((job) => [job.name, job.section]));
   assert.deepEqual(Object.keys(jobs), ['build', 'verify', 'deploy', 'record']);
@@ -163,7 +163,7 @@ test('the release chain keeps the publish role at repository scope until the sin
   assert.match(jobs.record, /^ {4}needs: \[deploy\]$/m);
 });
 
-test('the automatic entry stays automatic and the release entry stays the only dispatch surface', () => {
+test('the automatic entry stays automatic and the deploy entry stays the only dispatch surface', () => {
   const dispatchSurfaces = workflowFiles.filter((file) => /^ {2}workflow_dispatch:$/m.test(read(file)));
   assert.deepEqual(dispatchSurfaces, ['release.yml']);
 

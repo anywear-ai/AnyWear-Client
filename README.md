@@ -68,7 +68,7 @@ single `operation: deploy`. `build.yml`, `test.yml` and `browser.yml` are
 ### Beta web publication
 
 See the [Beta publication runbook](docs/beta-web-publication.md) for the dedicated
-Client role, the declared interface inputs, the build/verify/deploy/record chain, and
+Client role, the declared interface inputs, the build/verify/deploy/record job sequence, and
 the deployment evidence produced by `release.yml`.
 
 ### Source CI credentials

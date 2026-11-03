@@ -75,7 +75,7 @@ Before writing anything, `deploy` resolves the live Beta interface:
 
 The whole table is one `DescribeStacks` read of `AnyWearPlatformStack-beta` — the
 Beta `Base` stack that owns both CloudFront distributions — plus the two SSM
-parameters; the release path reads no other stack.
+parameters; the deploy path reads no other stack.
 
 It compares each value with the interface recorded in
 `dist/build-metadata.json` and exits before `aws s3 sync` or the CloudFront
@@ -103,13 +103,13 @@ false and every job is skipped.
 
 | Beta variable | Value |
 | --- | --- |
-| `ENABLE_BETA_MUTATION` | `true` to enable the manual release; `false` skips the whole chain |
+| `ENABLE_BETA_MUTATION` | `true` to enable the manual deploy; `false` skips the whole chain |
 | `AWS_ACCOUNT_ID` | `650880818323` |
 | `AWS_REGION` | `ap-east-1` |
 | `CLIENT_PUBLISH_ROLE_ARN` | `arn:aws:iam::650880818323:role/beta-client-publish-role` |
 
 Infra owns the dedicated role. It needs `DescribeStacks` on
-`AnyWearPlatformStack-beta`, the Beta `Base` stack the release path reads,
+`AnyWearPlatformStack-beta`, the Beta `Base` stack the deploy path reads,
 `GetParameter` on the two Cognito parameters, `ListBucket` and object
 `GetObject`/`PutObject`/`DeleteObject` on the existing Client bucket, and
 `CreateInvalidation` on its distribution. It cannot deploy CDK/CFN, assume
@@ -122,12 +122,12 @@ record provider limitations and operational coordination where needed. An
 environment named `beta` alone does not prove configured protections. Source
 delivery does not provision the role or configure those protections.
 
-## Running a release
+## Running a deployment
 
 1. Select the reviewed Client revision on `main` and dispatch `release.yml` from
    that branch with `operation: deploy` and the three declared interface values.
    Publication has no migration window token, issue-comment URL or deadline
-   inputs. Release coordination belongs in the publication record, rather than a
+   inputs. Deployment coordination belongs in the publication record, rather than a
    permanent dependency on an Issue or receipt.
 2. `build` produces the assets and metadata from that exact SHA, and `verify`
    checks publication identity, the declared interface, the compiled assets, the
@@ -148,7 +148,7 @@ of Infra's deployment queue. Coordinate conflicting maintenance/deployment
 operations and verify prior jobs/cloud operations finish before changing
 ownership. Disabling the stage switch does not revoke a job's existing
 configuration snapshot or stop an already-started upload. A retry or recovery
-uses the ordinary release entry and the same identity/build/live-interface
+uses the ordinary deploy entry and the same identity/build/live-interface
 verification; no new scheduling token is required.
 
 ## Migration status

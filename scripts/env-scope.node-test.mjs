@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 // the same class as Infra and E2E. The fix was at the configuration layer
 // (repository-scoped variables, no stale beta switch); this file makes the
 // structure that prevented the defect visible in source, so a regression fails
-// `pnpm run test:run` instead of the next release.
+// `pnpm run test:run` instead of the next deploy.
 //
 // The text is sliced without a YAML dependency, in the same style as the other
 // repository source guards.
@@ -163,7 +163,7 @@ test('the deploy chain keeps the publish role at repository scope until the sing
   assert.match(jobs.record, /^ {4}needs: \[deploy\]$/m);
 });
 
-test('the automatic entry stays automatic and the release entry stays the only dispatch surface', () => {
+test('the automatic entry stays automatic and the deploy entry stays the only dispatch surface', () => {
   const dispatchSurfaces = workflowFiles.filter((file) => /^ {2}workflow_dispatch:$/m.test(read(file)));
   assert.deepEqual(dispatchSurfaces, ['release.yml']);
 

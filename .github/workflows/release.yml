@@ -1,9 +1,13 @@
 name: Deploy Beta Web Client
 
-# The one manual entry for this repository: `operation: deploy` builds the
-# reviewed main revision, verifies it without credentials, and only then assumes
-# the dedicated publish role to sync the built assets and record the publication.
+# The one publication entry for this repository, on two events: a merge to `main`
+# publishes the reviewed revision with no typed values, and a manual
+# `operation: deploy` dispatch keeps the three interface overrides. Either event
+# builds the revision, verifies it without credentials, and only then assumes the
+# dedicated publish role to sync the built assets and record the publication.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       operation:
@@ -12,8 +16,8 @@ on:
         required: true
         options: [deploy]
 
-      # The interface values are declared here, at dispatch time, because the
-      # credential-free build cannot resolve them from CloudFormation or SSM.
+      # Manual-only overrides for the three reviewed constants below. A push has no
+      # inputs and compiles the constants; a dispatch may replace any of them.
       # build-metadata.json records exactly the values Vite compiled, and `deploy`
       # refuses when the live Beta interface differs from them.
       api_base_url:
@@ -29,10 +33,28 @@ on:
         type: string
         required: true
 
+# The reviewed Beta interface, as last published: `AnyWearPlatformStack-beta`'s
+# `ApiBaseUrl` output and the `/anywear/beta/cognito_user_pool_id` and
+# `/anywear/beta/cognito_client_id` parameters. The credential-free build cannot
+# resolve them, so they are reviewed constants here and every job reads them
+# through `inputs.<name> || env.BETA_<NAME>`: a push needs no input, and a manual
+# dispatch can still override any of the three.
+#
+# `deploy` re-resolves the live interface and refuses a mismatch before the first
+# S3 write. A recreated stack therefore fails closed instead of publishing an
+# interface no review saw, and needs exactly one reviewed change here.
+env:
+  BETA_API_BASE_URL: 'https://d1pfqujqt29n11.cloudfront.net'
+  BETA_COGNITO_USER_POOL_ID: 'ap-east-1_XqXt4Kw1L'
+  BETA_COGNITO_CLIENT_ID: '4jp37atfitq59hmjo404342int'
+
 # This queue serializes Client publication, independently of Infra's queue.
 concurrency:
   group: beta-client-publish
   cancel-in-progress: false
+  # Up to 100 pending runs, processed in wait order; an in-flight upload is never
+  # cancelled by a newer merge.
+  queue: max
 
 permissions:
   contents: read
@@ -40,22 +62,16 @@ permissions:
 jobs:
   build:
     name: Build the reviewed Beta web client
-    # The stage switch and the main ref gate the chain. `build` and `verify`
-    # hold no AWS credential; `deploy` waits for `verify`.
-    if: vars.ENABLE_BETA_MUTATION == 'true' && github.ref == 'refs/heads/main' && inputs.operation == 'deploy'
+    # The stage switch and the main ref gate the chain, and the event decides which
+    # entry this is: a push is the publication, and a dispatch needs `deploy`.
+    # `build` and `verify` hold no AWS credential; `deploy` waits for `verify`.
+    if: vars.ENABLE_BETA_MUTATION == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.operation == 'deploy')
     runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       SOURCE_COMMIT_SHA: ${{ github.sha }}
-      # Vite compiles these three variables into the bundle, and
-      # write-build-metadata.mjs records the same variables. One environment,
-      # one recorded interface, so the metadata cannot describe a different
-      # interface than the one that was built.
-      VITE_API_BASE_URL: ${{ inputs.api_base_url }}
-      VITE_COGNITO_USER_POOL_ID: ${{ inputs.cognito_user_pool_id }}
-      VITE_COGNITO_CLIENT_ID: ${{ inputs.cognito_client_id }}
 
     steps:
       - name: Checkout
@@ -79,8 +95,15 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # Builds the assets and, in the same step, dist/build-metadata.json from
-      # the same environment.
+      # the same environment. Vite compiles these three variables into the bundle,
+      # and write-build-metadata.mjs records the same variables. The step-level
+      # `env:` is what lets the expression read the workflow-level constants: the
+      # `env` context is not available in a job's `env:` block.
       - name: Build Beta web client
+        env:
+          VITE_API_BASE_URL: ${{ inputs.api_base_url || env.BETA_API_BASE_URL }}
+          VITE_COGNITO_USER_POOL_ID: ${{ inputs.cognito_user_pool_id || env.BETA_COGNITO_USER_POOL_ID }}
+          VITE_COGNITO_CLIENT_ID: ${{ inputs.cognito_client_id || env.BETA_COGNITO_CLIENT_ID }}
         run: pnpm build
 
       - name: Upload built client
@@ -103,9 +126,6 @@ jobs:
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       CLIENT_PUBLISH_ROLE_ARN: ${{ vars.CLIENT_PUBLISH_ROLE_ARN }}
-      DECLARED_API_BASE_URL: ${{ inputs.api_base_url }}
-      DECLARED_COGNITO_USER_POOL_ID: ${{ inputs.cognito_user_pool_id }}
-      DECLARED_COGNITO_CLIENT_ID: ${{ inputs.cognito_client_id }}
 
     steps:
       - name: Checkout
@@ -135,9 +155,14 @@ jobs:
           path: dist
 
       # Publication identity, the exact workflow/source sha, and the interface
-      # values recorded in build-metadata.json against the reviewed dispatch
-      # inputs. It also asserts that the compiled assets contain those values.
+      # values recorded in build-metadata.json against the declared interface: the
+      # dispatch overrides or, on a push, the reviewed constants. It also asserts
+      # that the compiled assets contain those values.
       - name: Validate publication identity and declared interface
+        env:
+          DECLARED_API_BASE_URL: ${{ inputs.api_base_url || env.BETA_API_BASE_URL }}
+          DECLARED_COGNITO_USER_POOL_ID: ${{ inputs.cognito_user_pool_id || env.BETA_COGNITO_USER_POOL_ID }}
+          DECLARED_COGNITO_CLIENT_ID: ${{ inputs.cognito_client_id || env.BETA_COGNITO_CLIENT_ID }}
         run: node .github/scripts/assert-client-publication.mjs verify
 
       - name: Run unit tests
@@ -169,9 +194,6 @@ jobs:
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       CLIENT_PUBLISH_ROLE_ARN: ${{ vars.CLIENT_PUBLISH_ROLE_ARN }}
-      DECLARED_API_BASE_URL: ${{ inputs.api_base_url }}
-      DECLARED_COGNITO_USER_POOL_ID: ${{ inputs.cognito_user_pool_id }}
-      DECLARED_COGNITO_CLIENT_ID: ${{ inputs.cognito_client_id }}
 
     steps:
       - name: Checkout
@@ -195,6 +217,10 @@ jobs:
       # the first AWS call, so a tampered artifact cannot reach the credentialed
       # step.
       - name: Validate publication identity and declared interface
+        env:
+          DECLARED_API_BASE_URL: ${{ inputs.api_base_url || env.BETA_API_BASE_URL }}
+          DECLARED_COGNITO_USER_POOL_ID: ${{ inputs.cognito_user_pool_id || env.BETA_COGNITO_USER_POOL_ID }}
+          DECLARED_COGNITO_CLIENT_ID: ${{ inputs.cognito_client_id || env.BETA_COGNITO_CLIENT_ID }}
         run: node .github/scripts/assert-client-publication.mjs verify
 
       - name: Configure Beta AWS credentials
@@ -375,3 +401,103 @@ jobs:
           path: publication/
           if-no-files-found: error
           retention-days: 90
+
+  handoff:
+    name: Dispatch the post-publication E2E smoke
+    needs: [record]
+    runs-on: ubuntu-latest
+    # No environment, no OIDC token and no AWS permission: this job only dispatches
+    # the E2E smoke that observes what the publication left live. Its one App token
+    # is scoped to AnyWear-E2E with `actions: write` and nothing else.
+    permissions:
+      contents: read
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      # The dispatch target, owner-qualified: the token input below takes the bare
+      # repository name, but every REST path here needs `owner/repo`.
+      E2E_OWNER: ${{ github.repository_owner }}
+      E2E_REPOSITORY: AnyWear-E2E
+      E2E_WORKFLOW: beta-qualification.yml
+      # The dedupe key and the payload's `dispatched_by`: this run's own URL, which
+      # the E2E receiver renders into its run name.
+      DISPATCHED_BY: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Mint the AnyWear-E2E dispatch token
+        id: e2e-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # One repository, named explicitly: without `repositories` the token
+          # reaches every repository the App installation grants.
+          repositories: AnyWear-E2E
+          permission-actions: write
+
+      # The dedupe key is this run's URL, which the receiver renders into the run
+      # name, so a re-run of this job finds its own pending run and skips the
+      # dispatch. A failed listing dispatches anyway and says so: a duplicate smoke
+      # wastes a run, while a skipped one would hide what this publication left live.
+      - name: Check for a smoke run already queued for this publication
+        id: dedupe
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.e2e-token.outputs.token }}
+        run: |
+          : "${DISPATCHED_BY:?this run has no URL}"
+          listing_failed=false
+          existing=""
+          for status in queued in_progress; do
+            matches="$(gh api --paginate \
+              "repos/${E2E_OWNER}/${E2E_REPOSITORY}/actions/workflows/${E2E_WORKFLOW}/runs?status=${status}" \
+              --jq '.workflow_runs[] | select(.display_title | contains(env.DISPATCHED_BY)) | .html_url')" || {
+              listing_failed=true
+              continue
+            }
+            if [ -n "$matches" ]; then
+              existing="$(head -n 1 <<< "$matches")"
+            fi
+          done
+          if [ -n "$existing" ]; then
+            echo "Skipping the smoke dispatch: this publication already has a pending run at ${existing}"
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          elif [ "$listing_failed" = true ]; then
+            echo "::warning::Could not list ${E2E_WORKFLOW} runs in ${E2E_REPOSITORY}; dispatching the smoke anyway"
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      # `gh workflow run` cannot ask for the run it created, so the dispatch goes
+      # through the REST endpoint with `return_run_details`. The created run is then
+      # read back and must carry this run's URL in its name: a dispatch dropped at
+      # birth by a full queue returns a run whose name has no key, and this job fails
+      # instead of claiming a delivery it did not make. This is the job's last step.
+      - name: Dispatch the post-publication smoke
+        if: steps.dedupe.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.e2e-token.outputs.token }}
+        run: |
+          : "${DISPATCHED_BY:?this run has no URL}"
+          response="$(gh api --method POST \
+            "repos/${E2E_OWNER}/${E2E_REPOSITORY}/actions/workflows/${E2E_WORKFLOW}/dispatches" \
+            -f ref=main \
+            -F return_run_details=true \
+            -f 'inputs[operation]=smoke' \
+            -f 'inputs[trigger]=deploy-smoke' \
+            -f 'inputs[worker_slot_offset]=0' \
+            -f "inputs[dispatched_by]=${DISPATCHED_BY}")"
+          run_id="$(jq -r '.workflow_run_id // empty' <<< "$response")"
+          run_url="$(jq -r '.html_url // empty' <<< "$response")"
+          if [ -z "$run_id" ] || [ -z "$run_url" ]; then
+            echo "::error::The dispatch returned no run: ${response}"
+            exit 1
+          fi
+          echo "Dispatched the post-publication smoke: ${run_url}"
+          display_title="$(gh api "repos/${E2E_OWNER}/${E2E_REPOSITORY}/actions/runs/${run_id}" --jq '.display_title')"
+          if [[ "$display_title" != *"$DISPATCHED_BY"* ]]; then
+            echo "::error::Run ${run_url} is named '${display_title}', which does not carry ${DISPATCHED_BY}"
+            exit 1
+          fi

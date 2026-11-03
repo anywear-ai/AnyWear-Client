@@ -56,26 +56,29 @@ Ensure you have the following installed:
 ### Workflow entries
 
 Client exposes two workflow entries: `check.yml` runs automatically on push and pull
-request to `main`, and `release.yml` is the one manual dispatch surface, offering the
-single `operation: deploy`. `build.yml`, `test.yml` and `browser.yml` are
+request to `main`, and `release.yml` is the publication entry — it runs on a merge to
+`main` and on a manual dispatch, offering the single `operation: deploy` and three
+optional interface overrides. `build.yml`, `test.yml` and `browser.yml` are
 `workflow_call` implementations of `check.yml`, not entries.
 
 | Entry | Trigger | Manual | Purpose |
 | --- | --- | --- | --- |
 | [`check.yml`](.github/workflows/check.yml) | push / pull request to `main` | no | Build, unit tests, mocked browser integration |
-| [`release.yml`](.github/workflows/release.yml) | `workflow_dispatch` (`operation: deploy`) | yes | Build, verify, deploy and record the Beta web client |
+| [`release.yml`](.github/workflows/release.yml) | push to `main`; `workflow_dispatch` (`operation: deploy`) | yes | Build, verify, deploy and record the Beta web client, then dispatch the E2E smoke |
 
 ### Beta web publication
 
 See the [Beta publication runbook](docs/beta-web-publication.md) for the dedicated
-Client role, the declared interface inputs, the build/verify/deploy/record job sequence, and
-the deployment evidence produced by `release.yml`.
+Client role, the reviewed interface constants and their manual overrides, the
+build/verify/deploy/record/handoff job sequence, and the deployment evidence produced
+by `release.yml`.
 
-### Source CI credentials
+### CI credentials
 
-See the [source CI credentials](docs/source-ci-credentials.md) note for the single
-App credential the source workflows hold, the repositories it may read, and what
-happens when it is unavailable.
+See the [CI credentials](docs/source-ci-credentials.md) note for the two App
+credentials the workflows hold — the source-CI specification token and the release
+handoff token — the repositories each may reach, and what happens when one is
+unavailable.
 
 ## 🏗️ Project Structure
 

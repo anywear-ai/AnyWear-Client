@@ -126,10 +126,10 @@ test('a job without an environment reads only repository-scoped configuration', 
   assert.ok(jobsWithEnvironment > 0, 'at least one job must declare an environment for this guard to be meaningful');
 });
 
-test('the deploy chain keeps the publish role at repository scope until the single environment job', () => {
+test('the publication chain keeps the publish role at repository scope until the single environment job', () => {
   const release = read('release.yml');
   const jobs = Object.fromEntries(jobEntries(release).map((job) => [job.name, job.section]));
-  assert.deepEqual(Object.keys(jobs), ['build', 'verify', 'deploy', 'record']);
+  assert.deepEqual(Object.keys(jobs), ['build', 'verify', 'deploy', 'record', 'handoff']);
 
   // One environment, one OIDC token, and only on the job that publishes.
   const withEnvironment = Object.keys(jobs).filter((name) => declaresEnvironment(jobs[name]));
@@ -156,18 +156,66 @@ test('the deploy chain keeps the publish role at repository scope until the sing
     }
   }
 
+  // `handoff` dispatches after the record and holds nothing but a scoped name to read.
+  assert.doesNotMatch(jobs.handoff, /^ {4}environment:/m, 'handoff must not declare an environment');
+  assert.doesNotMatch(jobs.handoff, /^ {6}id-token:/m, 'handoff must not declare an OIDC token');
+  assert.doesNotMatch(jobs.handoff, /configure-aws-credentials/, 'handoff must not acquire AWS credentials');
+  assert.doesNotMatch(jobs.handoff, /CLIENT_PUBLISH_ROLE_ARN/, 'handoff must not read the publish role');
+  // The App identity it mints a token with is repository-scoped, so it resolves
+  // before any environment exists.
+  assert.deepEqual(references(jobs.handoff).map((reference) => `${reference.kind}.${reference.name}`).sort(), ['secrets.APP_PRIVATE_KEY', 'vars.APP_ID']);
+  assert.ok(REPOSITORY_SCOPED.vars.includes('APP_ID'), 'vars.APP_ID is configured at repository scope');
+  assert.ok(REPOSITORY_SCOPED.secrets.includes('APP_PRIVATE_KEY'), 'secrets.APP_PRIVATE_KEY is configured at repository scope');
+  // The values it needs to reach the receiver are workflow text, not configuration.
+  // The REST path is owner-qualified; the token input below names the bare repository.
+  assert.match(jobs.handoff, /^ {6}E2E_OWNER: \$\{\{ github\.repository_owner \}\}$/m);
+  assert.match(jobs.handoff, /^ {6}E2E_REPOSITORY: AnyWear-E2E$/m);
+  assert.match(jobs.handoff, /^ {6}E2E_WORKFLOW: beta-qualification\.yml$/m);
+  assert.match(jobs.handoff, /repos\/\$\{E2E_OWNER\}\/\$\{E2E_REPOSITORY\}\/actions\/workflows\/\$\{E2E_WORKFLOW\}/);
+
   // The chain order is explicit and survives any edit to the sections above.
   assert.doesNotMatch(jobs.build, /^ {4}needs:/m, 'build is the first job of the chain');
   assert.match(jobs.verify, /^ {4}needs: \[build\]$/m);
   assert.match(jobs.deploy, /^ {4}needs: \[verify\]$/m);
   assert.match(jobs.record, /^ {4}needs: \[deploy\]$/m);
+  assert.match(jobs.handoff, /^ {4}needs: \[record\]$/m);
 });
 
-test('the automatic entry stays automatic and the deploy entry stays the only dispatch surface', () => {
+test('the reviewed Beta interface is literal workflow env, not repository configuration', () => {
+  const release = read('release.yml');
+  const constants = /^env:\n((?: {2}[A-Z0-9_]+: .*(?:\n|$))+)/m.exec(release)?.[1];
+  assert.equal(
+    constants,
+    "  BETA_API_BASE_URL: 'https://d1pfqujqt29n11.cloudfront.net'\n"
+    + "  BETA_COGNITO_USER_POOL_ID: 'ap-east-1_XqXt4Kw1L'\n"
+    + "  BETA_COGNITO_CLIENT_ID: '4jp37atfitq59hmjo404342int'\n",
+    'the three constants are literal workflow env, reviewed with the workflow',
+  );
+
+  // No job resolves the interface from repository or environment configuration,
+  // which is what would let the value change between review and run.
+  for (const file of workflowFiles) {
+    assert.doesNotMatch(read(file), /vars\.(?:BETA_|API_BASE_URL|COGNITO_)/, `${file} must not read the interface from vars`);
+  }
+
+  // build, verify and deploy read the override or the constant in the same
+  // expression, so a push and a dispatch compile the same recorded interface.
+  const jobs = Object.fromEntries(jobEntries(release).map((job) => [job.name, job.section]));
+  for (const [job, prefix] of [['build', 'VITE'], ['verify', 'DECLARED'], ['deploy', 'DECLARED']]) {
+    assert.match(jobs[job], new RegExp(`^ {10}${prefix}_API_BASE_URL: \\$\\{\\{ inputs\\.api_base_url \\|\\| env\\.BETA_API_BASE_URL \\}\\}$`, 'm'), `${job} must read the API base URL from the input or the constant`);
+    assert.match(jobs[job], new RegExp(`^ {10}${prefix}_COGNITO_USER_POOL_ID: \\$\\{\\{ inputs\\.cognito_user_pool_id \\|\\| env\\.BETA_COGNITO_USER_POOL_ID \\}\\}$`, 'm'), `${job} must read the user pool from the input or the constant`);
+    assert.match(jobs[job], new RegExp(`^ {10}${prefix}_COGNITO_CLIENT_ID: \\$\\{\\{ inputs\\.cognito_client_id \\|\\| env\\.BETA_COGNITO_CLIENT_ID \\}\\}$`, 'm'), `${job} must read the client id from the input or the constant`);
+  }
+});
+
+test('the automatic entry stays automatic and the publication entry stays the only dispatch surface', () => {
   const dispatchSurfaces = workflowFiles.filter((file) => /^ {2}workflow_dispatch:$/m.test(read(file)));
   assert.deepEqual(dispatchSurfaces, ['release.yml']);
 
   const check = read('check.yml');
   assert.doesNotMatch(check, /workflow_dispatch/);
   assert.match(check, /^on:\n {2}push:\n {4}branches: \[main\]\n {2}pull_request:\n {4}branches: \[main\]\n/m);
+
+  // The publication entry adds the merge event; it is not a second automatic check.
+  assert.match(read('release.yml'), /^on:\n {2}push:\n {4}branches: \[main\]\n {2}workflow_dispatch:\n/m);
 });

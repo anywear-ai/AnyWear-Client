@@ -1,12 +1,17 @@
-// Contract and validator for the Client source-CI checkout credential boundary.
+// Contract and validator for the Client CI credential boundary.
 //
-// Client source CI reads one private repository: the published OpenAPI
-// specification, which generates the client the build checks for consistency.
-// Everything else it reads is this public repository, or a public action. The
-// constants below are the allowlist the workflows must request and the only
-// consumer allowed to hold the resulting token;
-// `validateSourceCiCredentialBoundary` reports every way a workflow departs from
-// them.
+// Client CI holds two GitHub App installation tokens, each minted once, in one
+// job, for exactly one repository and one permission:
+//
+//   build.yml:build      AnyWear-Service-API  contents: read   the OpenAPI spec
+//   release.yml:handoff  AnyWear-E2E          actions: write  the smoke dispatch
+//
+// Everything else the workflows read is this public repository, or a public
+// action. The constants below are the allowlist the workflows must request and
+// the only jobs allowed to hold the resulting token. Each site's `with:` key set
+// is closed, because an undeclared key on the pinned action can leave the full
+// installation grant. `validateSourceCiCredentialBoundary` reports every way a
+// workflow departs from them.
 //
 // The `with:` strings are the literal values a workflow must contain, so the
 // strings asserted here are the ones the pinned action receives in CI.
@@ -15,38 +20,72 @@ import { readFile, stat } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const sourceCiCredentialBoundary = {
-  // The App-token action, pinned to an immutable commit: the moving `v2` tag has
-  // resolved to this commit since the v2.2.2 release.
-  tokenAction: {
-    repository: 'actions/create-github-app-token',
+/**
+ * The two — and only two — jobs that may mint a token, each with its own action
+ * pin, repository allowlist and permission. The pins are immutable commits: the
+ * credential-bearing step must not change under a workflow, and `build.yml` keeps
+ * the v2 line its specification checkout and offline tests are written against.
+ */
+export const tokenSites = [
+  {
+    workflow: 'build.yml',
+    job: 'build',
     ref: 'fee1f7d63c2ff003460e3d139729b119787bc349',
     version: 'v2.2.2',
+    repository: 'AnyWear-Service-API',
+    permissions: { contents: 'read' },
+    // The only site that checks a private repository out, and the only one the
+    // specification-checkout rules govern.
+    readsSpecification: true,
+  },
+  {
+    workflow: 'release.yml',
+    job: 'handoff',
+    ref: '64ab729a6294000f5aa4a4bc0b73d1f32bc45510',
+    version: 'v3.3.0',
+    repository: 'AnyWear-E2E',
+    permissions: { actions: 'write' },
+    readsSpecification: false,
+  },
+];
+
+const specificationSite = tokenSites.find((site) => site.readsSpecification);
+
+export const sourceCiCredentialBoundary = {
+  // The App-token action. Each site pins its own line of it by commit.
+  tokenAction: {
+    repository: 'actions/create-github-app-token',
     inputs: {
       'app-id': '${{ vars.APP_ID }}',
       'private-key': '${{ secrets.APP_PRIVATE_KEY }}',
       owner: '${{ github.repository_owner }}',
     },
   },
-  // The one repository the token may reach, as the bare name the pinned action
-  // resolves against `owner`, and where it is checked out.
-  specificationRepository: 'AnyWear-Service-API',
+  tokenSites,
+  // The one repository the source-CI token may check out, as the bare name the
+  // pinned action resolves against `owner`, and where it is checked out.
+  specificationRepository: specificationSite.repository,
   specificationPath: 'api',
-  // The only permission any token step asks for.
-  permissions: { contents: 'read' },
-  // The only secret a Client source workflow may carry, and the only caller job
-  // that maps it.
+  // The only secret a Client workflow may carry, and the caller job that maps it
+  // into the called workflow that declares it.
   secret: 'APP_PRIVATE_KEY',
   secretCallerJob: 'build',
 };
 
-export const sourceCiCredentialBoundaryWith = {
-  ...sourceCiCredentialBoundary.tokenAction.inputs,
-  repositories: sourceCiCredentialBoundary.specificationRepository,
-  ...Object.fromEntries(
-    Object.entries(sourceCiCredentialBoundary.permissions).map(([name, level]) => [`permission-${name}`, level]),
-  ),
-};
+/** Every `key: value` one token site's `with:` block must contain, and no other. */
+export function tokenSiteWith(site) {
+  return {
+    ...sourceCiCredentialBoundary.tokenAction.inputs,
+    repositories: site.repository,
+    ...Object.fromEntries(
+      Object.entries(site.permissions).map(([name, level]) => [`permission-${name}`, level]),
+    ),
+  };
+}
+
+// The source-CI site's `with:` block, kept as a named export because that is the
+// token the source workflows already carry.
+export const sourceCiCredentialBoundaryWith = tokenSiteWith(specificationSite);
 
 /** The `owner/repo` the specification checkout names, for an owner-qualified comparison. */
 export function specificationRepositorySlug(owner) {
@@ -410,8 +449,8 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
   const violations = [];
   const steps = documents.flatMap((document) => document.steps);
   const workflowFiles = new Set(documents.map((document) => document.workflow.file));
-  const expectedTokenAction = `${sourceCiCredentialBoundary.tokenAction.repository}@${sourceCiCredentialBoundary.tokenAction.ref}`;
-  const expectedInputs = Object.entries(sourceCiCredentialBoundaryWith);
+  const siteOf = (file, job) => sourceCiCredentialBoundary.tokenSites.find((site) => site.workflow === file && site.job === job);
+  const siteLabels = sourceCiCredentialBoundary.tokenSites.map((site) => `${site.workflow}:${site.job}`).join(', ');
   const credentialWorkflow = `${sourceCiCredentialBoundary.secretCallerJob}.yml`;
   const declaredSpecification = submoduleRepositories.get(sourceCiCredentialBoundary.specificationPath);
   const specificationOwner = declaredSpecification ? declaredSpecification.replace(/\/.*$/, '') : undefined;
@@ -477,10 +516,20 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
   if (tokenSteps.length === 0) {
     violations.push(violation('.github/workflows', 1, 'no App-token step was found; the boundary is unverified, so an emptied credential surface must be stated explicitly'));
   }
+  const seenSites = new Set();
 
   for (const step of steps) {
     const tokenActionRef = tokenStepPattern.exec(step.uses);
     if (tokenActionRef) {
+      // A token step is legal only in one of the two named jobs. Widening "any
+      // workflow may mint a token" is exactly what this boundary prevents.
+      const site = siteOf(step.file, step.job);
+      if (!site) {
+        violations.push(violation(step.file, step.number, `App-token step is in \`${step.file}:${step.job}\`, which is not one of the two token sites (${siteLabels})`));
+        continue;
+      }
+      seenSites.add(`${site.workflow}:${site.job}`);
+      const expectedTokenAction = `${sourceCiCredentialBoundary.tokenAction.repository}@${site.ref}`;
       if (step.uses !== expectedTokenAction) {
         violations.push(violation(step.file, step.number, `App-token step must be pinned to ${expectedTokenAction}, found ${step.uses}`));
       }
@@ -488,15 +537,16 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
         violations.push(violation(step.file, step.number, 'App-token step must declare a `with:` block'));
         continue;
       }
-      for (const [key, value] of expectedInputs) {
+      const expectedWith = tokenSiteWith(site);
+      for (const [key, value] of Object.entries(expectedWith)) {
         const actual = step.with.get(key);
         if (actual !== value) {
           violations.push(violation(step.file, step.number, `App-token step must set \`${key}: ${value}\`, found ${actual === undefined ? 'nothing' : `\`${key}: ${actual}\``}`));
         }
       }
       for (const key of step.with.keys()) {
-        if (!(key in sourceCiCredentialBoundaryWith)) {
-          violations.push(violation(step.file, step.number, `App-token step passes \`${key}\`, which is not one of the boundary inputs ${Object.keys(sourceCiCredentialBoundaryWith).join(', ')}`));
+        if (!(key in expectedWith)) {
+          violations.push(violation(step.file, step.number, `App-token step passes \`${key}\`, which is not one of the token site's boundary inputs (${Object.keys(expectedWith).join(', ')})`));
         }
       }
       const requested = (step.with.get('repositories') ?? '').split(/[\n,]+/).map((name) => name.trim()).filter((name) => name !== '');
@@ -504,17 +554,19 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
         violations.push(violation(step.file, step.number, 'App-token step must request an explicit repository allowlist; without `repositories` the token reaches every repository the installation grants'));
       }
       for (const name of requested) {
-        if (name !== sourceCiCredentialBoundary.specificationRepository) {
-          violations.push(violation(step.file, step.number, `App-token step requests \`${name}\`; the allowlist is exactly \`${sourceCiCredentialBoundary.specificationRepository}\``));
+        if (name !== site.repository) {
+          violations.push(violation(step.file, step.number, `App-token step requests \`${name}\`; the ${site.workflow} allowlist is exactly \`${site.repository}\``));
         }
       }
+      const expectedPermissionKeys = Object.keys(site.permissions).map((name) => `permission-${name}`);
       const permissionKeys = [...step.with.keys()].filter((key) => key.startsWith('permission-'));
-      if (permissionKeys.length !== 1 || permissionKeys[0] !== 'permission-contents') {
-        violations.push(violation(step.file, step.number, `App-token step must request only \`permission-contents\`, found ${permissionKeys.length === 0 ? 'no permission input' : permissionKeys.join(', ')}`));
+      if (permissionKeys.length !== expectedPermissionKeys.length || permissionKeys.some((key) => !expectedPermissionKeys.includes(key))) {
+        violations.push(violation(step.file, step.number, `App-token step must request only ${expectedPermissionKeys.map((key) => `\`${key}\``).join(', ')}, found ${permissionKeys.length === 0 ? 'no permission input' : permissionKeys.join(', ')}`));
       }
       for (const key of permissionKeys) {
-        if (step.with.get(key) !== 'read') {
-          violations.push(violation(step.file, step.number, `App-token step must request \`${key}: read\`, found \`${key}: ${step.with.get(key)}\``));
+        const level = site.permissions[key.replace(/^permission-/, '')];
+        if (level !== undefined && step.with.get(key) !== level) {
+          violations.push(violation(step.file, step.number, `App-token step must request \`${key}: ${level}\`, found \`${key}: ${step.with.get(key)}\``));
         }
       }
       for (const name of secretReferences(step.with.get('app-id') ?? '')) {
@@ -533,7 +585,7 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
       const repository = step.with?.get('repository') ?? '';
       if (repository === '') {
         if (step.with?.has('token')) {
-          violations.push(violation(step.file, step.number, 'the Client checkout must use the default credential; only the specification checkout carries the App token'));
+          violations.push(violation(step.file, step.number, `the Client checkout must use the default credential; the App tokens belong to the two token sites (${siteLabels})`));
         }
         if (step.with?.get('path') !== undefined) {
           violations.push(violation(step.file, step.number, `the Client checkout must not set \`path\`; the specification is checked out at \`${sourceCiCredentialBoundary.specificationPath}\``));
@@ -546,6 +598,9 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
       const expectedSlug = specificationRepositorySlug(repository.replace(/\/.*$/, ''));
       if (repository !== expectedSlug) {
         violations.push(violation(step.file, step.number, `checkout fetches \`${repository}\`, which is not \`${specificationOwner ?? 'the owner'}/${sourceCiCredentialBoundary.specificationRepository}\``));
+      }
+      if (!siteOf(step.file, step.job)?.readsSpecification) {
+        violations.push(violation(step.file, step.number, `a checkout of another repository belongs to ${specificationSite.workflow}:${specificationSite.job}, not to \`${step.file}:${step.job}\``));
       }
       if (step.with?.get('path') !== sourceCiCredentialBoundary.specificationPath) {
         violations.push(violation(step.file, step.number, `specification checkout must use \`path: ${sourceCiCredentialBoundary.specificationPath}\`, found \`path: ${step.with?.get('path') ?? 'nothing'}\``));
@@ -587,11 +642,19 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
     for (const value of step.with?.values() ?? []) {
       for (const name of secretReferences(value)) {
         if (name === sourceCiCredentialBoundary.secret) {
-          violations.push(violation(step.file, step.number, `step reads \`secrets.${name}\`; only the specification checkout in \`${credentialWorkflow}\` carries that credential`));
+          violations.push(violation(step.file, step.number, `step reads \`secrets.${name}\`; only the two token sites (${siteLabels}) and the specification checkout carry that credential`));
         } else {
           violations.push(violation(step.file, step.number, `step reads \`secrets.${name}\`, which is outside the credential boundary`));
         }
       }
+    }
+  }
+
+  // Both token sites must be present. A site that disappears fails here rather than
+  // silently reducing the credential surface to one entry.
+  for (const site of sourceCiCredentialBoundary.tokenSites) {
+    if (!seenSites.has(`${site.workflow}:${site.job}`)) {
+      violations.push(violation(site.workflow, 1, `no App-token step was found in \`${site.workflow}:${site.job}\`; the ${site.workflow} token site is unverified`));
     }
   }
 

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 // #163: the repository-side census of the entry face. Client ends this change with
 // exactly two entries — one automatic check and one manual release — one manual
-// dispatch surface and one activation switch, and the release chain keeps the only
+// dispatch surface and one activation switch, and the deploy chain keeps the only
 // AWS-credential job behind the credential-free verify job with a credential-free
 // record job after it. These are source assertions, read as text with no YAML
 // dependency, so the next change cannot drift the entry face without failing
@@ -105,12 +105,12 @@ test('the manual dispatch surface is exactly one workflow, release.yml', () => {
   assert.doesNotMatch(check, /workflow_dispatch/, 'the automatic check has no dispatch surface');
 });
 
-test('release.yml offers exactly one required choice operation: release', () => {
+test('release.yml offers exactly one required choice operation: deploy', () => {
   const release = read(manualEntry);
   const operation = inputBlock(release, 'operation');
   assert.match(operation, /^ {8}type: choice$/m);
   assert.match(operation, /^ {8}required: true$/m);
-  assert.match(operation, /^ {8}options: \[release\]$/m);
+  assert.match(operation, /^ {8}options: \[deploy\]$/m);
 });
 
 test('only deploy holds an environment and an OIDC token, after verify, with a credential-free record', () => {

@@ -30,7 +30,7 @@ function assertWorkflowIdentity(env) {
     && env.GITHUB_REPOSITORY_ID === '1176104200'
     && env.GITHUB_REF === 'refs/heads/main', 'Publication requires the original Client repository and main ref');
   requireCondition(env.GITHUB_EVENT_NAME === 'workflow_dispatch'
-    && env.GITHUB_WORKFLOW_REF === 'git-malu/AnyWear-Client/.github/workflows/release.yml@refs/heads/main', 'Publication requires the main release workflow dispatch');
+    && env.GITHUB_WORKFLOW_REF === 'git-malu/AnyWear-Client/.github/workflows/release.yml@refs/heads/main', 'Publication requires the main deploy workflow dispatch');
   requireCondition(/^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? '')
     && env.GITHUB_WORKFLOW_SHA === env.GITHUB_SHA, 'Publication requires the exact workflow source SHA');
   requireCondition(env.AWS_ACCOUNT_ID === '650880818323' && env.AWS_REGION === 'ap-east-1', 'Unexpected Beta account or region');

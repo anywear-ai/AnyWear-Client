@@ -40,7 +40,7 @@ const REPOSITORY_SCOPED = {
     'AWS_REGION',
     // Repository-scoped: dedicated Beta publish-role ARN; resolvable before any environment exists.
     'CLIENT_PUBLISH_ROLE_ARN',
-    // Repository-scoped: the single stage switch that gates the release chain; resolvable before any environment exists.
+    // Repository-scoped: the single stage switch that gates the deploy chain; resolvable before any environment exists.
     'ENABLE_BETA_MUTATION',
   ],
   secrets: [
@@ -126,7 +126,7 @@ test('a job without an environment reads only repository-scoped configuration', 
   assert.ok(jobsWithEnvironment > 0, 'at least one job must declare an environment for this guard to be meaningful');
 });
 
-test('the release chain keeps the publish role at repository scope until the single environment job', () => {
+test('the deploy chain keeps the publish role at repository scope until the single environment job', () => {
   const release = read('release.yml');
   const jobs = Object.fromEntries(jobEntries(release).map((job) => [job.name, job.section]));
   assert.deepEqual(Object.keys(jobs), ['build', 'verify', 'deploy', 'record']);

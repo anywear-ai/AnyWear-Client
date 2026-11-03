@@ -4,7 +4,7 @@ AnyWear-Client exposes two workflow entries: the automatic
 [`check.yml`](../.github/workflows/check.yml) and the manual
 [`release.yml`](../.github/workflows/release.yml). `release.yml` is the only
 publication surface. Its `operation` input currently offers exactly one value,
-`release`, and the chain inside it is `build` → `verify` → `deploy` → `record`.
+`deploy`, and the job sequence inside it is `build` → `verify` → `deploy` → `record`.
 
 `build.yml`, `test.yml` and `browser.yml` are `workflow_call` implementations of
 `check.yml`. They are not entries and have no dispatch surface.
@@ -12,7 +12,7 @@ publication surface. Its `operation` input currently offers exactly one value,
 | Entry | Trigger | Manual | Purpose |
 | --- | --- | --- | --- |
 | `check.yml` | push / pull request to `main` | no | Build, unit tests, mocked browser integration |
-| `release.yml` | `workflow_dispatch` (`operation: release`) | yes | Build, verify, deploy and record the Beta web client |
+| `release.yml` | `workflow_dispatch` (`operation: deploy`) | yes | Build, verify, deploy and record the Beta web client |
 
 ## The declared interface
 
@@ -125,7 +125,7 @@ delivery does not provision the role or configure those protections.
 ## Running a release
 
 1. Select the reviewed Client revision on `main` and dispatch `release.yml` from
-   that branch with `operation: release` and the three declared interface values.
+   that branch with `operation: deploy` and the three declared interface values.
    Publication has no migration window token, issue-comment URL or deadline
    inputs. Release coordination belongs in the publication record, rather than a
    permanent dependency on an Issue or receipt.

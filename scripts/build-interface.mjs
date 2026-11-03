@@ -1,7 +1,7 @@
 // The declared interface values Vite compiles into the Client bundle.
 //
 // `pnpm build` records these values in `dist/build-metadata.json`, and the Beta
-// release chain refuses a dispatch or a live Beta interface that differs from
+// deploy chain refuses a dispatch or a live Beta interface that differs from
 // them. The contract lives in one module so the build and the publication
 // assertions cannot drift apart: the same variables, the same shapes and the
 // same rejection messages are used on both sides.

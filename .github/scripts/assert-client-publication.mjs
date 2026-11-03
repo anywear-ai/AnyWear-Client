@@ -8,8 +8,9 @@ const distributionIdPattern = /^[A-Z0-9]+$/;
 const invalidationIdPattern = /^[A-Za-z0-9]+$/;
 
 // The environment variable that carries each recorded interface value. `verify`
-// compares the artifact against the reviewed dispatch inputs; `deploy` compares
-// it against the live Beta interface resolved from CloudFormation and SSM.
+// compares the artifact against the declared interface — the manual dispatch
+// overrides, or the reviewed workflow constants a push compiles — and `deploy`
+// compares it against the live Beta interface resolved from CloudFormation and SSM.
 const interfaceEnvironment = {
   api_base_url: 'API_BASE_URL',
   cognito_user_pool_id: 'COGNITO_USER_POOL_ID',
@@ -29,8 +30,11 @@ function assertWorkflowIdentity(env) {
   requireCondition(env.GITHUB_REPOSITORY === 'git-malu/AnyWear-Client'
     && env.GITHUB_REPOSITORY_ID === '1176104200'
     && env.GITHUB_REF === 'refs/heads/main', 'Publication requires the original Client repository and main ref');
-  requireCondition(env.GITHUB_EVENT_NAME === 'workflow_dispatch'
-    && env.GITHUB_WORKFLOW_REF === 'git-malu/AnyWear-Client/.github/workflows/release.yml@refs/heads/main', 'Publication requires the main deploy workflow dispatch');
+  // The one publication entry has two events: a merge to `main` publishes, and a
+  // manual dispatch keeps its `deploy` operation. Both are this workflow on `main`;
+  // no other event is a publication.
+  requireCondition((env.GITHUB_EVENT_NAME === 'workflow_dispatch' || env.GITHUB_EVENT_NAME === 'push')
+    && env.GITHUB_WORKFLOW_REF === 'git-malu/AnyWear-Client/.github/workflows/release.yml@refs/heads/main', 'Publication requires the main deploy workflow dispatch or a push to main');
   requireCondition(/^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? '')
     && env.GITHUB_WORKFLOW_SHA === env.GITHUB_SHA, 'Publication requires the exact workflow source SHA');
   requireCondition(env.AWS_ACCOUNT_ID === '650880818323' && env.AWS_REGION === 'ap-east-1', 'Unexpected Beta account or region');

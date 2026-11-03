@@ -62,6 +62,38 @@ test('ordinary Client release needs no migration window or issue-comment inputs'
   assert.doesNotThrow(() => assertClientPublication(environment, 'record', record));
 });
 
+test('accepts a push to main as a publication and refuses every other event or ref', () => {
+  // A merge publishes with the reviewed constants; the dispatch path is unchanged.
+  assert.doesNotThrow(() => assertClientPublication({ ...environment, ...declared, GITHUB_EVENT_NAME: 'push' }, 'verify', metadata));
+  assert.doesNotThrow(() => assertClientPublication({ ...environment, ...live, GITHUB_EVENT_NAME: 'push' }, 'deploy', metadata));
+  assert.doesNotThrow(() => assertClientPublication({ ...environment, GITHUB_EVENT_NAME: 'push' }, 'record', record));
+
+  // Only the two entry events are publications: an automatic check, a tag and a
+  // scheduler run are not.
+  for (const event of ['pull_request', 'pull_request_target', 'workflow_run', 'release', 'schedule', 'merge_group']) {
+    assert.throws(
+      () => assertClientPublication({ ...environment, ...declared, GITHUB_EVENT_NAME: event }, 'verify', metadata),
+      /Publication requires the main deploy workflow dispatch or a push to main/,
+      `expected ${event} to be refused`,
+    );
+  }
+
+  // A push of a tag is not a publication: the ref and the workflow ref must both be main.
+  assert.throws(
+    () => assertClientPublication({ ...environment, ...declared, GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/tags/v1.2.3' }, 'verify', metadata),
+    /Publication requires the original Client repository and main ref/,
+  );
+  assert.throws(
+    () => assertClientPublication({
+      ...environment,
+      ...declared,
+      GITHUB_EVENT_NAME: 'push',
+      GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-Client/.github/workflows/release.yml@refs/tags/v1.2.3',
+    }, 'verify', metadata),
+    /Publication requires the main deploy workflow dispatch or a push to main/,
+  );
+});
+
 test('rejects an untrusted source, disabled release or wrong AWS scope', async (t) => {
   const invalidInputs = [
     ['BETA_MUTATION_ENABLED', 'false'],
@@ -184,6 +216,11 @@ test('workflow CLI reads the artifact, the live interface and the record, and fa
     assert.equal(run('verify').status, 0);
     assert.equal(run('deploy').status, 0);
     assert.equal(run('record').status, 0);
+
+    // The merge entry runs the same three phases, and a tag push does not.
+    assert.equal(run('verify', { GITHUB_EVENT_NAME: 'push' }).status, 0);
+    assert.equal(run('deploy', { GITHUB_EVENT_NAME: 'push' }).status, 0);
+    assert.equal(run('verify', { GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/tags/v1.2.3' }).status, 1);
 
     // The built assets must actually carry the interface the metadata records.
     await writeAssets(`const values=${JSON.stringify({ ...values, cognito_client_id: undefined })};`);

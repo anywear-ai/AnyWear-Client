@@ -18,6 +18,8 @@ import {
   sourceCiCredentialBoundary,
   sourceCiCredentialBoundaryWith,
   specificationRepositorySlug,
+  tokenSiteWith,
+  tokenSites,
   validateSourceCiCredentialBoundary,
 } from './source-ci-credential-boundary.mjs';
 
@@ -25,7 +27,7 @@ const repositoryRoot = new URL('../', import.meta.url);
 const workflowsDirectory = new URL('.github/workflows/', repositoryRoot);
 const gitmodulesPath = new URL('.gitmodules', repositoryRoot);
 const workflowFiles = ['build.yml', 'test.yml', 'browser.yml', 'check.yml', 'release.yml'];
-const tokenAction = `${sourceCiCredentialBoundary.tokenAction.repository}@${sourceCiCredentialBoundary.tokenAction.ref}`;
+const tokenActionOf = (site) => `${sourceCiCredentialBoundary.tokenAction.repository}@${site.ref}`;
 
 // The revision the specification checkout must pin, read from the `api` submodule's
 // own checkout rather than from a literal a submodule bump can leave behind.
@@ -60,7 +62,10 @@ function documentOf(documents, file) {
 }
 
 function tokenStepOf(documents, file) {
-  const step = documentOf(documents, file).steps.find((candidate) => candidate.uses.startsWith('actions/create-github-app-token@'));
+  const site = tokenSites.find((candidate) => candidate.workflow === file);
+  assert.ok(site, `expected a token site in ${file}`);
+  const step = documentOf(documents, file).steps
+    .find((candidate) => candidate.uses.startsWith('actions/create-github-app-token@') && candidate.job === site.job);
   assert.ok(step, `expected an App-token step in ${file}`);
   return step;
 }
@@ -81,26 +86,33 @@ test('checked-in Client source workflows stay inside the credential boundary', a
   assertWithinBoundary(await repositoryWorkflows());
 });
 
-test('exactly one App-token step reaches exactly one repository', async () => {
+test('exactly two App-token steps reach exactly one repository and one permission each', async () => {
   const { documents, specificationRevision } = await repositoryWorkflows();
   const steps = documents.flatMap((document) => document.steps);
   const tokenSteps = steps.filter((step) => step.uses.startsWith('actions/create-github-app-token@'));
   const specificationCheckouts = steps.filter((step) => step.uses === 'actions/checkout@v4' && step.with?.has('repository'));
 
-  assert.equal(tokenSteps.length, 1, 'one credential-bearing step, in the one job that reads the specification');
-  assert.equal(tokenSteps[0].file, 'build.yml');
-  assert.equal(tokenSteps[0].job, sourceCiCredentialBoundary.secretCallerJob);
-  assert.deepEqual(Object.fromEntries(tokenSteps[0].with), sourceCiCredentialBoundaryWith);
-  assert.equal(tokenSteps[0].uses, tokenAction);
+  assert.deepEqual(
+    tokenSteps.map((step) => `${step.file}:${step.job}`),
+    tokenSites.map((site) => `${site.workflow}:${site.job}`),
+    'one credential-bearing step per token site, in the job that site names',
+  );
+  for (const site of tokenSites) {
+    const step = tokenSteps.find((candidate) => `${candidate.file}:${candidate.job}` === `${site.workflow}:${site.job}`);
+    assert.deepEqual(Object.fromEntries(step.with), tokenSiteWith(site), `${site.workflow} must pass exactly its site's inputs`);
+    assert.equal(step.uses, tokenActionOf(site));
+  }
 
   assert.equal(specificationCheckouts.length, 1);
   const checkout = specificationCheckouts[0];
+  const sourceCi = tokenSites.find((site) => site.readsSpecification);
+  const sourceCiToken = tokenSteps.find((step) => step.file === sourceCi.workflow);
   assert.equal(checkout.file, 'build.yml');
-  assert.equal(checkout.job, sourceCiCredentialBoundary.secretCallerJob);
+  assert.equal(checkout.job, sourceCi.job);
   assert.equal(checkout.with.get('repository'), specificationRepositorySlug('git-malu'));
   assert.equal(checkout.with.get('ref'), specificationRevision);
   assert.equal(checkout.with.get('path'), sourceCiCredentialBoundary.specificationPath);
-  assert.equal(checkout.with.get('token'), `\${{ steps.${tokenSteps[0].id}.outputs.token }}`);
+  assert.equal(checkout.with.get('token'), `\${{ steps.${sourceCiToken.id}.outputs.token }}`);
   assert.equal(checkout.with.get('persist-credentials'), 'false');
 });
 
@@ -110,8 +122,16 @@ test('every job that does not read the specification holds no credential', async
     .flatMap((document) => document.steps)
     .filter((step) => step.uses.startsWith('actions/create-github-app-token@'))
     .map((step) => `${step.file}:${step.job}`));
-  assert.deepEqual([...jobsWithToken], ['build.yml:build']);
-  for (const [file, job] of [['build.yml', 'rust-check'], ['test.yml', 'test'], ['browser.yml', 'browser']]) {
+  assert.deepEqual([...jobsWithToken], ['build.yml:build', 'release.yml:handoff']);
+  for (const [file, job] of [
+    ['build.yml', 'rust-check'],
+    ['test.yml', 'test'],
+    ['browser.yml', 'browser'],
+    ['release.yml', 'build'],
+    ['release.yml', 'verify'],
+    ['release.yml', 'deploy'],
+    ['release.yml', 'record'],
+  ]) {
     const document = documentOf(documents, file);
     for (const step of document.steps.filter((candidate) => candidate.job === job)) {
       for (const value of step.with?.values() ?? []) {
@@ -123,65 +143,79 @@ test('every job that does not read the specification holds no credential', async
 });
 
 test('rejects an App-token action that is not pinned to an immutable commit', async () => {
-  for (const uses of [
-    'actions/create-github-app-token@v1',
-    'actions/create-github-app-token@v2',
-    'actions/create-github-app-token@main',
-    `${tokenAction} # v2.2.2`,
-    'actions/create-github-app-token@fee1f7d',
-  ]) {
-    const workflows = await repositoryWorkflows();
-    tokenStepOf(workflows.documents, 'build.yml').uses = uses;
-    assert.throws(
-      () => assertWithinBoundary(workflows),
-      /build\.yml:31 App-token step must be pinned to actions\/create-github-app-token@fee1f7d/,
-      `expected ${uses} to be rejected`,
-    );
+  for (const site of tokenSites) {
+    for (const uses of [
+      'actions/create-github-app-token@v1',
+      'actions/create-github-app-token@v2',
+      'actions/create-github-app-token@v3',
+      'actions/create-github-app-token@main',
+      `${tokenActionOf(site)} # ${site.version}`,
+      'actions/create-github-app-token@fee1f7d',
+    ]) {
+      const workflows = await repositoryWorkflows();
+      tokenStepOf(workflows.documents, site.workflow).uses = uses;
+      assert.throws(
+        () => assertWithinBoundary(workflows),
+        new RegExp(`App-token step must be pinned to actions/create-github-app-token@${site.ref}`),
+        `expected ${uses} to be rejected in ${site.workflow}`,
+      );
+    }
   }
 });
 
-test('rejects an allowlist that names any repository but the specification', async () => {
+test('rejects an allowlist that names any repository but the one its site names', async () => {
   const cases = [
-    ['AnyWear-Client,AnyWear-Service-API', /requests `AnyWear-Client`; the allowlist is exactly `AnyWear-Service-API`/],
-    ['git-malu/AnyWear-Service-API', /requests `git-malu\/AnyWear-Service-API`; the allowlist is exactly `AnyWear-Service-API`/],
-    ['AnyWear-Service-API,AnyWear-Service', /requests `AnyWear-Service`; the allowlist is exactly `AnyWear-Service-API`/],
+    ['build.yml', 'AnyWear-Client,AnyWear-Service-API', /requests `AnyWear-Client`; the build\.yml allowlist is exactly `AnyWear-Service-API`/],
+    ['build.yml', 'git-malu/AnyWear-Service-API', /requests `git-malu\/AnyWear-Service-API`; the build\.yml allowlist is exactly `AnyWear-Service-API`/],
+    ['build.yml', 'AnyWear-Service-API,AnyWear-Service', /requests `AnyWear-Service`; the build\.yml allowlist is exactly `AnyWear-Service-API`/],
+    ['release.yml', 'AnyWear-Infra', /requests `AnyWear-Infra`; the release\.yml allowlist is exactly `AnyWear-E2E`/],
+    ['release.yml', 'AnyWear-Service-API', /requests `AnyWear-Service-API`; the release\.yml allowlist is exactly `AnyWear-E2E`/],
   ];
-  for (const [repositories, expected] of cases) {
+  for (const [file, repositories, expected] of cases) {
     const workflows = await repositoryWorkflows();
-    tokenStepOf(workflows.documents, 'build.yml').with.set('repositories', repositories);
+    tokenStepOf(workflows.documents, file).with.set('repositories', repositories);
     assert.throws(() => assertWithinBoundary(workflows), expected, `expected \`repositories: ${repositories}\` to be rejected`);
   }
 });
 
 test('rejects an App-token step that drops the allowlist entirely', async () => {
-  const workflows = await repositoryWorkflows();
-  tokenStepOf(workflows.documents, 'build.yml').with.delete('repositories');
-  assert.throws(
-    () => assertWithinBoundary(workflows),
-    /build\.yml:31 App-token step must set `repositories: AnyWear-Service-API`, found nothing/,
-  );
+  for (const site of tokenSites) {
+    const workflows = await repositoryWorkflows();
+    tokenStepOf(workflows.documents, site.workflow).with.delete('repositories');
+    assert.throws(
+      () => assertWithinBoundary(workflows),
+      new RegExp(`App-token step must set \`repositories: ${site.repository}\`, found nothing`),
+      `expected ${site.workflow} to keep its allowlist`,
+    );
+  }
 });
 
-test('rejects every permission beyond a Contents read', async () => {
-  for (const [key, value, expected] of [
-    ['permission-contents', 'write', /must request `permission-contents: read`, found `permission-contents: write`/],
-    ['permission-actions', 'read', /passes `permission-actions`, which is not one of the boundary inputs/],
-    ['permission-attestations', 'read', /must request only `permission-contents`, found permission-contents, permission-attestations/],
-    ['permission-metadata', 'read', /must request only `permission-contents`, found permission-contents, permission-metadata/],
-    ['permission-pull-requests', 'write', /must request only `permission-contents`, found permission-contents, permission-pull-requests/],
-    ['permission-workflows', 'write', /must request only `permission-contents`, found permission-contents, permission-workflows/],
+test('rejects every permission beyond the one its site requests', async () => {
+  for (const [file, key, value, expected] of [
+    ['build.yml', 'permission-contents', 'write', /must request `permission-contents: read`, found `permission-contents: write`/],
+    ['build.yml', 'permission-actions', 'read', /passes `permission-actions`, which is not one of the token site's boundary inputs/],
+    ['build.yml', 'permission-attestations', 'read', /must request only `permission-contents`, found permission-contents, permission-attestations/],
+    ['build.yml', 'permission-metadata', 'read', /must request only `permission-contents`, found permission-contents, permission-metadata/],
+    ['build.yml', 'permission-pull-requests', 'write', /must request only `permission-contents`, found permission-contents, permission-pull-requests/],
+    ['build.yml', 'permission-workflows', 'write', /must request only `permission-contents`, found permission-contents, permission-workflows/],
+    ['release.yml', 'permission-actions', 'read', /must request `permission-actions: write`, found `permission-actions: read`/],
+    ['release.yml', 'permission-contents', 'read', /must request only `permission-actions`, found permission-actions, permission-contents/],
+    ['release.yml', 'permission-contents', 'write', /must request only `permission-actions`, found permission-actions, permission-contents/],
+    ['release.yml', 'permission-workflows', 'write', /must request only `permission-actions`, found permission-actions, permission-workflows/],
   ]) {
     const workflows = await repositoryWorkflows();
-    tokenStepOf(workflows.documents, 'build.yml').with.set(key, value);
-    assert.throws(() => assertWithinBoundary(workflows), expected, `expected \`${key}: ${value}\` to be rejected`);
+    tokenStepOf(workflows.documents, file).with.set(key, value);
+    assert.throws(() => assertWithinBoundary(workflows), expected, `expected \`${key}: ${value}\` in ${file} to be rejected`);
   }
 
-  const workflows = await repositoryWorkflows();
-  tokenStepOf(workflows.documents, 'build.yml').with.delete('permission-contents');
-  assert.throws(
-    () => assertWithinBoundary(workflows),
-    /build\.yml:31 App-token step must request only `permission-contents`, found no permission input/,
-  );
+  for (const [file, key, expected] of [
+    ['build.yml', 'permission-contents', /must request only `permission-contents`, found no permission input/],
+    ['release.yml', 'permission-actions', /must request only `permission-actions`, found no permission input/],
+  ]) {
+    const workflows = await repositoryWorkflows();
+    tokenStepOf(workflows.documents, file).with.delete(key);
+    assert.throws(() => assertWithinBoundary(workflows), expected, `expected ${file} without ${key} to be rejected`);
+  }
 });
 
 test('rejects a substituted App ID or a secret outside the boundary on a token step', async () => {
@@ -189,11 +223,13 @@ test('rejects a substituted App ID or a secret outside the boundary on a token s
     ['app-id', '${{ secrets.APP_ID }}', /App ID must not be read from a secret, found `secrets.APP_ID`/],
     ['app-id', '${{ vars.OTHER_APP_ID }}', /App ID must come from `vars.APP_ID`, found `vars.OTHER_APP_ID`/],
     ['private-key', '${{ secrets.SOME_OTHER_TOKEN }}', /must set `private-key: \$\{\{ secrets\.APP_PRIVATE_KEY \}\}`/],
-    ['skip-token-revoke', 'true', /passes `skip-token-revoke`, which is not one of the boundary inputs/],
+    ['skip-token-revoke', 'true', /passes `skip-token-revoke`, which is not one of the token site's boundary inputs/],
   ]) {
-    const workflows = await repositoryWorkflows();
-    tokenStepOf(workflows.documents, 'build.yml').with.set(key, value);
-    assert.throws(() => assertWithinBoundary(workflows), expected, `expected \`${key}: ${value}\` to be rejected`);
+    for (const site of tokenSites) {
+      const workflows = await repositoryWorkflows();
+      tokenStepOf(workflows.documents, site.workflow).with.set(key, value);
+      assert.throws(() => assertWithinBoundary(workflows), expected, `expected \`${key}: ${value}\` in ${site.workflow} to be rejected`);
+    }
   }
 });
 
@@ -385,11 +421,12 @@ test('rejects a specification origin or submodule that the allowlist does not na
   assert.match(absent.join('\n'), /`\.gitmodules` declares no `api` submodule/);
 });
 
-test('rejects the boundary credential on any step but the specification checkout', async () => {
+test('rejects the boundary credential on any step but the two token sites and the specification checkout', async () => {
   for (const [file, mutate, expected] of [
-    ['browser.yml', (document) => document.steps.find((step) => step.uses === 'pnpm/action-setup@v6').with.set('token', '${{ secrets.APP_PRIVATE_KEY }}'), /browser\.yml:30 step reads `secrets\.APP_PRIVATE_KEY`; only the specification checkout in `build\.yml` carries that credential/],
-    ['test.yml', (document) => document.steps.find((step) => step.uses === 'actions/setup-node@v4').with.set('auth-token', '${{ secrets.APP_PRIVATE_KEY }}'), /test\.yml:25 step reads `secrets\.APP_PRIVATE_KEY`; only the specification checkout/],
+    ['browser.yml', (document) => document.steps.find((step) => step.uses === 'pnpm/action-setup@v6').with.set('token', '${{ secrets.APP_PRIVATE_KEY }}'), /browser\.yml:30 step reads `secrets\.APP_PRIVATE_KEY`; only the two token sites \(build\.yml:build, release\.yml:handoff\) and the specification checkout carry that credential/],
+    ['test.yml', (document) => document.steps.find((step) => step.uses === 'actions/setup-node@v4').with.set('auth-token', '${{ secrets.APP_PRIVATE_KEY }}'), /test\.yml:25 step reads `secrets\.APP_PRIVATE_KEY`; only the two token sites/],
     ['build.yml', (document) => document.steps.find((step) => step.job === 'rust-check' && step.uses === 'actions/checkout@v4').with.set('token', '${{ secrets.APP_PRIVATE_KEY }}'), /build\.yml:105/],
+    ['release.yml', (document) => document.steps.find((step) => step.job === 'record' && step.uses === 'actions/upload-artifact@v4').with.set('name', '${{ secrets.APP_PRIVATE_KEY }}'), /release\.yml:\d+ step reads `secrets\.APP_PRIVATE_KEY`; only the two token sites/],
   ]) {
     const workflows = await repositoryWorkflows();
     mutate(documentOf(workflows.documents, file));
@@ -433,7 +470,7 @@ test('fails closed when the credential surface is emptied or a call resolves els
   );
 });
 
-test('the boundary names the one repository and one permission the request carries', async () => {
+test('the boundary names the two token sites, each one repository and one permission', async () => {
   const submoduleRepositories = parseGitmodules(await readFile(gitmodulesPath, 'utf8'));
   assert.deepEqual([...submoduleRepositories], [['api', 'git-malu/AnyWear-Service-API']]);
   assert.equal(sourceCiCredentialBoundary.specificationRepository, 'AnyWear-Service-API');
@@ -446,59 +483,154 @@ test('the boundary names the one repository and one permission the request carri
     repositories: 'AnyWear-Service-API',
     'permission-contents': 'read',
   });
-  assert.deepEqual(sourceCiCredentialBoundary.permissions, { contents: 'read' });
+  assert.deepEqual(tokenSites, [
+    {
+      workflow: 'build.yml',
+      job: 'build',
+      ref: 'fee1f7d63c2ff003460e3d139729b119787bc349',
+      version: 'v2.2.2',
+      repository: 'AnyWear-Service-API',
+      permissions: { contents: 'read' },
+      readsSpecification: true,
+    },
+    {
+      workflow: 'release.yml',
+      job: 'handoff',
+      ref: '64ab729a6294000f5aa4a4bc0b73d1f32bc45510',
+      version: 'v3.3.0',
+      repository: 'AnyWear-E2E',
+      permissions: { actions: 'write' },
+      readsSpecification: false,
+    },
+  ]);
+  assert.deepEqual(tokenSites.map(tokenSiteWith), [
+    {
+      'app-id': '${{ vars.APP_ID }}',
+      'private-key': '${{ secrets.APP_PRIVATE_KEY }}',
+      owner: '${{ github.repository_owner }}',
+      repositories: 'AnyWear-Service-API',
+      'permission-contents': 'read',
+    },
+    {
+      'app-id': '${{ vars.APP_ID }}',
+      'private-key': '${{ secrets.APP_PRIVATE_KEY }}',
+      owner: '${{ github.repository_owner }}',
+      repositories: 'AnyWear-E2E',
+      'permission-actions': 'write',
+    },
+  ]);
 });
 
-test('the Client publication path keeps its default credential and is untouched', async () => {
+test('the Client publication path adds one token, in handoff, and its checkouts keep the default credential', async () => {
   const { documents } = await repositoryWorkflows();
   const publisher = documentOf(documents, 'release.yml');
-  assert.deepEqual(publisher.steps.filter((step) => step.uses.startsWith('actions/create-github-app-token@')), []);
+  const tokenSteps = publisher.steps.filter((step) => step.uses.startsWith('actions/create-github-app-token@'));
+  assert.equal(tokenSteps.length, 1);
+  assert.equal(`${tokenSteps[0].file}:${tokenSteps[0].job}`, 'release.yml:handoff');
   assert.deepEqual(publisher.steps.filter((step) => step.with?.has('submodules')), []);
   assert.deepEqual(publisher.workflow.calls, []);
-  const checkout = publisher.steps.find((step) => step.uses === 'actions/checkout@v4');
-  assert.equal(checkout.with.has('token'), false);
-  assert.equal(checkout.with.has('repository'), false);
+  const checkouts = publisher.steps.filter((step) => step.uses === 'actions/checkout@v4');
+  assert.ok(checkouts.length > 0, 'the publication chain still checks the Client out');
+  for (const checkout of checkouts) {
+    assert.equal(checkout.with.has('token'), false);
+    assert.equal(checkout.with.has('repository'), false);
+  }
 });
 
-test('the pinned App-token action accepts every input the boundary passes', async (t) => {
-  // The action's own metadata and bundled implementation at the pinned commit are the
-  // authority for what it accepts. This reaches the network; without it the other
-  // cases still cover the boundaries the workflows must stay inside.
+test('a token step outside the two sites is rejected, so no other job can mint one', async () => {
+  // The dispatch and the record jobs are the dangerous ones: either could start an
+  // E2E run or edit a release if it minted a token of its own.
+  for (const [file, job] of [['release.yml', 'record'], ['release.yml', 'deploy'], ['build.yml', 'rust-check'], ['check.yml', 'test']]) {
+    const workflows = await repositoryWorkflows();
+    const document = documentOf(workflows.documents, file);
+    document.steps.push({
+      file,
+      number: 999,
+      job,
+      name: 'Extra token',
+      id: 'extra',
+      uses: tokenActionOf(tokenSites[0]),
+      with: new Map(Object.entries(tokenSiteWith(tokenSites[0]))),
+    });
+    assert.throws(
+      () => assertWithinBoundary(workflows),
+      new RegExp(`App-token step is in \`${file}:${job}\`, which is not one of the two token sites`),
+      `expected a token in ${file}:${job} to be rejected`,
+    );
+  }
+
+  // Removing one of the two sites must fail, not quietly narrow the boundary.
+  const workflows = await repositoryWorkflows();
+  const release = documentOf(workflows.documents, 'release.yml');
+  release.steps = release.steps.filter((step) => step.job !== 'handoff');
+  assert.throws(
+    () => assertWithinBoundary(workflows),
+    /no App-token step was found in `release\.yml:handoff`; the release\.yml token site is unverified/,
+  );
+});
+
+test('the pinned App-token action accepts every input each token site passes', async (t) => {
+  // The action's own metadata and bundled implementation at each pinned commit are
+  // the authority for what it accepts. This reaches the network; without it the
+  // other cases still cover the boundaries the workflows must stay inside.
   const pinned = sourceCiCredentialBoundary.tokenAction;
-  const source = async (path) => {
-    const response = await fetch(`https://raw.githubusercontent.com/${pinned.repository}/${pinned.ref}/${path}`, {
+  const source = async (ref, path) => {
+    const response = await fetch(`https://raw.githubusercontent.com/${pinned.repository}/${ref}/${path}`, {
       signal: AbortSignal.timeout(20_000),
     });
-    assert.equal(response.status, 200, `${pinned.repository}@${pinned.ref}/${path} must be readable`);
+    assert.equal(response.status, 200, `${pinned.repository}@${ref}/${path} must be readable`);
     return response.text();
   };
 
-  let action;
-  let implementation;
+  const metadata = new Map();
   try {
-    [action, implementation] = await Promise.all([source('action.yml'), source('dist/main.cjs')]);
+    for (const site of tokenSites) metadata.set(site.workflow, await source(site.ref, 'action.yml'));
   } catch (error) {
     t.diagnostic(`Pinned action metadata was not reachable: ${error.message}`);
     return;
   }
 
-  // Every input the workflow passes must be an input the action declares.
-  for (const key of Object.keys(sourceCiCredentialBoundaryWith)) {
-    assert.match(action, new RegExp(`^\\s{2}${key}:$`, 'm'), `action.yml must declare input \`${key}\``);
+  // Every input each site passes must be an input that site's pin declares, and the
+  // permission the site asks for must be one the action can request.
+  for (const site of tokenSites) {
+    const action = metadata.get(site.workflow);
+    for (const key of Object.keys(tokenSiteWith(site))) {
+      assert.match(action, new RegExp(`^\\s{2}${key}:$`, 'm'), `action.yml@${site.version} must declare input \`${key}\`, which ${site.workflow} passes`);
+    }
+    for (const name of Object.keys(site.permissions)) {
+      assert.match(action, new RegExp(`^\\s{2}permission-${name}:$`, 'm'), `action.yml@${site.version} must declare \`permission-${name}\``);
+    }
   }
-  assert.match(action, /^\s{2}permission-contents:\n(?:\s+.*\n)*?\s+description: "[^"]*'read' or 'write'\."/m);
 
-  // Runtime behaviour at the pin: the allowlist is applied to the named owner, and the
-  // requested permission set is exactly what the workflow asks for.
+  const sourceCi = tokenSites[0];
+  assert.match(
+    metadata.get(sourceCi.workflow),
+    /^\s{2}permission-contents:\n(?:\s+.*\n)*?\s+description: "[^"]*'read' or 'write'\."/m,
+    'the source-CI pin must keep declaring `permission-contents` as a read/write level',
+  );
+
+  // Runtime behaviour at the source-CI pin: the allowlist is applied to the named
+  // owner, and the requested permission set is exactly what the workflow asks for.
+  let implementation;
+  try {
+    implementation = await source(sourceCi.ref, 'dist/main.cjs');
+  } catch (error) {
+    t.diagnostic(`Pinned action implementation was not reachable: ${error.message}`);
+    return;
+  }
+
   assert.ok(implementation.includes("Inputs 'owner' and 'repositories' are set. Creating token for the following repositories"));
   assert.ok(implementation.includes('"GET /repos/{owner}/{repo}/installation"'));
   assert.ok(implementation.includes('"POST /app/installations/{installation_id}/access_tokens"'));
   assert.ok(implementation.includes('var repositories = getInput("repositories").split(/[\\n,]+/).map((s) => s.trim())'));
   assert.ok(implementation.includes('repositoryNames: parsedRepositoryNames,\n    permissions: permissions2'));
 
-  // The v3 line deprecates `app-id` for `client-id`, so a pin inside v2 is the version
-  // whose declared inputs this boundary is written against.
-  assert.equal(pinned.version, 'v2.2.2');
+  // The v3 line deprecates `app-id` for `client-id`, so the source-CI pin stays inside
+  // v2, whose declared inputs the specification checkout is written against. The
+  // release handoff uses the v3 line and passes `app-id`, which that pin still
+  // declares and accepts.
+  assert.equal(sourceCi.version, 'v2.2.2');
+  assert.equal(tokenSites[1].version, 'v3.3.0');
 });
 
 test('the submodule revision comes from the index gitlink, not a literal', async () => {

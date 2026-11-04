@@ -217,5 +217,20 @@ test('the automatic entry stays automatic and the publication entry stays the on
   assert.match(check, /^on:\n {2}push:\n {4}branches: \[main\]\n {2}pull_request:\n {4}branches: \[main\]\n/m);
 
   // The publication entry adds the merge event; it is not a second automatic check.
-  assert.match(read('release.yml'), /^on:\n {2}push:\n {4}branches: \[main\]\n {2}workflow_dispatch:\n/m);
+  // The trigger order is asserted without pinning the old adjacency: the 14-line
+  // #268 declaration sits between `on:` and `push:`, and `paths-ignore` sits
+  // between `branches: [main]` and `workflow_dispatch:`.
+  const release = read('release.yml');
+  const onMatch = /^on:\n/m.exec(release);
+  assert.ok(onMatch, 'release.yml must declare a top-level `on:` block');
+  const afterOn = release.slice(onMatch.index + onMatch[0].length);
+  const nextTopLevel = afterOn.search(/^[a-z][a-z0-9-]*:\n/m);
+  const on = afterOn.slice(0, nextTopLevel < 0 ? undefined : nextTopLevel);
+  assert.deepEqual([...on.matchAll(/^ {2}([a-z_]+):$/gm)].map((match) => match[1]), ['push', 'workflow_dispatch']);
+  const pushStart = on.indexOf('  push:\n');
+  const dispatchAt = on.indexOf('  workflow_dispatch:\n', pushStart);
+  assert.ok(pushStart >= 0 && dispatchAt > pushStart, 'release.yml must declare the push trigger before the dispatch');
+  const push = on.slice(pushStart + '  push:\n'.length, dispatchAt);
+  assert.match(push, /^ {4}branches: \[main\]$/m);
+  assert.match(push, /^ {4}paths-ignore:\n {6}- '\*\*\/\*\.md'$/m);
 });

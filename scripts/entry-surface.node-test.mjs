@@ -25,6 +25,50 @@ const automaticEntry = 'check.yml';
 const manualEntry = 'release.yml';
 const calledWorkflows = ['build.yml', 'test.yml', 'browser.yml'];
 
+// #268: the one `paths-ignore` declaration a `main`-push trigger carries. The literal
+// is the contract — ten comment lines, then the trigger with the single quoted
+// pattern — so an edit to either the comments or the pattern fails this guard.
+const PATHS_IGNORE_DECLARATION = [
+  '  # A merge whose changed files are all documentation starts nothing: every changed',
+  '  # path matches `paths-ignore`, so the run is skipped before any job — no artifact',
+  '  # is published, no deployment is handed off and no bundle is synced.',
+  '  # A file outside the list still starts the chain, because `paths-ignore` skips only',
+  '  # when every changed path matches: one source file beside one document deploys.',
+  '  # The twin declaration is the `push` trigger in the other repository: this list is',
+  '  # carried verbatim by AnyWear-Service/.github/workflows/service-beta.yml and',
+  '  # AnyWear-Client/.github/workflows/release.yml.',
+  '  # Landing this filter is itself a non-documentation merge: it starts one run in each',
+  '  # repository. It is the last merge of this documentation delivery that deploys.',
+  '  push:',
+  '    branches: [main]',
+  '    paths-ignore:',
+  "      - '**/*.md'",
+].join('\n');
+
+// #268: GitHub's documented path-filter matcher. `path.matchesGlob` would certify the
+// wrong outcome — it excludes dot directories, so `.github/DEPLOYMENT.md` misses
+// `**/*.md` although GitHub's rule matches it — so the rules are written here: `*`
+// matches any characters except `/`, `**` matches any characters including `/`, a
+// leading `**/` (and a `/**/` segment) also matches zero directories, and the pattern
+// matches the whole path from the repository root.
+function matchesPathFilter(pattern, path) {
+  let source = '';
+  for (let index = 0; index < pattern.length; index += 1) {
+    if (pattern.startsWith('**/', index)) {
+      source += '(?:[^/]+/)*';
+      index += 2;
+    } else if (pattern.startsWith('**', index)) {
+      source += '.*';
+      index += 1;
+    } else if (pattern[index] === '*') {
+      source += '[^/]*';
+    } else {
+      source += pattern[index].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  return new RegExp(`^${source}$`).test(path);
+}
+
 /** The top-level `on:` block, ending at the next column-zero mapping key. */
 function onSection(workflow) {
   const match = /^on:\n/m.exec(workflow);
@@ -114,12 +158,70 @@ test('the repository exposes exactly two entries: one automatic check and one pu
 
 test('the publication entry runs on a merge to main as well as on a manual dispatch', () => {
   const release = read(manualEntry);
+  assert.ok(release.includes(PATHS_IGNORE_DECLARATION), 'release.yml must carry the #268 declaration verbatim');
   assert.deepEqual(triggers(release).sort(), ['push', 'workflow_dispatch']);
   assert.match(onSection(release), /^ {2}push:\n {4}branches: \[main\]$/m);
   assert.match(onSection(release), /^ {2}workflow_dispatch:$/m);
 
   const check = read(automaticEntry);
   assert.doesNotMatch(check, /workflow_dispatch/, 'the automatic check has no dispatch surface');
+});
+
+// #268: a merge whose changed files are all Markdown starts no publication, because
+// every changed path matches `paths-ignore`; one file outside the list still starts
+// the whole five-job chain. Both directions are evaluated with a matcher written to
+// GitHub's documented `*`/`**` rules, not with `path.matchesGlob`.
+test('a documentation-only merge starts nothing while a mixed merge starts the publication', () => {
+  // The matcher is self-checked against the documented cheat sheet before it evaluates
+  // the declaration, so a broken matcher cannot pass by agreeing with itself.
+  for (const [pattern, path, expected] of [
+    ['**.js', 'index.js', true],
+    ['**.js', 'js/index.js', true],
+    ['**.js', 'src/js/app.js', true],
+    ['**/README.md', 'README.md', true],
+    ['**/README.md', 'js/README.md', true],
+    ['**/*-post.md', 'my-post.md', true],
+    ['docs/**/*.md', 'docs/mona/hello-world.md', true],
+    ['docs/**/*.md', 'src/README.md', false],
+  ]) {
+    assert.equal(matchesPathFilter(pattern, path), expected, `matcher self-check: '${pattern}' against '${path}'`);
+  }
+
+  const release = read(manualEntry);
+  assert.ok(release.includes(PATHS_IGNORE_DECLARATION), 'release.yml must carry the #268 declaration verbatim');
+  assert.match(
+    release,
+    /^ {2}push:\n {4}branches: \[main\]\n {4}paths-ignore:\n {6}- '\*\*\/\*\.md'$/m,
+    'the push trigger keeps `branches: [main]` and excludes the documentation set',
+  );
+  assert.doesNotMatch(release, /^ {4}paths:/m, 'the push trigger excludes with `paths-ignore`, not with an allowlist');
+
+  // The list is read back from the workflow text, so the evaluation covers what the
+  // repository actually declares rather than a copy of it.
+  const pushStart = release.indexOf('\n  push:\n');
+  assert.ok(pushStart >= 0, 'release.yml must declare a `push` trigger');
+  const afterPush = release.slice(pushStart + '\n  push:\n'.length);
+  const nextTrigger = afterPush.search(/^ {2}[a-z_]+:\n/m);
+  const push = afterPush.slice(0, nextTrigger < 0 ? undefined : nextTrigger);
+  const declared = [...push.matchAll(/^ {6}- '([^']+)'$/gm)].map((match) => match[1]);
+  assert.deepEqual(declared, ['**/*.md'], 'the declared `paths-ignore` list is exactly the one Markdown pattern');
+
+  // `paths-ignore` semantics: skipped only when every changed path matches.
+  const skips = (paths) => paths.every((path) => declared.some((pattern) => matchesPathFilter(pattern, path)));
+
+  assert.ok(skips(['README.md']), 'a documentation-only merge starts nothing');
+  assert.ok(skips(['docs/beta-web-publication.md', 'AGENTS.md']), 'a documentation-only merge of several files starts nothing');
+  assert.ok(!skips(['README.md', 'src/main.tsx']), 'one source file beside a document still starts the publication');
+  assert.ok(!skips(['index.html']), 'a product input outside the list still starts the publication');
+  assert.ok(!skips(['.github/workflows/release.yml']), 'a workflow change still starts the publication');
+  assert.ok(!skips(['.github/scripts/assert-client-publication.mjs']), 'a script outside the list still starts the publication');
+
+  // The filter is the only trigger change: the five jobs and the dispatch menu stay.
+  assert.deepEqual(jobNames(release), ['build', 'verify', 'deploy', 'record', 'handoff']);
+  assert.deepEqual(triggers(release), ['push', 'workflow_dispatch']);
+  const operation = inputBlock(release, 'operation');
+  assert.match(operation, /^ {8}type: choice$/m);
+  assert.match(operation, /^ {8}options: \[deploy\]$/m);
 });
 
 test('the dispatch surface is exactly one workflow, release.yml', () => {

@@ -6,8 +6,20 @@ name: Deploy Beta Web Client
 # builds the revision, verifies it without credentials, and only then assumes the
 # dedicated publish role to sync the built assets and record the publication.
 on:
+  # A merge whose changed files are all documentation starts nothing: every changed
+  # path matches `paths-ignore`, so the run is skipped before any job — no artifact
+  # is published, no deployment is handed off and no bundle is synced.
+  # A file outside the list still starts the chain, because `paths-ignore` skips only
+  # when every changed path matches: one source file beside one document deploys.
+  # The twin declaration is the `push` trigger in the other repository: this list is
+  # carried verbatim by AnyWear-Service/.github/workflows/service-beta.yml and
+  # AnyWear-Client/.github/workflows/release.yml.
+  # Landing this filter is itself a non-documentation merge: it starts one run in each
+  # repository. It is the last merge of this documentation delivery that deploys.
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
   workflow_dispatch:
     inputs:
       operation:

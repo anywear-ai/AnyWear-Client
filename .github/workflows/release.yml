@@ -128,9 +128,19 @@ jobs:
       CLIENT_PUBLISH_ROLE_ARN: ${{ vars.CLIENT_PUBLISH_ROLE_ARN }}
 
     steps:
+      # `pnpm run test:run` below includes the ambient case in
+      # `assert-client-version-bump.node-test.mjs`, which calls the real checker with
+      # the CI environment. Under this workflow's `push` trigger the checker resolves
+      # `github.event.before` from the event payload and reads that commit, so this
+      # checkout must contain the history behind `github.sha`: a depth-1 checkout has
+      # no such revision and the check fails on every merge. Fetch the whole history
+      # (`0`), because `2` would cover only a single-commit push and fail for a
+      # multi-commit push or a merge commit. `test.yml` fetches the same way for the
+      # same reason.
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           ref: ${{ github.sha }}
           persist-credentials: false
 
@@ -470,10 +480,13 @@ jobs:
           fi
 
       # `gh workflow run` cannot ask for the run it created, so the dispatch goes
-      # through the REST endpoint with `return_run_details`. The created run is then
-      # read back and must carry this run's URL in its name: a dispatch dropped at
-      # birth by a full queue returns a run whose name has no key, and this job fails
-      # instead of claiming a delivery it did not make. This is the job's last step.
+      # through the REST endpoint with `return_run_details`. The response names the
+      # created run by id, and the normal path reads that run back by id — one read,
+      # no polling — because the run exists as soon as the dispatch returns. The run
+      # title is rendered after the run appears, so a check that reads it immediately
+      # reports a failure for a run that exists; the title is read only on the
+      # fallback path below, and there it is polled a bounded number of times. This is
+      # the job's last step.
       - name: Dispatch the post-publication smoke
         if: steps.dedupe.outputs.skip != 'true'
         shell: bash
@@ -490,14 +503,47 @@ jobs:
             -f 'inputs[worker_slot_offset]=0' \
             -f "inputs[dispatched_by]=${DISPATCHED_BY}")"
           run_id="$(jq -r '.workflow_run_id // empty' <<< "$response")"
-          run_url="$(jq -r '.html_url // empty' <<< "$response")"
-          if [ -z "$run_id" ] || [ -z "$run_url" ]; then
-            echo "::error::The dispatch returned no run: ${response}"
-            exit 1
-          fi
-          echo "Dispatched the post-publication smoke: ${run_url}"
-          display_title="$(gh api "repos/${E2E_OWNER}/${E2E_REPOSITORY}/actions/runs/${run_id}" --jq '.display_title')"
-          if [[ "$display_title" != *"$DISPATCHED_BY"* ]]; then
-            echo "::error::Run ${run_url} is named '${display_title}', which does not carry ${DISPATCHED_BY}"
-            exit 1
+          run_url="$(jq -r '.html_url // .run_url // empty' <<< "$response")"
+
+          # Normal path: the response names the run it created, so read that run back
+          # by id and require the id to match. Reading the run title here is the defect
+          # this check must not repeat: the title renders shortly after the run row
+          # appears, so an immediate read fails for a run that exists.
+          if [ -n "$run_id" ]; then
+            echo "Dispatched the post-publication smoke: ${run_url:-run ${run_id}}"
+            created_id="$(gh api \
+              "repos/${E2E_OWNER}/${E2E_REPOSITORY}/actions/runs/${run_id}" --jq '.id')" || {
+              echo "::error::The dispatch returned run ${run_id}, which cannot be read back"
+              exit 1
+            }
+            if [ "$created_id" != "$run_id" ]; then
+              echo "::error::The dispatch returned run ${run_id} but the runs API returned '${created_id}'"
+              exit 1
+            fi
+          else
+            # Fallback only when the response carries no `workflow_run_id` (an older
+            # API or a proxy that strips it): the run title is the only handle left,
+            # and it renders shortly after the run appears. Poll a bounded number of
+            # times with a short wait; a single immediate read is the bug, not the
+            # check.
+            attempts=8
+            wait_seconds=2
+            run_url=""
+            for attempt in $(seq 1 "$attempts"); do
+              run_url="$(gh api \
+                "repos/${E2E_OWNER}/${E2E_REPOSITORY}/actions/workflows/${E2E_WORKFLOW}/runs?per_page=100" \
+                --jq '.workflow_runs[] | select(.display_title | contains(env.DISPATCHED_BY)) | .html_url' \
+                | sed -n '1p')" || run_url=""
+              if [ -n "$run_url" ]; then
+                break
+              fi
+              if [ "$attempt" -lt "$attempts" ]; then
+                sleep "$wait_seconds"
+              fi
+            done
+            if [ -z "$run_url" ]; then
+              echo "::error::The dispatch returned no workflow_run_id, and no run titled with ${DISPATCHED_BY} appeared in ${attempts} attempts"
+              exit 1
+            fi
+            echo "Dispatched the post-publication smoke: ${run_url} (found by title on attempt ${attempt})"
           fi

@@ -97,7 +97,7 @@ Before writing anything, `deploy` resolves the live Beta interface:
 | user pool id, client id | `/anywear/beta/cognito_user_pool_id`, `/anywear/beta/cognito_client_id` |
 
 The whole table is one `DescribeStacks` read of `AnyWearPlatformStack-beta` — the
-Beta `Base` stack that owns both CloudFront distributions — plus the two SSM
+Beta `Platform` stack that owns both CloudFront distributions — plus the two SSM
 parameters; the deploy path reads no other stack.
 
 It compares each value with the interface recorded in
@@ -139,7 +139,7 @@ false and every job is skipped.
 | `CLIENT_PUBLISH_ROLE_ARN` | `arn:aws:iam::650880818323:role/beta-client-publish-role` |
 
 Infra owns the dedicated role. It needs `DescribeStacks` on
-`AnyWearPlatformStack-beta`, the Beta `Base` stack the deploy path reads,
+`AnyWearPlatformStack-beta`, the Beta `Platform` stack the deploy path reads,
 `GetParameter` on the two Cognito parameters, `ListBucket` and object
 `GetObject`/`PutObject`/`DeleteObject` on the existing Client bucket, and
 `CreateInvalidation` on its distribution. It cannot deploy CDK/CFN, assume

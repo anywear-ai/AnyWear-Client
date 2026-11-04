@@ -342,8 +342,55 @@ test('#226: the handoff dispatches exactly one deploy-smoke and has no step afte
   assert.match(dispatch, /-f 'inputs\[worker_slot_offset\]=0'/);
   assert.match(dispatch, /-f "inputs\[dispatched_by\]=\$\{DISPATCHED_BY\}"/);
   assert.doesNotMatch(dispatch, /expected_/);
-  // The created run is read back and must carry this run's URL in its name, which
-  // also catches a run dropped at birth by a full queue.
-  assert.match(dispatch, /\.display_title/);
-  assert.match(dispatch, /does not carry \$\{DISPATCHED_BY\}/);
+
+  // #226: the dispatch response names the run it created, so the normal path verifies
+  // that run by id with one read and no polling. The run title renders after the run
+  // appears, so a check that reads it immediately failed in production for a run that
+  // existed; the title is read only inside the bounded fallback branch.
+  assert.match(dispatch, /run_id="\$\(jq -r '\.workflow_run_id \/\/ empty' <<< "\$response"\)"/);
+  assert.match(dispatch, /run_url="\$\(jq -r '\.html_url \/\/ \.run_url \/\/ empty' <<< "\$response"\)"/);
+
+  const fallbackMarker = 'Fallback only when the response carries no `workflow_run_id`';
+  const fallbackStart = dispatch.indexOf(fallbackMarker);
+  assert.ok(fallbackStart > 0, 'the dispatch step must keep the fallback branch for a response carrying no run id');
+
+  const byId = dispatch.slice(0, fallbackStart);
+  assert.match(byId, /^ {10}if \[ -n "\$run_id" \]; then$/m, 'the by-id path is the normal path, taken when the response carries the id');
+  assert.match(byId, /actions\/runs\/\$\{run_id\}" --jq '\.id'/);
+  assert.match(byId, /\[ "\$created_id" != "\$run_id" \]/, 'the created run id must equal the dispatched id');
+  assert.doesNotMatch(byId, /display_title/, 'the normal path must not read the run title');
+  assert.doesNotMatch(byId, /sleep/, 'the normal path must not poll');
+
+  // The fallback is a bounded poll: a finite attempt count, a wait between attempts,
+  // and a failure only after the attempts are exhausted.
+  const fallback = dispatch.slice(fallbackStart);
+  assert.match(fallback, /display_title/, 'only the fallback reads the run title');
+  assert.match(fallback, /attempts=\d+/);
+  assert.match(fallback, /for attempt in \$\(seq 1 "\$attempts"\)/);
+  assert.match(fallback, /sleep "\$wait_seconds"/);
+  assert.match(fallback, /if \[ "\$attempt" -lt "\$attempts" \]/);
+  assert.match(fallback, /\[ -z "\$run_url" \]/);
+  assert.match(fallback, /appeared in \$\{attempts\} attempts/);
+});
+
+// #226: `verify` runs `pnpm run test:run`, which includes the ambient case in
+// `assert-client-version-bump.node-test.mjs`: it calls the real checker with the CI
+// environment, and under the `push` trigger the checker resolves `github.event.before`
+// from the event payload and reads that commit from this checkout. A depth-1 checkout
+// does not contain the revision, so the ambient check fails on a merge with an
+// unresolvable base even when the version history itself satisfies the rule. Give
+// `verify` the history the check resolves.
+test('#226: the verify checkout fetches the history the version-bump check reads', () => {
+  const release = read(manualEntry);
+  const verify = jobSection(release, 'verify');
+  assert.match(verify, /^ {8}run: pnpm run test:run$/m, 'verify must keep running the suite that holds the bump check');
+
+  const checkout = stepSection(verify, 'Checkout');
+  assert.match(checkout, /^ {10}fetch-depth: 0$/m, 'the verify checkout must fetch the full history, or the push base revision is absent');
+  // `2` is the minimum for a single-commit push and fails for a multi-commit push or
+  // a merge commit, and any shallower-than-full fetch can miss the before revision.
+  assert.doesNotMatch(checkout, /^ {10}fetch-depth: [1-9]\d*$/m);
+
+  // The called test workflow fetches the same way, for the same check.
+  assert.match(stepSection(read('test.yml'), 'Checkout'), /^ {10}fetch-depth: 0$/m);
 });

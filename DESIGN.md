@@ -247,7 +247,7 @@ Mirror mode switch and the try-on action.
 | Mirror | `space-y-8`; input sections `grid grid-cols-1 md:grid-cols-2 gap-6`; white `rounded-lg p-6 shadow` cards |
 | Wardrobe | grids `grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5` |
 | Settings and dashboard | Settings `max-w-lg` (32rem) centered with `space-y-8` and `p-6` cards; dashboard `space-y-6`, details `sm:grid-cols-3` |
-| Wardrobe dialogs | fixed `inset-0`: Add/Details `z-10` with `sm:max-w-lg shadow-xl`; outfit dialogs `z-50` with `max-w-lg w-full p-6` |
+| Wardrobe dialogs | fixed `inset-0`: Add/Details `z-10` with `sm:max-w-lg shadow-xl`; the Add dialog's photo list is one `rounded-md` row per photo in `space-y-2`, each with `border-gray-200` and `px-3 py-2`; outfit dialogs `z-50` with `max-w-lg w-full p-6` |
 
 Main content runs full width to its maximum. Image proportions are fixed by role: garment
 and base-photo frames use `aspect-[4/5]` with `object-cover`; history thumbnails keep 3:4;
@@ -296,10 +296,10 @@ composes the utilities below.
 | History card actions | `bg-black/50` overlay over the whole card, revealed by pointer hover or by focus within the overlay itself; the actions stay in the tab order and the accessibility tree while hidden, and Delete keeps the overlay visible while it swaps the action set in place for a confirmation (`Yes, Delete` / `Cancel`) rather than opening a dialog |
 | Dialog panel | White surface, `rounded-xl shadow-xl`, `z-10` for Add/Details and `z-50` for outfit dialogs and the history image viewer, whose panel is the image itself; dismissed by backdrop click and Escape, with focus moved into the panel on open and restored to the control that opened it on close. While any panel is open the page behind it does not scroll: the shared dialog hook hides body overflow on the first open panel and restores the previous inline value when the last one closes. |
 | Text input | White surface with `border-gray-300` and `rounded-md`; focus moves the border to indigo and, in the dialogs, paints the 2px indigo ring inset where a scrolling form would clip an offset. |
-| Status badge | `rounded-full` pill with `text-xs`, one of the pending, processing, or failed pairs from [Colors](#colors), always paired with text |
+| Status badge | `rounded-full` pill with `text-xs`, one of the pending, processing, or failed pairs from [Colors](#colors), always paired with text. The Add dialog's photo rows use the same pill for their step: the pending pair for `queued`, the processing pair for `reserving`, `uploading` and `confirming`, the failed pair for `failed`, and the app surface and body text colors (`bg-gray-100 text-gray-700`) for `created`. |
 | Selection card | `aspect-[4/5]` image with `rounded-lg`; unselected uses a gray border, selected uses an indigo border with `ring` and a text label |
 | Credit pill | `rounded-full px-3 py-1.5 text-sm font-medium`, colored by remaining balance: green above 2, amber at 1–2, red at 0 |
-| Error message | `text-red-500` for field and inline errors; `role="alert"` for a failure the user must notice |
+| Error message | `text-red-500` for field and inline errors; `role="alert"` for a failure the user must notice. A failed photo row states its cause in `text-xs text-red-500`. |
 | Rating control | Five stars in a `div` with `role="radiogroup"` named Rate this result, each star a `button` with `role="radio"` and `aria-checked`; one tab stop with arrow-key selection; the focused star paints a 2px indigo ring (`focus-visible:ring-2 focus-visible:ring-indigo-500`); filled stars use `text-indigo-500` and outline stars `text-gray-300`, and the sentence uses `text-sm text-gray-600`. A read-only rating is text (`Your rating: N/5`) with the stars as decoration. |
 
 The History card actions row costs a second Components entry for one surface and restates
@@ -308,15 +308,21 @@ recorded because the reveal is the component's new interaction state, and an und
 interaction state is the larger cost.
 
 Focus in the four Wardrobe dialogs is a 2px indigo ring, defined per control rather
-than inherited from a shared component: `focus:` on controls, `focus-within:` on the label
-that paints for AddItem's `sr-only` file input, `ring-offset-2` on buttons outside a clipping
-container, `ring-inset` where a scrolling form or list would clip an offset, and
-`focus:border-indigo-500` on the text inputs and the View select; `:focus` also paints on the
-panel's opening focus and on a pointer click. The dialogs set both a width and a color, so the
-ring is indigo whatever the control's text color. A ring color without a ring width is not a
-focus treatment, and a width alone falls back to `currentColor`, which does not reliably
-contrast; both are set here. Other surfaces keep their own focus rules and are not changed
-here.
+than inherited from a shared component: `focus:` on controls, `focus-within:` on the labels
+that paint for AddItem's two `sr-only` file inputs (the multi-select picker and the camera
+input), `ring-offset-2` on buttons outside a clipping container, `ring-inset` where a
+scrolling form or list would clip an offset, and `focus:border-indigo-500` on the text inputs
+and the View select; `:focus` also paints on the panel's opening focus and on a pointer
+click. The Add dialog's photo rows add two such controls, the per-row remove button and
+`Retry failed`, both `focus:ring-2 focus:ring-indigo-500`. While a batch runs, the dialog
+disables both file inputs and every per-row remove button so the row list cannot diverge from
+the run's targets: the remove buttons keep those ring tokens and dim through
+`disabled:opacity-50`, and the two labels dim with `opacity-50 cursor-not-allowed` while
+keeping their `focus-within:` tokens. The dialogs set both a width and a
+color, so the ring is indigo whatever the control's text color. A ring color without a ring
+width is not a focus treatment, and a width alone falls back to `currentColor`, which does not
+reliably contrast; both are set here. Other surfaces keep their own focus rules and are not
+changed here.
 
 Motion uses Tailwind's defaults: `transition-*` utilities at 150ms with `cubic-bezier(0.4, 0,
 0.2, 1)`, plus `animate-spin` for busy spinners and `animate-pulse` for skeletons. No custom

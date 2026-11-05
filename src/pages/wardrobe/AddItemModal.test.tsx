@@ -205,7 +205,9 @@ describe('AddItemModal', () => {
     expect(screen.getByLabelText('Image Upload a file or take a photo')).toBe(firstInput);
   });
 
-  it('appends one row per camera activation inside one open dialog', () => {
+  it('appends one row per camera activation inside one open dialog', async () => {
+    stubReservations();
+    stubSignedPost();
     const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
     const cameraInput = camera(container);
     expect(cameraInput).toHaveAttribute('capture', 'environment');
@@ -220,6 +222,22 @@ describe('AddItemModal', () => {
     expect(within(list[0]).getByText('shot-one.png')).toBeInTheDocument();
     expect(within(list[1]).getByText('shot-two.png')).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Add Wardrobe Item' })).toBeInTheDocument();
+
+    // The two shots are one action: two reservations, two items, one open dialog.
+    fireEvent.submit(container.querySelector('form')!);
+    await waitFor(() => expect(screen.getByText('2 items added, 0 failed')).toBeInTheDocument());
+    expect(getUploadUrl).toHaveBeenCalledTimes(2);
+    expect(confirmUpload).toHaveBeenCalledTimes(2);
+    const settled = rows();
+    expect(settled).toHaveLength(2);
+    expect(within(settled[0]).getByText('shot-one.png')).toBeInTheDocument();
+    expect(within(settled[0]).getByText('Created')).toBeInTheDocument();
+    expect(within(settled[0]).getByText('Item item-reservation-1')).toBeInTheDocument();
+    expect(within(settled[1]).getByText('shot-two.png')).toBeInTheDocument();
+    expect(within(settled[1]).getByText('Created')).toBeInTheDocument();
+    expect(within(settled[1]).getByText('Item item-reservation-2')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Add Wardrobe Item' })).toBeInTheDocument();
+    expect(onSuccess).not.toHaveBeenCalled();
   });
 
   it('shows each row its own step while the photo runs', async () => {

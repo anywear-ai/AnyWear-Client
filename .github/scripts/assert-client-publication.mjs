@@ -27,14 +27,16 @@ function requireCondition(condition, message) {
 
 function assertWorkflowIdentity(env) {
   requireCondition(env.BETA_MUTATION_ENABLED === 'true', 'Beta Client release is disabled');
-  requireCondition(env.GITHUB_REPOSITORY === 'git-malu/AnyWear-Client'
-    && env.GITHUB_REPOSITORY_ID === '1176104200'
-    && env.GITHUB_REF === 'refs/heads/main', 'Publication requires the original Client repository and main ref');
+  // The repository is keyed on its numeric id, which stays the same when the
+  // repository moves to another owner, so the owner-qualified name is not part of
+  // the guard: either owner may publish while the id and the ref are unchanged.
+  requireCondition(env.GITHUB_REPOSITORY_ID === '1176104200'
+    && env.GITHUB_REF === 'refs/heads/main', 'Publication requires the Client repository id 1176104200 and main ref');
   // The one publication entry has two events: a merge to `main` publishes, and a
-  // manual dispatch keeps its `deploy` operation. Both are this workflow on `main`;
-  // no other event is a publication.
+  // manual dispatch keeps its `deploy` operation. Both are this workflow on `main`
+  // in the run's own repository; no other event is a publication.
   requireCondition((env.GITHUB_EVENT_NAME === 'workflow_dispatch' || env.GITHUB_EVENT_NAME === 'push')
-    && env.GITHUB_WORKFLOW_REF === 'git-malu/AnyWear-Client/.github/workflows/release.yml@refs/heads/main', 'Publication requires the main deploy workflow dispatch or a push to main');
+    && env.GITHUB_WORKFLOW_REF === `${env.GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/main`, 'Publication requires the main deploy workflow dispatch or a push to main');
   requireCondition(/^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? '')
     && env.GITHUB_WORKFLOW_SHA === env.GITHUB_SHA, 'Publication requires the exact workflow source SHA');
   requireCondition(env.AWS_ACCOUNT_ID === '650880818323' && env.AWS_REGION === 'ap-east-1', 'Unexpected Beta account or region');

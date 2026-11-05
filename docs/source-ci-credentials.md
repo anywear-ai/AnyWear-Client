@@ -20,7 +20,7 @@ from a private repository. `build.yml` runs `pnpm run orval`, which reads
 `git diff --exit-code` when the committed generated client does not match that
 specification.
 
-`.gitmodules` declares `api` at `https://github.com/git-malu/AnyWear-Service-API.git`,
+`.gitmodules` declares `api` at `https://github.com/anywear-ai/AnyWear-Service-API.git`,
 which is private, so the default checkout credential cannot read it. The `build` job
 therefore checks the specification out separately, with the App token:
 
@@ -28,7 +28,7 @@ therefore checks the specification out separately, with the App token:
 | --- | --- |
 | `Checkout` | The Client repository, with the default `GITHUB_TOKEN`, no submodules |
 | `Generate API specification token` | Mints the App token, scoped to one repository and one permission |
-| `Checkout API specification` | Fetches `git-malu/AnyWear-Service-API` at the revision `.gitmodules` records, into `api/` |
+| `Checkout API specification` | Fetches `${{ github.repository_owner }}/AnyWear-Service-API` at the revision `.gitmodules` records, into `api/` |
 
 `rust-check`, `test` and `browser` read no repository content: `cargo check` compiles
 `src-tauri`, `pnpm run test:run` and `pnpm run test:browser` read the committed
@@ -58,6 +58,13 @@ The release handoff token step requests:
 Neither step carries an undeclared key. The boundary treats each site's `with:` set
 as closed, because an input the allowlist does not name can widen the installation
 token beyond what the review saw.
+
+Both owner-bearing values in the source-CI path are relative: the token step resolves
+`repositories: AnyWear-Service-API` against `owner: ${{ github.repository_owner }}`,
+and the specification checkout names
+`${{ github.repository_owner }}/AnyWear-Service-API`. A run therefore fetches the
+specification from whichever account owns this repository at the time, before and
+after it moves to `anywear-ai`; only `.gitmodules` names the durable new owner.
 
 The source-CI site is pinned to
 `actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349` (v2.2.2)

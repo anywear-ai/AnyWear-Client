@@ -109,7 +109,7 @@ test('exactly two App-token steps reach exactly one repository and one permissio
   const sourceCiToken = tokenSteps.find((step) => step.file === sourceCi.workflow);
   assert.equal(checkout.file, 'build.yml');
   assert.equal(checkout.job, sourceCi.job);
-  assert.equal(checkout.with.get('repository'), specificationRepositorySlug('git-malu'));
+  assert.equal(checkout.with.get('repository'), specificationRepositorySlug());
   assert.equal(checkout.with.get('ref'), specificationRevision);
   assert.equal(checkout.with.get('path'), sourceCiCredentialBoundary.specificationPath);
   assert.equal(checkout.with.get('token'), `\${{ steps.${sourceCiToken.id}.outputs.token }}`);
@@ -166,7 +166,7 @@ test('rejects an App-token action that is not pinned to an immutable commit', as
 test('rejects an allowlist that names any repository but the one its site names', async () => {
   const cases = [
     ['build.yml', 'AnyWear-Client,AnyWear-Service-API', /requests `AnyWear-Client`; the build\.yml allowlist is exactly `AnyWear-Service-API`/],
-    ['build.yml', 'git-malu/AnyWear-Service-API', /requests `git-malu\/AnyWear-Service-API`; the build\.yml allowlist is exactly `AnyWear-Service-API`/],
+    ['build.yml', 'anywear-ai/AnyWear-Service-API', /requests `anywear-ai\/AnyWear-Service-API`; the build\.yml allowlist is exactly `AnyWear-Service-API`/],
     ['build.yml', 'AnyWear-Service-API,AnyWear-Service', /requests `AnyWear-Service`; the build\.yml allowlist is exactly `AnyWear-Service-API`/],
     ['release.yml', 'AnyWear-Infra', /requests `AnyWear-Infra`; the release\.yml allowlist is exactly `AnyWear-E2E`/],
     ['release.yml', 'AnyWear-Service-API', /requests `AnyWear-Service-API`; the release\.yml allowlist is exactly `AnyWear-E2E`/],
@@ -276,13 +276,18 @@ test('rejects a specification checkout that drifts from the submodule it stands 
   assert.match(initialized, /^[0-9a-f]{40}$/, 'the api submodule must be initialised for this suite to check the pin');
 });
 
-test('rejects a checkout of any repository other than the specification', async () => {
-  const workflows = await repositoryWorkflows();
-  specificationCheckoutOf(workflows.documents, 'build.yml').with.set('repository', 'git-malu/AnyWear-Service');
-  assert.throws(
-    () => assertWithinBoundary(workflows),
-    /checkout fetches `git-malu\/AnyWear-Service`, which is not `git-malu\/AnyWear-Service-API`/,
-  );
+test('rejects a checkout that names another repository or hardcodes an owner', async () => {
+  // The owner-relative expression is the only accepted form. The second entry is the
+  // right repository under a hardcoded owner, which works on one side of the transfer
+  // and breaks on the other, so it fails here just like a wrong repository name.
+  for (const [repository, expected] of [
+    ['anywear-ai/AnyWear-Service', /checkout fetches `anywear-ai\/AnyWear-Service`, which is not `\$\{\{ github\.repository_owner \}\}\/AnyWear-Service-API`/],
+    ['git-malu/AnyWear-Service-API', /checkout fetches `git-malu\/AnyWear-Service-API`, which is not `\$\{\{ github\.repository_owner \}\}\/AnyWear-Service-API`/],
+  ]) {
+    const workflows = await repositoryWorkflows();
+    specificationCheckoutOf(workflows.documents, 'build.yml').with.set('repository', repository);
+    assert.throws(() => assertWithinBoundary(workflows), expected, `expected \`repository: ${repository}\` to be rejected`);
+  }
 });
 
 test('rejects a specification checkout that lands somewhere other than the submodule path', async () => {
@@ -294,7 +299,7 @@ test('rejects a specification checkout that lands somewhere other than the submo
 test('rejects a Client checkout that takes a credential or fetches submodules', async () => {
   for (const [mutate, expected] of [
     [(step) => step.with.set('token', '${{ steps.generate-token.outputs.token }}'), /Client checkout must use the default credential/],
-    [(step) => step.with.set('submodules', 'recursive'), /Client checkout must not fetch submodules; the specification checkout reads `git-malu\/AnyWear-Service-API` with the App token/],
+    [(step) => step.with.set('submodules', 'recursive'), /Client checkout must not fetch submodules; the specification checkout reads `anywear-ai\/AnyWear-Service-API` with the App token/],
     [(step) => step.with.set('path', 'spec'), /Client checkout must not set `path`/],
   ]) {
     const workflows = await repositoryWorkflows();
@@ -320,7 +325,7 @@ test('rejects a checkout that fetches repository content by submodules rather th
     .with.set('submodules', 'recursive');
   assert.throws(
     () => assertWithinBoundary(workflows),
-    /test\.yml:19 the Client checkout must not fetch submodules; the specification checkout reads `git-malu\/AnyWear-Service-API` with the App token/,
+    /test\.yml:19 the Client checkout must not fetch submodules; the specification checkout reads `anywear-ai\/AnyWear-Service-API` with the App token/,
   );
 });
 
@@ -401,17 +406,17 @@ test('rejects a specification origin or submodule that the allowlist does not na
   const { documents, specificationRevision } = await repositoryWorkflows();
   const renamed = validateSourceCiCredentialBoundary({
     documents,
-    submoduleRepositories: new Map([['api', 'git-malu/AnyWear-Service']]),
+    submoduleRepositories: new Map([['api', 'anywear-ai/AnyWear-Service']]),
     specificationRevision,
   });
-  assert.match(renamed.join('\n'), /`api` points at `git-malu\/AnyWear-Service`, and the allowlist names `AnyWear-Service-API`/);
+  assert.match(renamed.join('\n'), /`api` points at `anywear-ai\/AnyWear-Service`, and the allowlist names `AnyWear-Service-API`/);
 
   const extra = validateSourceCiCredentialBoundary({
     documents,
-    submoduleRepositories: new Map([['api', 'git-malu/AnyWear-Service-API'], ['extra', 'git-malu/AnyWear-E2E']]),
+    submoduleRepositories: new Map([['api', 'anywear-ai/AnyWear-Service-API'], ['extra', 'anywear-ai/AnyWear-E2E']]),
     specificationRevision,
   });
-  assert.match(extra.join('\n'), /submodule `extra` points at `git-malu\/AnyWear-E2E`, which no checkout in the boundary fetches/);
+  assert.match(extra.join('\n'), /submodule `extra` points at `anywear-ai\/AnyWear-E2E`, which no checkout in the boundary fetches/);
 
   const absent = validateSourceCiCredentialBoundary({
     documents,
@@ -472,10 +477,13 @@ test('fails closed when the credential surface is emptied or a call resolves els
 
 test('the boundary names the two token sites, each one repository and one permission', async () => {
   const submoduleRepositories = parseGitmodules(await readFile(gitmodulesPath, 'utf8'));
-  assert.deepEqual([...submoduleRepositories], [['api', 'git-malu/AnyWear-Service-API']]);
+  assert.deepEqual([...submoduleRepositories], [['api', 'anywear-ai/AnyWear-Service-API']]);
   assert.equal(sourceCiCredentialBoundary.specificationRepository, 'AnyWear-Service-API');
   assert.equal(sourceCiCredentialBoundary.specificationPath, 'api');
-  assert.equal(specificationRepositorySlug('git-malu'), 'git-malu/AnyWear-Service-API');
+  // The checkout names the owner-relative form; a named owner still resolves the
+  // same repository, which is what `.gitmodules` records.
+  assert.equal(specificationRepositorySlug(), '${{ github.repository_owner }}/AnyWear-Service-API');
+  assert.equal(specificationRepositorySlug('anywear-ai'), 'anywear-ai/AnyWear-Service-API');
   assert.deepEqual(sourceCiCredentialBoundaryWith, {
     'app-id': '${{ vars.APP_ID }}',
     'private-key': '${{ secrets.APP_PRIVATE_KEY }}',
@@ -680,11 +688,11 @@ test('an unreadable workflow or .gitmodules is reported instead of passing silen
     'a steps block that is not a sequence must not be read as steps',
   );
   assert.throws(
-    () => parseGitmodules('[submodule "api"]\n\turl = https://github.com/git-malu/AnyWear-Service-API.git\n'),
+    () => parseGitmodules('[submodule "api"]\n\turl = https://github.com/anywear-ai/AnyWear-Service-API.git\n'),
     /declares a url before its path/,
   );
   assert.throws(
-    () => parseGitmodules('[submodule "api"]\n\tpath = api\n\turl = git@gitlab.com:git-malu/AnyWear-Service-API.git\n'),
+    () => parseGitmodules('[submodule "api"]\n\tpath = api\n\turl = git@gitlab.com:anywear-ai/AnyWear-Service-API.git\n'),
     /url is not a GitHub repository/,
   );
   assert.throws(

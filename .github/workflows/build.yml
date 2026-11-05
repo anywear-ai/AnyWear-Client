@@ -47,7 +47,7 @@ jobs:
       - name: Checkout API specification
         uses: actions/checkout@v4
         with:
-          repository: git-malu/AnyWear-Service-API
+          repository: ${{ github.repository_owner }}/AnyWear-Service-API
           ref: 984cf547139aee2d0bc0a0cbc605a16ef5670e62
           path: api
           token: ${{ steps.generate-token.outputs.token }}

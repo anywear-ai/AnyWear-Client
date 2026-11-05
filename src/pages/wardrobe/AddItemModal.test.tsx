@@ -9,6 +9,7 @@ vi.mock('../../api/endpoints/wardrobe/wardrobe', () => ({
 }));
 
 import AddItemModal from './AddItemModal';
+import { CONFIRM_CHECK_WARDROBE_HINT } from '../../lib/batchUpload';
 import { HEIC_UNSUPPORTED_MESSAGE } from '../../lib/imageUpload';
 import { usePostWardrobeUpload, usePostWardrobeUploadUrl } from '../../api/endpoints/wardrobe/wardrobe';
 
@@ -412,5 +413,179 @@ describe('AddItemModal', () => {
 
     await waitFor(() => expect(screen.getByText('Tagging ready')).toBeInTheDocument());
     expect(screen.getByText('Tagging failed (VLM_TIMEOUT)')).toBeInTheDocument();
+  });
+
+  it('disables every row\u2019s Remove control while the batch runs and frees a failed row once it settles', async () => {
+    const gates = [deferred<any>(), deferred<any>(), deferred<any>()];
+    getUploadUrl.mockImplementation(() => gates[getUploadUrl.mock.calls.length - 1].promise);
+    stubSignedPost(['broken.png']);
+    const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+
+    fireEvent.change(picker(container), {
+      target: { files: [photo('one.png'), photo('broken.png'), photo('three.png')] },
+    });
+    fireEvent.submit(container.querySelector('form')!);
+
+    // Every row is one of the run's targets while it runs: removing one would
+    // leave the runner uploading a photo the list no longer shows.
+    const runningRows = rows();
+    expect(runningRows).toHaveLength(3);
+    for (const row of runningRows) {
+      const remove = within(row).getByRole('button', { name: /^Remove / });
+      expect(remove).toBeDisabled();
+      // The disabled control keeps the dialog's ring tokens.
+      expectRingTokens(remove);
+    }
+
+    gates.forEach((gate, index) => gate.resolve({
+      reservationId: `reservation-${index + 1}`,
+      expiresAt: '2026-01-01T00:00:00.000Z',
+      upload: { url: 'https://s3.example.com/upload', fields: {} },
+    }));
+
+    await waitFor(() => expect(screen.getByText('2 items added, 1 failed')).toBeInTheDocument());
+
+    const failedRow = rows()[1];
+    expect(within(failedRow).getByText('broken.png')).toBeInTheDocument();
+    const failedRemove = within(failedRow).getByRole('button', { name: 'Remove broken.png' });
+    expect(failedRemove).toBeEnabled();
+
+    fireEvent.click(failedRemove);
+
+    // The settled row can be removed, and the summary recounts what is left.
+    expect(rows()).toHaveLength(2);
+    expect(screen.queryByText('broken.png')).toBeNull();
+    expect(screen.getByText('2 items added, 0 failed')).toBeInTheDocument();
+  });
+
+  it('disables both file inputs while the batch runs and re-enables them once it settles', async () => {
+    const gate = deferred<any>();
+    getUploadUrl.mockImplementation(() => gate.promise);
+    stubSignedPost();
+    const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+
+    fireEvent.change(picker(container), { target: { files: [photo('one.png'), photo('two.png')] } });
+    fireEvent.submit(container.querySelector('form')!);
+
+    expect(picker(container)).toBeDisabled();
+    expect(camera(container)).toBeDisabled();
+    // The label carries the busy affordance, and the ring tokens stay authored.
+    for (const input of [picker(container), camera(container)]) {
+      const label = input.closest('label')!;
+      const tokens = label.className.split(/\s+/);
+      expect(tokens).toContain('opacity-50');
+      expect(tokens).toContain('cursor-not-allowed');
+      expectRingTokens(label, 'focus-within:');
+    }
+
+    gate.resolve({
+      reservationId: 'reservation-1',
+      expiresAt: '2026-01-01T00:00:00.000Z',
+      upload: { url: 'https://s3.example.com/upload', fields: {} },
+    });
+
+    await waitFor(() => expect(screen.getByText('2 items added, 0 failed')).toBeInTheDocument());
+    expect(picker(container)).toBeEnabled();
+    expect(camera(container)).toBeEnabled();
+    expect(picker(container).closest('label')!.className.split(/\s+/)).toContain('cursor-pointer');
+  });
+
+  it('submits ten of eleven photos and sends no request for the eleventh', async () => {
+    stubReservations();
+    stubSignedPost();
+    const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+
+    fireEvent.change(picker(container), {
+      target: { files: Array.from({ length: 11 }, (_, index) => photo(`batch-${index}.png`)) },
+    });
+    expect(screen.getByText('10 of 11 selected — 1 was not added')).toBeInTheDocument();
+
+    fireEvent.submit(container.querySelector('form')!);
+
+    await waitFor(() => expect(screen.getByText('10 items added, 0 failed')).toBeInTheDocument());
+    // The bound is applied to the request count, not only to the visible list.
+    expect(getUploadUrl).toHaveBeenCalledTimes(10);
+    expect(confirmUpload).toHaveBeenCalledTimes(10);
+    expect(rows()).toHaveLength(10);
+    // The eleventh photo never became a row and never caused a request.
+    expect(screen.queryByText('batch-10.png')).toBeNull();
+  });
+
+  it('submits six of seven photos when their summed bytes exceed 60 MiB', async () => {
+    stubReservations();
+    stubSignedPost();
+    const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+    const tenMiB = 10 * 1024 * 1024;
+    const files = Array.from({ length: 7 }, (_, index) => {
+      // A real File with a shadowed size: the bound reads `file.size`, not the bytes.
+      const file = photo(`large-${index}.png`);
+      Object.defineProperty(file, 'size', { value: tenMiB });
+      return file;
+    });
+
+    fireEvent.change(picker(container), { target: { files } });
+    expect(screen.getByText('6 of 7 selected — 1 was not added')).toBeInTheDocument();
+
+    fireEvent.submit(container.querySelector('form')!);
+
+    await waitFor(() => expect(screen.getByText('6 items added, 0 failed')).toBeInTheDocument());
+    expect(getUploadUrl).toHaveBeenCalledTimes(6);
+    expect(confirmUpload).toHaveBeenCalledTimes(6);
+    expect(rows()).toHaveLength(6);
+    expect(screen.queryByText('large-6.png')).toBeNull();
+  });
+
+  it('shows the wardrobe hint on a row whose confirmation outlived its automatic retry', async () => {
+    stubReservations();
+    stubSignedPost();
+    confirmUpload.mockImplementation(async ({ data }: any) => {
+      if (data.reservationId === 'reservation-1') {
+        throw Object.assign(new Error('Request failed with status code 500'), {
+          response: { status: 500 },
+        });
+      }
+      return { itemId: `item-${data.reservationId}`, taggingStatus: 'processing' };
+    });
+    const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+
+    fireEvent.change(picker(container), { target: { files: [photo('one.png'), photo('two.png')] } });
+    fireEvent.submit(container.querySelector('form')!);
+
+    await waitFor(() => expect(screen.getByText('1 item added, 1 failed')).toBeInTheDocument());
+    const failedRow = rows()[0];
+    expect(within(failedRow).getByText('Failed')).toBeInTheDocument();
+    expect(failedRow).toHaveTextContent(CONFIRM_CHECK_WARDROBE_HINT);
+    // The 500 was answered twice, on the same reservation, before the row failed.
+    expect(confirmUpload).toHaveBeenCalledTimes(3);
+  });
+
+  it('drops the bound message once that row is removed', () => {
+    const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+
+    fireEvent.change(picker(container), {
+      target: { files: Array.from({ length: 11 }, (_, index) => photo(`batch-${index}.png`)) },
+    });
+    expect(screen.getByText('10 of 11 selected — 1 was not added')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove batch-0.png' }));
+
+    // The remaining selection fits, so the message no longer describes it.
+    expect(screen.queryByText('10 of 11 selected — 1 was not added')).toBeNull();
+    expect(rows()).toHaveLength(9);
+  });
+
+  it('drops the duplicate message once the collapsed row is removed', () => {
+    const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+
+    fireEvent.change(picker(container), {
+      target: { files: [photo('linen.png'), photo('linen.png'), photo('denim.png')] },
+    });
+    expect(screen.getByText('1 duplicate photo was skipped')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove linen.png' }));
+
+    expect(screen.queryByText('1 duplicate photo was skipped')).toBeNull();
+    expect(rows()).toHaveLength(1);
+    expect(within(rows()[0]).getByText('denim.png')).toBeInTheDocument();
   });
 });

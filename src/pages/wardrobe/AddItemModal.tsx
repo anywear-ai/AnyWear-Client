@@ -187,7 +187,14 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
   };
 
   const removePhoto = (id: string) => {
-    setPhotos((previous) => previous.filter((photo) => photo.id !== id));
+    const remaining = photos.filter((photo) => photo.id !== id);
+    // The bound and duplicate messages describe the selection that produced the
+    // list, so they are recomputed from the rows that remain; a message that no
+    // longer applies is cleared instead of describing a photo the user removed.
+    const plan = planBatch(remaining.map((photo) => photo.file));
+    setPhotos(remaining);
+    setBoundMessage(plan.message);
+    setDuplicateMessage(plan.duplicateMessage);
   };
 
   const settled = photos.length > 0
@@ -203,6 +210,11 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
     : photos.length > 1
       ? `Add ${photos.length} items`
       : 'Upload & Auto-Tag';
+  // A disabled input refuses the picker, and its wrapping label carries the busy
+  // affordance because a label has no disabled state of its own. The
+  // `focus-within:` ring tokens stay unconditional: every focusable stop in the
+  // dialog keeps the ring, disabled controls included.
+  const fileInputLabelClass = `relative bg-white rounded-md font-medium text-indigo-600 hover:text-indigo-500 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-indigo-500 ${isRunning ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`;
 
   return (
     <div className="fixed inset-0 z-10 overflow-y-auto">
@@ -238,12 +250,13 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
                         <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
                       <div className="flex flex-wrap justify-center gap-x-4 gap-y-1 text-sm text-gray-600">
-                        <label className="relative cursor-pointer bg-white rounded-md font-medium text-indigo-600 hover:text-indigo-500 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-indigo-500">
+                        <label className={fileInputLabelClass}>
                           <span>Upload a file or take a photo</span>
                           <input
                             id="add-item-image"
                             type="file"
                             multiple
+                            disabled={isRunning}
                             accept="image/jpeg,image/png,image/webp"
                             className="sr-only"
                             onChange={(e) => {
@@ -252,11 +265,12 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
                             }}
                           />
                         </label>
-                        <label className="relative cursor-pointer bg-white rounded-md font-medium text-indigo-600 hover:text-indigo-500 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-indigo-500">
+                        <label className={fileInputLabelClass}>
                           <span>Take a photo</span>
                           <input
                             id="add-item-camera"
                             type="file"
+                            disabled={isRunning}
                             accept="image/jpeg,image/png,image/webp"
                             capture="environment"
                             className="sr-only"
@@ -303,7 +317,10 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
                             <button
                               type="button"
                               onClick={() => removePhoto(photo.id)}
-                              disabled={photo.status === 'created'}
+                              // While the batch runs, every row is one of the run's
+                              // targets; removing it would leave the run uploading a
+                              // photo the list no longer shows.
+                              disabled={isRunning || photo.status === 'created'}
                               aria-label={`Remove ${photo.file.name}`}
                               className="rounded-md p-1 text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
                             >

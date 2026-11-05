@@ -314,7 +314,11 @@ input), `ring-offset-2` on buttons outside a clipping container, `ring-inset` wh
 scrolling form or list would clip an offset, and `focus:border-indigo-500` on the text inputs
 and the View select; `:focus` also paints on the panel's opening focus and on a pointer
 click. The Add dialog's photo rows add two such controls, the per-row remove button and
-`Retry failed`, both `focus:ring-2 focus:ring-indigo-500`. The dialogs set both a width and a
+`Retry failed`, both `focus:ring-2 focus:ring-indigo-500`. While a batch runs, the dialog
+disables both file inputs and every per-row remove button so the row list cannot diverge from
+the run's targets: the remove buttons keep those ring tokens and dim through
+`disabled:opacity-50`, and the two labels dim with `opacity-50 cursor-not-allowed` while
+keeping their `focus-within:` tokens. The dialogs set both a width and a
 color, so the ring is indigo whatever the control's text color. A ring color without a ring
 width is not a focus treatment, and a width alone falls back to `currentColor`, which does not
 reliably contrast; both are set here. Other surfaces keep their own focus rules and are not

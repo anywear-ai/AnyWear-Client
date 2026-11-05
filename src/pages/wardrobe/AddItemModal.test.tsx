@@ -48,6 +48,11 @@ describe('AddItemModal', () => {
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
+    // `clearAllMocks` drops call history but keeps implementations, so a stub one
+    // test installed would otherwise leak into the next; reset both shared fns so
+    // every test declares the behaviour it depends on.
+    getUploadUrl.mockReset();
+    confirmUpload.mockReset();
     document.body.style.overflow = '';
     vi.mocked(usePostWardrobeUploadUrl).mockReturnValue({ mutateAsync: getUploadUrl } as any);
     vi.mocked(usePostWardrobeUpload).mockReturnValue({ mutateAsync: confirmUpload } as any);
@@ -416,6 +421,8 @@ describe('AddItemModal', () => {
   });
 
   it('disables every row\u2019s Remove control while the batch runs and frees a failed row once it settles', async () => {
+    // Self-contained: this test declares the confirmation and S3 post it depends on.
+    stubReservations();
     const gates = [deferred<any>(), deferred<any>(), deferred<any>()];
     getUploadUrl.mockImplementation(() => gates[getUploadUrl.mock.calls.length - 1].promise);
     stubSignedPost(['broken.png']);
@@ -459,6 +466,9 @@ describe('AddItemModal', () => {
   });
 
   it('disables both file inputs while the batch runs and re-enables them once it settles', async () => {
+    // Self-contained: the confirmation implementation is declared here, then the
+    // reservation is gated so the run can be observed in flight.
+    stubReservations();
     const gate = deferred<any>();
     getUploadUrl.mockImplementation(() => gate.promise);
     stubSignedPost();

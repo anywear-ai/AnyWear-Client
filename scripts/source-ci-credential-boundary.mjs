@@ -62,6 +62,11 @@ export const sourceCiCredentialBoundary = {
     },
   },
   tokenSites,
+  // The owner the specification checkout must name, written as the expression the
+  // workflow resolves at run time. The Client may live under either owner during
+  // the move to `anywear-ai`; only the repository name is a literal, so the same
+  // checkout works on both sides of the transfer.
+  ownerExpression: '${{ github.repository_owner }}',
   // The one repository the source-CI token may check out, as the bare name the
   // pinned action resolves against `owner`, and where it is checked out.
   specificationRepository: specificationSite.repository,
@@ -87,8 +92,12 @@ export function tokenSiteWith(site) {
 // token the source workflows already carry.
 export const sourceCiCredentialBoundaryWith = tokenSiteWith(specificationSite);
 
-/** The `owner/repo` the specification checkout names, for an owner-qualified comparison. */
-export function specificationRepositorySlug(owner) {
+/**
+ * The `owner/repo` the specification checkout names. The default is the
+ * owner-relative expression a workflow must contain; passing an owner resolves the
+ * same repository under that account, which is what `.gitmodules` names.
+ */
+export function specificationRepositorySlug(owner = sourceCiCredentialBoundary.ownerExpression) {
   return `${owner}/${sourceCiCredentialBoundary.specificationRepository}`;
 }
 
@@ -595,9 +604,11 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
         }
         continue;
       }
-      const expectedSlug = specificationRepositorySlug(repository.replace(/\/.*$/, ''));
-      if (repository !== expectedSlug) {
-        violations.push(violation(step.file, step.number, `checkout fetches \`${repository}\`, which is not \`${specificationOwner ?? 'the owner'}/${sourceCiCredentialBoundary.specificationRepository}\``));
+      // The checkout must name the owner-relative form, so the owner the repository
+      // leaves behind, or the one it moves to, cannot be reintroduced as a literal.
+      const expectedRepository = specificationRepositorySlug();
+      if (repository !== expectedRepository) {
+        violations.push(violation(step.file, step.number, `checkout fetches \`${repository}\`, which is not \`${expectedRepository}\``));
       }
       if (!siteOf(step.file, step.job)?.readsSpecification) {
         violations.push(violation(step.file, step.number, `a checkout of another repository belongs to ${specificationSite.workflow}:${specificationSite.job}, not to \`${step.file}:${step.job}\``));

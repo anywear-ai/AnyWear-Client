@@ -12,13 +12,19 @@ const values = {
   cognito_user_pool_id: 'ap-east-1_AbCdEfGhI',
   cognito_client_id: 'abcdefghijklmnopqrstuvwxyz',
 };
+// #266: the run's own repository names. `GITHUB_WORKFLOW_REF` is qualified by the
+// same repository the run reports, whatever owner that repository is under, so the
+// fabricated identity is built from the repository rather than a literal.
+const ownerRelative = (repository) => ({
+  GITHUB_REPOSITORY: repository,
+  GITHUB_WORKFLOW_REF: `${repository}/.github/workflows/release.yml@refs/heads/main`,
+});
 const environment = {
   BETA_MUTATION_ENABLED: 'true',
-  GITHUB_REPOSITORY: 'git-malu/AnyWear-Client',
+  ...ownerRelative('git-malu/AnyWear-Client'),
   GITHUB_REPOSITORY_ID: '1176104200',
   GITHUB_REF: 'refs/heads/main',
   GITHUB_EVENT_NAME: 'workflow_dispatch',
-  GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-Client/.github/workflows/release.yml@refs/heads/main',
   GITHUB_SHA: source,
   GITHUB_WORKFLOW_SHA: source,
   AWS_ACCOUNT_ID: '650880818323',
@@ -81,7 +87,7 @@ test('accepts a push to main as a publication and refuses every other event or r
   // A push of a tag is not a publication: the ref and the workflow ref must both be main.
   assert.throws(
     () => assertClientPublication({ ...environment, ...declared, GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/tags/v1.2.3' }, 'verify', metadata),
-    /Publication requires the original Client repository and main ref/,
+    /Publication requires the Client repository id 1176104200 and main ref/,
   );
   assert.throws(
     () => assertClientPublication({
@@ -94,10 +100,60 @@ test('accepts a push to main as a publication and refuses every other event or r
   );
 });
 
+test('#266: the repository id is the guard, so either owner publishes through the transfer', () => {
+  // The numeric id does not change when the repository moves to `anywear-ai`; the
+  // owner-qualified name appears in the event as either value during the window.
+  for (const repository of ['git-malu/AnyWear-Client', 'anywear-ai/AnyWear-Client']) {
+    for (const event of ['workflow_dispatch', 'push']) {
+      const identity = { ...environment, ...ownerRelative(repository), GITHUB_EVENT_NAME: event };
+      assert.doesNotThrow(
+        () => assertClientPublication({ ...identity, ...declared }, 'verify', metadata),
+        `expected ${repository} on ${event} to publish`,
+      );
+      assert.doesNotThrow(
+        () => assertClientPublication({ ...identity, ...live }, 'deploy', metadata),
+        `expected ${repository} on ${event} to deploy`,
+      );
+      assert.doesNotThrow(() => assertClientPublication(identity, 'record', record), `expected ${repository} to record`);
+    }
+    // The id, not the name, is the repository guard: the same name under another id
+    // is not this repository. A wrong id fails under either owner's name.
+    assert.throws(
+      () => assertClientPublication({ ...environment, ...ownerRelative(repository), ...declared, GITHUB_REPOSITORY_ID: '123' }, 'verify', metadata),
+      /Publication requires the Client repository id 1176104200 and main ref/,
+      `expected ${repository} with a different repository id to be refused`,
+    );
+  }
+});
+
+test('#266: the workflow ref must be this run\'s own repository, release.yml and main', () => {
+  const mismatches = [
+    ['the other owner', { GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-Client/.github/workflows/release.yml@refs/heads/main' }],
+    ['the old owner', {
+      GITHUB_REPOSITORY: 'anywear-ai/AnyWear-Client',
+      GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-Client/.github/workflows/release.yml@refs/heads/main',
+    }],
+    ['a different repository', {
+      GITHUB_REPOSITORY: 'anywear-ai/AnyWear-Client',
+      GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-Service/.github/workflows/release.yml@refs/heads/main',
+    }],
+    ['a different workflow file', { GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-Client/.github/workflows/build.yml@refs/heads/main' }],
+    ['a tag ref', { GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-Client/.github/workflows/release.yml@refs/tags/v1.2.3' }],
+    ['a feature branch', { GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-Client/.github/workflows/release.yml@refs/heads/feature' }],
+    ['no repository prefix', { GITHUB_WORKFLOW_REF: '.github/workflows/release.yml@refs/heads/main' }],
+  ];
+  for (const [label, override] of mismatches) {
+    assert.throws(
+      () => assertClientPublication({ ...environment, ...declared, ...override }, 'verify', metadata),
+      /Publication requires the main deploy workflow dispatch or a push to main/,
+      `expected ${label} to be refused`,
+    );
+  }
+});
+
 test('rejects an untrusted source, disabled release or wrong AWS scope', async (t) => {
   const invalidInputs = [
     ['BETA_MUTATION_ENABLED', 'false'],
-    ['GITHUB_REPOSITORY', 'other/AnyWear-Client'],
     ['GITHUB_REPOSITORY_ID', '123'],
     ['GITHUB_REF', 'refs/heads/feature'],
     ['GITHUB_EVENT_NAME', 'pull_request'],

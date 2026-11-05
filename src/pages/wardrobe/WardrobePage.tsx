@@ -401,6 +401,14 @@ export default function WardrobePage() {
           // created row show that item's tagging status without a new endpoint.
           items={wardrobeData}
           onItemsCreated={() => {
+            // The Service creates the item with category 'pending', which an active
+            // category filter excludes; clearing it keeps the new item in front of
+            // the page's poll and status stream so the dialog's row can leave
+            // processing. No endpoint, interval or query is added.
+            if (activeCategory !== 'all') {
+              setActiveCategory('all');
+              setFilters({});
+            }
             void refetch();
           }}
         />

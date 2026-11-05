@@ -19,6 +19,18 @@ const createOutfitModal = vi.hoisted(() => ({
   props: null as CreateOutfitModalMockProps | null,
 }));
 
+interface AddItemModalMockProps {
+  isOpen: boolean;
+  onClose?: () => void;
+  onSuccess?: () => void;
+  items?: Array<{ id: string; taggingStatus: string; taggingErrorCode?: string | null }>;
+  onItemsCreated?: () => void;
+}
+
+const addItemModal = vi.hoisted(() => ({
+  props: null as AddItemModalMockProps | null,
+}));
+
 vi.mock('../../api/endpoints/wardrobe/wardrobe', () => ({
   useGetWardrobe: vi.fn(),
   useGetWardrobeCategories: vi.fn(),
@@ -39,7 +51,14 @@ vi.mock('../../components/CachedImage', () => ({
   ),
 }));
 
-vi.mock('./AddItemModal', () => ({ default: () => null }));
+vi.mock('./AddItemModal', () => ({
+  default: (props: AddItemModalMockProps) => {
+    // Record the real props so the tests can invoke the page's own onItemsCreated
+    // wiring instead of relying on this stand-in.
+    addItemModal.props = props;
+    return null;
+  },
+}));
 vi.mock('./ItemDetailsModal', () => ({ default: () => null }));
 vi.mock('./CreateOutfitModal', async () => {
   const { default: useAccessibleDialog } = await import('../../hooks/useAccessibleDialog');
@@ -125,6 +144,7 @@ describe('WardrobePage saved outfit look cards', () => {
     cleanup();
     vi.clearAllMocks();
     createOutfitModal.props = null;
+    addItemModal.props = null;
     generateLook.mockReset();
     generateLook.mockResolvedValue({ generation_id: 'gen-2', outfit_id: 'outfit-1' });
     vi.mocked(useGetWardrobe).mockReturnValue({ data: [], isLoading: false } as any);
@@ -335,6 +355,7 @@ describe('WardrobePage dialog scroll lock', () => {
     cleanup();
     vi.clearAllMocks();
     createOutfitModal.props = null;
+    addItemModal.props = null;
     generateLook.mockReset();
     generateLook.mockResolvedValue({ generation_id: 'gen-2', outfit_id: 'outfit-1' });
     vi.mocked(useGetWardrobe).mockReturnValue({ data: [], isLoading: false } as any);
@@ -399,5 +420,53 @@ describe('WardrobePage dialog scroll lock', () => {
 
     fireEvent.click(within(lookDialog).getByRole('button', { name: 'Cancel' }));
     expect(document.body.style.overflow).toBe('');
+  });
+});
+
+describe('WardrobePage item creation under a category filter', () => {
+  const refetch = vi.fn();
+
+  beforeEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    createOutfitModal.props = null;
+    addItemModal.props = null;
+    refetch.mockReset();
+    generateLook.mockReset();
+    generateLook.mockResolvedValue({ generation_id: 'gen-2', outfit_id: 'outfit-1' });
+    vi.mocked(useGetWardrobe).mockReturnValue({ data: [], isLoading: false, refetch } as any);
+    vi.mocked(useGetWardrobeCategories).mockReturnValue({ data: { categories: ['Top', 'Bottom'] } } as any);
+    vi.mocked(useDeleteWardrobeItemsId).mockReturnValue({ mutate: vi.fn() } as any);
+    vi.mocked(usePostVtoGenerations).mockReturnValue({ mutateAsync: generateLook, isPending: false } as any);
+    mockOutfits({ outfits: [] });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it('clears an active category filter before refreshing, so the created item stays in front of the poll', () => {
+    renderPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add Item' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Top' }));
+
+    // The filter is active and the page's wardrobe query carries it.
+    expect(screen.getByRole('button', { name: 'Top' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'false');
+    expect(vi.mocked(useGetWardrobe).mock.lastCall?.[0]).toEqual({ category: 'Top' });
+
+    const props = addItemModal.props;
+    expect(props?.onItemsCreated).toBeTypeOf('function');
+
+    act(() => props?.onItemsCreated?.());
+
+    // The Service creates the item with category 'pending', which the filter would
+    // exclude, so the page clears the filter before refetching and polling.
+    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Top' })).toHaveAttribute('aria-pressed', 'false');
+    expect(vi.mocked(useGetWardrobe).mock.lastCall?.[0]).toEqual({});
+    expect(refetch).toHaveBeenCalledTimes(1);
   });
 });

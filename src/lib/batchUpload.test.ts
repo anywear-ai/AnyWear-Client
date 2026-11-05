@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, type MockedFunction } from 'vitest';
 import type { SignedUploadPost } from './imageUpload';
 import {
+  CONFIRM_CHECK_WARDROBE_HINT,
   MAX_BATCH_BYTES,
   MAX_BATCH_PHOTOS,
   MAX_CONCURRENT_UPLOADS,
@@ -216,6 +217,49 @@ describe('runBatch', () => {
     expect([...record.latest.values()].every((photo) => photo.status === 'created')).toBe(true);
   });
 
+  it('runs three photos through three reservations, three posts and three confirmations', async () => {
+    const files = [photoFile('one.png'), photoFile('two.png'), photoFile('three.png')];
+    let inFlight = 0;
+    let peakInFlight = 0;
+
+    /** Counts a dependency call as one in-flight photo call and records the peak. */
+    async function tracked<T>(value: T): Promise<T> {
+      inFlight += 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      await Promise.resolve();
+      inFlight -= 1;
+      return value;
+    }
+
+    const deps = stubDeps({
+      reserve: vi.fn(async (file: File) => tracked({
+        reservationId: `res-${file.name}`,
+        upload: { url: 'https://s3.example.com/upload', fields: {} },
+      })),
+      postBytes: vi.fn(async () => tracked(undefined)),
+      confirm: vi.fn(async (reservationId: string) => tracked({
+        itemId: `item-${reservationId}`,
+        taggingStatus: 'processing',
+      })),
+    });
+
+    const record = await settle(createBatchPhotos(files), deps);
+
+    // One all-success round: three reservations, three S3 posts, three confirmations.
+    expect(deps.reserve).toHaveBeenCalledTimes(3);
+    expect(deps.postBytes).toHaveBeenCalledTimes(3);
+    expect(deps.confirm).toHaveBeenCalledTimes(3);
+
+    const created = files.map((file) => record.latest.get(file.name));
+    expect(created.map((photo) => photo?.status)).toEqual(['created', 'created', 'created']);
+    // Three items, never fewer: the confirmation ids are the three distinct reservations.
+    const itemIds = created.map((photo) => photo?.itemId);
+    expect(itemIds.every(Boolean)).toBe(true);
+    expect(new Set(itemIds).size).toBe(3);
+    // No more photos than the runner's slots were ever in flight together.
+    expect(peakInFlight).toBeLessThanOrEqual(MAX_CONCURRENT_UPLOADS);
+  });
+
   it('fails one photo without aborting or blocking the others', async () => {
     const files = [photoFile('a.png'), photoFile('b.png'), photoFile('c.png')];
     const deps = stubDeps({
@@ -339,6 +383,27 @@ describe('runBatch', () => {
     expect(deps.reserve).toHaveBeenCalledTimes(1);
     expect(deps.postBytes).toHaveBeenCalledTimes(1);
     expect(deps.confirm.mock.calls.map(([id]) => id)).toEqual(['res-dress.png', 'res-dress.png']);
+  });
+
+  it('names the wardrobe when a confirmation answers 5xx twice', async () => {
+    const deps = stubDeps({
+      confirm: vi.fn(async () => {
+        throw httpError(500);
+      }),
+    });
+
+    const record = await settle(createBatchPhotos([photoFile('coat.png')]), deps);
+
+    // Both the first attempt and its automatic retry were 5xx, so the item may
+    // already be committed and the row says where to look.
+    expect(record.latest.get('coat.png')).toMatchObject({
+      status: 'failed',
+      failureKind: 'confirm',
+      reservationId: 'res-coat.png',
+    });
+    expect(record.latest.get('coat.png')?.error).toContain(CONFIRM_CHECK_WARDROBE_HINT);
+    expect(deps.reserve).toHaveBeenCalledTimes(1);
+    expect(deps.confirm).toHaveBeenCalledTimes(2);
   });
 
   it('re-confirms the same reservation on Retry after a lost response', async () => {

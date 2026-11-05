@@ -22,6 +22,11 @@ export const MAX_BATCH_PHOTOS = 10;
 export const MAX_BATCH_BYTES = 60 * 1024 * 1024;
 /** Photos whose three calls may be in flight at once; one photo's calls are sequential. */
 export const MAX_CONCURRENT_UPLOADS = 3;
+/**
+ * Shown when a confirmation's 5xx or lost response outlived its automatic retry:
+ * the Service may already have committed the item, so the row names where to look.
+ */
+export const CONFIRM_CHECK_WARDROBE_HINT = 'Could not confirm — check the wardrobe';
 
 export type BatchPhotoStatus =
   | 'queued'
@@ -356,10 +361,14 @@ function publishFailed(
 ): void {
   // The reservation identity stays on the row: a `confirm` failure is retried
   // against it, and every other kind starts a fresh one on Retry.
+  // A confirmation that outlived its automatic retry may have committed the item
+  // before the answer was lost, so that row names the one place to check; every
+  // other failure keeps the cause the single-photo path shows.
+  const cause = getErrorMessage(error, 'Unknown error');
   publish({
     ...photo,
     status: 'failed',
-    error: getErrorMessage(error, 'Unknown error'),
+    error: failureKind === 'confirm' ? `${CONFIRM_CHECK_WARDROBE_HINT} (${cause})` : cause,
     failureKind,
   });
 }

@@ -98,7 +98,7 @@ test.describe('Wardrobe Auto-Tagging (mocked Client integration)', () => {
     await page.goto('/wardrobe');
     await expect(page.getByText('Your wardrobe is empty.', { exact: false })).toBeVisible();
     await page.getByRole('button', { name: 'Add Item', exact: true }).click();
-    await page.locator('input[type="file"]').setInputFiles('browser/fixtures/dummy.png');
+    await page.locator('#add-item-image').setInputFiles('browser/fixtures/dummy.png');
     await page.getByRole('button', { name: 'Upload & Auto-Tag', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Add Wardrobe Item' })).not.toBeVisible();
     await expect(page.getByText('My T-Shirt', { exact: true })).toBeVisible();
@@ -119,6 +119,120 @@ test.describe('Wardrobe Auto-Tagging (mocked Client integration)', () => {
     await page.clock.fastForward(10_000);
     await expect(page.getByText('Analyzing...', { exact: true })).not.toBeVisible();
     await expect(page.getByText('Black • Cotton', { exact: true })).toBeVisible();
+  });
+
+  test('adds three photos in one action, keeps one failure in its row and retries only that row', async ({ page }) => {
+    const state: MockState = { items: [], mutations: [], categories: [] };
+    await setupMock(page, state);
+
+    // Distinct file names: the duplicate collapse is by name, size and lastModified.
+    const fileNames = ['batch-one.png', 'batch-two.png', 'batch-three.png'];
+    const reservationIds: string[] = [];
+    const postedFiles: string[] = [];
+    const confirmedReservations: string[] = [];
+    const fileByReservation = new Map<string, string>();
+    const itemByFile = new Map<string, string>();
+    let rejectedBatchTwo = false;
+
+    await page.route('http://localhost:3000/wardrobe/upload-url', async (route) => {
+      const reservationId = `batch-reservation-${reservationIds.length + 1}`;
+      reservationIds.push(reservationId);
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          reservationId,
+          expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          upload: {
+            url: 'https://s3.example.com/upload',
+            fields: {
+              key: `wearable-items/test-user-id/${reservationId}.png`,
+              'Content-Type': 'image/png',
+              policy: 'signed-policy',
+              'x-amz-signature': 'signature',
+            },
+          },
+        }),
+      });
+    });
+
+    await page.route('https://s3.example.com/upload', async (route, request) => {
+      const body = request.postData() ?? '';
+      const key = /name="key"\r?\n\r?\n([^\r\n]+)/.exec(body)?.[1] ?? '';
+      const fileName = /name="file"; filename="([^"]+)"/.exec(body)?.[1] ?? '';
+      const reservationId = key.split('/').pop()?.replace(/\.[^.]+$/, '') ?? '';
+      fileByReservation.set(reservationId, fileName);
+      postedFiles.push(fileName);
+      // The signed policy authorizes one object; S3 refuses the body it is told to.
+      if (fileName === 'batch-two.png' && !rejectedBatchTwo) {
+        rejectedBatchTwo = true;
+        return route.fulfill({ status: 403 });
+      }
+      return route.fulfill({ status: 204 });
+    });
+
+    await page.route('http://localhost:3000/wardrobe/upload', async (route, request) => {
+      const { reservationId } = request.postDataJSON() as { reservationId: string };
+      confirmedReservations.push(reservationId);
+      const fileName = fileByReservation.get(reservationId) ?? 'unknown.png';
+      let itemId = itemByFile.get(fileName);
+      if (!itemId) {
+        itemId = `item-${itemByFile.size + 1}`;
+        itemByFile.set(fileName, itemId);
+        // A confirmation creates the item; the retry's fresh reservation replays it
+        // rather than creating a fourth.
+        state.items.push({
+          ...structuredClone(mockItem),
+          id: itemId,
+          name: `Item ${fileName}`,
+          taggingStatus: 'ready',
+          styleAttributes: {},
+        });
+      }
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({ itemId, taggingStatus: 'ready' }),
+      });
+    });
+
+    await page.goto('/wardrobe');
+    await expect(page.getByText('Your wardrobe is empty.', { exact: false })).toBeVisible();
+    await page.getByRole('button', { name: 'Add Item', exact: true }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Add Wardrobe Item' });
+    await page.locator('#add-item-image').setInputFiles(
+      fileNames.map((name) => ({ name, mimeType: 'image/png', buffer: Buffer.from('png') })),
+    );
+    await expect(dialog.getByRole('listitem')).toHaveCount(3);
+    await page.getByRole('button', { name: 'Add 3 items', exact: true }).click();
+
+    // Two photos became items; the rejected S3 post fails only its own row.
+    await expect(dialog.getByRole('listitem').filter({ hasText: 'Created' })).toHaveCount(2);
+    const failedRow = dialog.getByRole('listitem').filter({ hasText: 'Failed' });
+    await expect(failedRow).toHaveCount(1);
+    await expect(failedRow).toContainText('batch-two.png');
+    await expect(failedRow).toContainText('Image upload failed with HTTP 403');
+    await expect(dialog.getByText('2 items added, 1 failed')).toBeVisible();
+
+    // Each photo reserves and posts on its own; the rejected body fails that photo
+    // before its confirmation, so the first round confirms only the two that landed.
+    expect(reservationIds).toHaveLength(3);
+    expect(postedFiles).toHaveLength(3);
+    expect(confirmedReservations).toHaveLength(2);
+    expect(state.items).toHaveLength(2);
+
+    await dialog.getByRole('button', { name: 'Retry failed', exact: true }).click();
+
+    await expect(dialog.getByText('3 items added, 0 failed')).toBeVisible();
+    await expect(dialog.getByRole('listitem').filter({ hasText: 'Created' })).toHaveCount(3);
+    // Retry ran the one failed row: a fresh reservation, one post, one confirmation,
+    // and the same item, so the wardrobe ends with three items and no fourth.
+    expect(reservationIds).toHaveLength(4);
+    expect(postedFiles.slice(3)).toEqual(['batch-two.png']);
+    expect(confirmedReservations).toHaveLength(3);
+    expect(state.items).toHaveLength(3);
+    await expect(page.getByText('Item batch-one.png', { exact: true })).toBeVisible();
   });
 
   test('populates auto-tagged values, saves edits and refreshes the item', async ({ page }) => {

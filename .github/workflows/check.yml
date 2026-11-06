@@ -1,8 +1,8 @@
 name: Check
 
-# The one automatic entry for this repository. `build.yml`, `test.yml` and
-# `browser.yml` are called workflows: they are implementation of this entry, not
-# dispatch surfaces of their own.
+# The one automatic entry for this repository. `build.yml`, `test.yml`,
+# `browser.yml` and `tauri-smoke.yml` are called workflows: they are
+# implementation of this entry, not dispatch surfaces of their own.
 on:
   push:
     branches: [main]
@@ -27,6 +27,14 @@ jobs:
     name: Unit Tests
     needs: [build]
     uses: ./.github/workflows/test.yml
+
+  # The packaged Windows smoke runs after the unit tests, so a configuration
+  # regression fails the fast job before a Windows runner builds and launches the
+  # app. The desktop build itself runs inside `build.yml` on both platforms.
+  tauri-smoke:
+    name: Packaged Desktop Smoke
+    needs: [test]
+    uses: ./.github/workflows/tauri-smoke.yml
 
   browser:
     name: Browser Integration Tests

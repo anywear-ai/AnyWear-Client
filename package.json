@@ -1,5 +1,5 @@
 {
-  "name": "tauri-app",
+  "name": "anywear-client",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build && node scripts/write-build-metadata.mjs",
+    "build:smoke": "tsc --noEmit -p tsconfig.smoke.json && vite build --config vite.smoke.config.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "orval": "orval",
@@ -17,7 +18,7 @@
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test": "vitest",
-    "test:run": "vitest run && node --test scripts/write-build-metadata.node-test.mjs scripts/assert-client-publication.node-test.mjs scripts/source-ci-credential-boundary.node-test.mjs scripts/entry-surface.node-test.mjs scripts/env-scope.node-test.mjs scripts/assert-client-version-bump.node-test.mjs scripts/no-retired-opacity.node-test.mjs scripts/tauri-fs-scope.node-test.mjs",
+    "test:run": "vitest run && node --test scripts/write-build-metadata.node-test.mjs scripts/assert-client-publication.node-test.mjs scripts/source-ci-credential-boundary.node-test.mjs scripts/entry-surface.node-test.mjs scripts/env-scope.node-test.mjs scripts/assert-client-version-bump.node-test.mjs scripts/no-retired-opacity.node-test.mjs scripts/tauri-fs-scope.node-test.mjs scripts/tauri-security.node-test.mjs",
     "test:coverage": "vitest run --coverage",
     "test:browser": "playwright test"
   },
@@ -26,7 +27,6 @@
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-fs": "^2.5.1",
     "@tauri-apps/plugin-log": "^2.9.0",
-    "@tauri-apps/plugin-opener": "^2.5.4",
     "aws-amplify": "^6.19.0",
     "axios": "^1.21.0",
     "react": "^19.2.8",

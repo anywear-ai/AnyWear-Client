@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "frontendDist": "../dist-smoke",
+    "beforeBuildCommand": "pnpm build:smoke"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' asset: http://asset.localhost data: https://*.cloudfront.net https://*.s3.ap-east-1.amazonaws.com http://127.0.0.1:*; connect-src 'self' ipc: http://ipc.localhost https://*.cloudfront.net https://*.s3.ap-east-1.amazonaws.com https://cognito-idp.ap-east-1.amazonaws.com http://127.0.0.1:*; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
+    }
+  }
+}

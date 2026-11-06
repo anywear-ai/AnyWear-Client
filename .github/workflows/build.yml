@@ -112,3 +112,63 @@ jobs:
 
       - name: Check Tauri
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+
+  # One unsigned binary per supported desktop platform, with no installer, signing
+  # identity or notarization. `--no-bundle` is the recorded desktop CI output, so
+  # this leg proves the app compiles and links, not that it installs.
+  tauri-desktop:
+    name: Desktop Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, macos-latest]
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      # Source CI discards this build output; the same placeholders the web `build`
+      # job uses keep the build-identity contract exercised without recording
+      # interface values no deployment ever compiled.
+      VITE_API_BASE_URL: https://api.invalid
+      VITE_COGNITO_USER_POOL_ID: ap-east-1_CiPlaceholder
+      VITE_COGNITO_CLIENT_ID: abcdefghijklmnopqrstuvwxyz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.18.0
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `tee` keeps the cargo output as the job artifact and `-eo pipefail` (the
+      # Actions bash shell) propagates a failed build instead of the tee exit code.
+      - name: Build Desktop Binary
+        shell: bash
+        run: pnpm exec tauri build --no-bundle 2>&1 | tee tauri-build.log
+
+      - name: Upload Binary and Cargo Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: anywear-desktop-${{ matrix.platform }}
+          path: |
+            src-tauri/target/release/anywear.exe
+            src-tauri/target/release/anywear
+            tauri-build.log
+          if-no-files-found: warn
+          retention-days: 7

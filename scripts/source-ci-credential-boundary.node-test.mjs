@@ -26,7 +26,7 @@ import {
 const repositoryRoot = new URL('../', import.meta.url);
 const workflowsDirectory = new URL('.github/workflows/', repositoryRoot);
 const gitmodulesPath = new URL('.gitmodules', repositoryRoot);
-const workflowFiles = ['build.yml', 'test.yml', 'browser.yml', 'check.yml', 'release.yml'];
+const workflowFiles = ['build.yml', 'test.yml', 'browser.yml', 'check.yml', 'release.yml', 'tauri-smoke.yml'];
 const tokenActionOf = (site) => `${sourceCiCredentialBoundary.tokenAction.repository}@${site.ref}`;
 
 // The revision the specification checkout must pin, read from the `api` submodule's
@@ -125,8 +125,10 @@ test('every job that does not read the specification holds no credential', async
   assert.deepEqual([...jobsWithToken], ['build.yml:build', 'release.yml:handoff']);
   for (const [file, job] of [
     ['build.yml', 'rust-check'],
+    ['build.yml', 'tauri-desktop'],
     ['test.yml', 'test'],
     ['browser.yml', 'browser'],
+    ['tauri-smoke.yml', 'tauri-smoke'],
     ['release.yml', 'build'],
     ['release.yml', 'verify'],
     ['release.yml', 'deploy'],

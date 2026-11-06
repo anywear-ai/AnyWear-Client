@@ -276,16 +276,16 @@ describe('AddItemModal', () => {
     expect(within(rows()[0]).getByText('Tagging processing')).toBeInTheDocument();
   });
 
-  it('keeps ten photos of eleven selected and says how many were not added', () => {
+  it('keeps fifty photos of fifty-one selected and says how many were not added', () => {
     const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
 
     fireEvent.change(picker(container), {
-      target: { files: Array.from({ length: 11 }, (_, index) => photo(`batch-${index}.png`)) },
+      target: { files: Array.from({ length: 51 }, (_, index) => photo(`batch-${index}.png`)) },
     });
 
-    expect(screen.getByText('10 of 11 selected — 1 was not added')).toBeInTheDocument();
-    expect(rows()).toHaveLength(10);
-    expect(screen.getByRole('button', { name: 'Add 10 items' })).toBeInTheDocument();
+    expect(screen.getByText('50 of 51 selected — 1 was not added')).toBeInTheDocument();
+    expect(rows()).toHaveLength(50);
+    expect(screen.getByRole('button', { name: 'Add 50 items' })).toBeInTheDocument();
   });
 
   it('skips a duplicate selection and says so', () => {
@@ -500,33 +500,33 @@ describe('AddItemModal', () => {
     expect(picker(container).closest('label')!.className.split(/\s+/)).toContain('cursor-pointer');
   });
 
-  it('submits ten of eleven photos and sends no request for the eleventh', async () => {
+  it('submits fifty of fifty-one photos and sends no request for the fifty-first', async () => {
     stubReservations();
     stubSignedPost();
     const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
 
     fireEvent.change(picker(container), {
-      target: { files: Array.from({ length: 11 }, (_, index) => photo(`batch-${index}.png`)) },
+      target: { files: Array.from({ length: 51 }, (_, index) => photo(`batch-${index}.png`)) },
     });
-    expect(screen.getByText('10 of 11 selected — 1 was not added')).toBeInTheDocument();
+    expect(screen.getByText('50 of 51 selected — 1 was not added')).toBeInTheDocument();
 
     fireEvent.submit(container.querySelector('form')!);
 
-    await waitFor(() => expect(screen.getByText('10 items added, 0 failed')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('50 items added, 0 failed')).toBeInTheDocument());
     // The bound is applied to the request count, not only to the visible list.
-    expect(getUploadUrl).toHaveBeenCalledTimes(10);
-    expect(confirmUpload).toHaveBeenCalledTimes(10);
-    expect(rows()).toHaveLength(10);
-    // The eleventh photo never became a row and never caused a request.
-    expect(screen.queryByText('batch-10.png')).toBeNull();
+    expect(getUploadUrl).toHaveBeenCalledTimes(50);
+    expect(confirmUpload).toHaveBeenCalledTimes(50);
+    expect(rows()).toHaveLength(50);
+    // The fifty-first photo never became a row and never caused a request.
+    expect(screen.queryByText('batch-50.png')).toBeNull();
   });
 
-  it('submits six of seven photos when their summed bytes exceed 60 MiB', async () => {
+  it('submits thirty of thirty-one photos when their summed bytes exceed 300 MiB', async () => {
     stubReservations();
     stubSignedPost();
     const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
     const tenMiB = 10 * 1024 * 1024;
-    const files = Array.from({ length: 7 }, (_, index) => {
+    const files = Array.from({ length: 31 }, (_, index) => {
       // A real File with a shadowed size: the bound reads `file.size`, not the bytes.
       const file = photo(`large-${index}.png`);
       Object.defineProperty(file, 'size', { value: tenMiB });
@@ -534,15 +534,15 @@ describe('AddItemModal', () => {
     });
 
     fireEvent.change(picker(container), { target: { files } });
-    expect(screen.getByText('6 of 7 selected — 1 was not added')).toBeInTheDocument();
+    expect(screen.getByText('30 of 31 selected — 1 was not added')).toBeInTheDocument();
 
     fireEvent.submit(container.querySelector('form')!);
 
-    await waitFor(() => expect(screen.getByText('6 items added, 0 failed')).toBeInTheDocument());
-    expect(getUploadUrl).toHaveBeenCalledTimes(6);
-    expect(confirmUpload).toHaveBeenCalledTimes(6);
-    expect(rows()).toHaveLength(6);
-    expect(screen.queryByText('large-6.png')).toBeNull();
+    await waitFor(() => expect(screen.getByText('30 items added, 0 failed')).toBeInTheDocument());
+    expect(getUploadUrl).toHaveBeenCalledTimes(30);
+    expect(confirmUpload).toHaveBeenCalledTimes(30);
+    expect(rows()).toHaveLength(30);
+    expect(screen.queryByText('large-30.png')).toBeNull();
   });
 
   it('shows the wardrobe hint on a row whose confirmation outlived its automatic retry', async () => {
@@ -573,15 +573,15 @@ describe('AddItemModal', () => {
     const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
 
     fireEvent.change(picker(container), {
-      target: { files: Array.from({ length: 11 }, (_, index) => photo(`batch-${index}.png`)) },
+      target: { files: Array.from({ length: 51 }, (_, index) => photo(`batch-${index}.png`)) },
     });
-    expect(screen.getByText('10 of 11 selected — 1 was not added')).toBeInTheDocument();
+    expect(screen.getByText('50 of 51 selected — 1 was not added')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Remove batch-0.png' }));
 
     // The remaining selection fits, so the message no longer describes it.
-    expect(screen.queryByText('10 of 11 selected — 1 was not added')).toBeNull();
-    expect(rows()).toHaveLength(9);
+    expect(screen.queryByText('50 of 51 selected — 1 was not added')).toBeNull();
+    expect(rows()).toHaveLength(49);
   });
 
   it('drops the duplicate message once the collapsed row is removed', () => {

@@ -93,30 +93,41 @@ async function settle(photos: BatchPhoto[], deps: BatchUploadDeps): Promise<Reco
 }
 
 describe('planBatch', () => {
-  it('keeps at most ten photos in one action and reports the ones it did not add', () => {
-    const files = Array.from({ length: 13 }, (_, index) => photoFile(`photo-${index}.png`));
+  it('keeps at most fifty photos in one action and reports the ones it did not add', () => {
+    const files = Array.from({ length: 53 }, (_, index) => photoFile(`photo-${index}.png`));
 
     const plan = planBatch(files);
 
-    expect(MAX_BATCH_PHOTOS).toBe(10);
+    expect(MAX_BATCH_PHOTOS).toBe(50);
     expect(plan.files.map((file) => file.name)).toEqual(
       files.slice(0, MAX_BATCH_PHOTOS).map((file) => file.name),
     );
     expect(plan.notAdded).toBe(3);
-    expect(plan.message).toBe('10 of 13 selected — 3 were not added');
+    expect(plan.message).toBe('50 of 53 selected — 3 were not added');
     expect(plan.duplicateMessage).toBeNull();
   });
 
-  it('keeps the longest prefix inside the 60 MiB action bound', () => {
-    const tenMiB = 10 * 1024 * 1024;
-    const files = Array.from({ length: 7 }, (_, index) => photoFile(`big-${index}.png`, tenMiB));
+  it('trims the fifty-first photo and reports the count', () => {
+    const files = Array.from({ length: 51 }, (_, index) => photoFile(`extra-${index}.png`));
 
     const plan = planBatch(files);
 
-    expect(MAX_BATCH_BYTES).toBe(60 * 1024 * 1024);
-    expect(plan.files).toHaveLength(6);
+    expect(plan.files).toHaveLength(50);
+    expect(plan.files[49].name).toBe('extra-49.png');
     expect(plan.notAdded).toBe(1);
-    expect(plan.message).toBe('6 of 7 selected — 1 was not added');
+    expect(plan.message).toBe('50 of 51 selected — 1 was not added');
+  });
+
+  it('keeps the longest prefix inside the 300 MiB action bound', () => {
+    const tenMiB = 10 * 1024 * 1024;
+    const files = Array.from({ length: 31 }, (_, index) => photoFile(`big-${index}.png`, tenMiB));
+
+    const plan = planBatch(files);
+
+    expect(MAX_BATCH_BYTES).toBe(300 * 1024 * 1024);
+    expect(plan.files).toHaveLength(30);
+    expect(plan.notAdded).toBe(1);
+    expect(plan.message).toBe('30 of 31 selected — 1 was not added');
   });
 
   it('collapses duplicates on name, size and lastModified so one file produces one item', () => {

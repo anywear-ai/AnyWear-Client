@@ -13,6 +13,14 @@ interface SseConnectionOptions<T = unknown> {
   initialRetryMs?: number;
   maxRetryMs?: number;
   /**
+   * How long a stream may go without any frame — a `status` frame, a
+   * `heartbeat` frame or any other event — before the request is aborted and
+   * reconnected through the normal backoff path. The Service heartbeats every
+   * 15 seconds, inside CloudFront's 60-second origin read timeout, so 45
+   * seconds without a frame means a half-open socket rather than a quiet one.
+   */
+  idleTimeoutMs?: number;
+  /**
    * Only frames whose SSE `event` field names this event reach the callback.
    * The Service interleaves `event: heartbeat` frames (`data: {}`) with the
    * `event: status` frames that carry state, and a heartbeat must never replace
@@ -42,6 +50,17 @@ export class ClientVersionUnsupportedError extends Error {
   constructor() {
     super('CLIENT_VERSION_UNSUPPORTED: the Service rejected this Client version');
     this.name = 'ClientVersionUnsupportedError';
+  }
+}
+
+/**
+ * The stream answered no frame of any kind inside the idle window. The request
+ * is aborted and the connection reconnects with the usual backoff.
+ */
+export class SseIdleTimeoutError extends Error {
+  constructor(idleTimeoutMs: number) {
+    super(`No SSE frame arrived within ${idleTimeoutMs} ms; reconnecting`);
+    this.name = 'SseIdleTimeoutError';
   }
 }
 
@@ -97,40 +116,86 @@ function dispatchFrame<T>(
   return isTerminal?.(data) === true;
 }
 
-/** Resolves to `true` when a terminal payload was dispatched. */
+/** Why an SSE response stopped. */
+type ConsumeOutcome = 'terminal' | 'ended' | 'idle';
+
+/**
+ * Reads one SSE response until a terminal payload, the end of the stream, or
+ * the idle watchdog fires.
+ */
 async function consumeEventStream<T>(
   response: Response,
-  signal: AbortSignal,
+  controller: AbortController,
   onEvent: SseEventCallback<T>,
   options: SseConnectionOptions<T>,
-): Promise<boolean> {
+): Promise<ConsumeOutcome> {
   if (!response.body) throw new Error('SSE response has no body');
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  const idleTimeoutMs = options.idleTimeoutMs ?? 45_000;
   let buffer = '';
   let trailingCr = false;
+  let lastFrameAt = Date.now();
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let idleTimedOut = false;
 
-  while (!signal.aborted) {
-    const { done, value } = await reader.read();
-    if (signal.aborted) return false;
+  const armIdleTimer = (delay = idleTimeoutMs): void => {
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      const idleFor = Date.now() - lastFrameAt;
+      if (idleFor < idleTimeoutMs) {
+        // A frame landed after this check was armed (a timer may fire late).
+        armIdleTimer(idleTimeoutMs - idleFor);
+        return;
+      }
+      idleTimedOut = true;
+      controller.abort();
+    }, delay);
+  };
 
-    // A trailing CR may be the first half of a CRLF split across chunks.
-    let chunk: string = (trailingCr ? '\r' : '') + decoder.decode(value, { stream: !done });
-    trailingCr = !done && chunk.endsWith('\r');
-    if (trailingCr) chunk = chunk.slice(0, -1);
-    buffer += chunk.replace(/\r\n?/g, '\n');
-    let boundary = buffer.indexOf('\n\n');
-    while (!signal.aborted && boundary >= 0) {
-      const frame = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      if (dispatchFrame(frame, onEvent, options.eventName, options.isTerminal)) return true;
-      boundary = buffer.indexOf('\n\n');
+  /**
+   * Records that a frame of any kind arrived, before the event-name filter can
+   * discard it. A heartbeat is never passed to the callback, but it is exactly
+   * what proves a half-open stream is still alive.
+   */
+  const noteAnyFrame = (): void => {
+    lastFrameAt = Date.now();
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    armIdleTimer();
+  };
+
+  armIdleTimer();
+
+  try {
+    while (!controller.signal.aborted) {
+      const { done, value } = await reader.read();
+      if (idleTimedOut) return 'idle';
+      if (controller.signal.aborted) return 'ended';
+
+      // A trailing CR may be the first half of a CRLF split across chunks.
+      let chunk: string = (trailingCr ? '\r' : '') + decoder.decode(value, { stream: !done });
+      trailingCr = !done && chunk.endsWith('\r');
+      if (trailingCr) chunk = chunk.slice(0, -1);
+      buffer += chunk.replace(/\r\n?/g, '\n');
+      let boundary = buffer.indexOf('\n\n');
+      while (!controller.signal.aborted && boundary >= 0) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        noteAnyFrame();
+        if (dispatchFrame(frame, onEvent, options.eventName, options.isTerminal)) return 'terminal';
+        boundary = buffer.indexOf('\n\n');
+      }
+      if (done) return 'ended';
     }
-    if (done) return false;
-  }
 
-  return false;
+    return 'ended';
+  } catch (error) {
+    if (idleTimedOut) return 'idle';
+    throw error;
+  } finally {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+  }
 }
 
 /**
@@ -217,9 +282,17 @@ export function connectSse<T = unknown>(
 
       retryAttempt = 0;
       setState('open');
-      const terminal = await consumeEventStream(response, controller.signal, onEvent, options);
-      if (terminal) closeConnection();
-      else scheduleReconnect();
+      const outcome = await consumeEventStream(response, controller, onEvent, options);
+      if (outcome === 'terminal') {
+        closeConnection();
+      } else if (outcome === 'idle') {
+        // A half-open socket: abort above, then reconnect through the same
+        // bounded-backoff path as any transient stream failure.
+        options.onError?.(new SseIdleTimeoutError(options.idleTimeoutMs ?? 45_000));
+        scheduleReconnect();
+      } else {
+        scheduleReconnect();
+      }
     } catch (error) {
       if (closed || (error instanceof Error && error.name === 'AbortError')) return;
       if (error instanceof ClientVersionUnsupportedError) {

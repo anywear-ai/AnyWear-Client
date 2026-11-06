@@ -17,9 +17,12 @@ import { validateImageFile, type SignedUploadPost } from './imageUpload';
  */
 
 /** Every photo one action accepts. */
-export const MAX_BATCH_PHOTOS = 10;
-/** Every photo's bytes, summed, that one action accepts. */
-export const MAX_BATCH_BYTES = 60 * 1024 * 1024;
+export const MAX_BATCH_PHOTOS = 50;
+/**
+ * Every photo's bytes, summed, that one action accepts: 50 typical 6 MiB phone
+ * photos, the same per-photo derivation as the previous ten-photo bound.
+ */
+export const MAX_BATCH_BYTES = 300 * 1024 * 1024;
 /** Photos whose three calls may be in flight at once; one photo's calls are sequential. */
 export const MAX_CONCURRENT_UPLOADS = 3;
 /**

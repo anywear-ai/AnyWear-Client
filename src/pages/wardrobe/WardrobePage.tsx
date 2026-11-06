@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
-import { useGetWardrobe, useDeleteWardrobeItemsId, useGetWardrobeCategories } from '../../api/endpoints/wardrobe/wardrobe';
+import { useState, useEffect, useCallback } from 'react';
+import { useDeleteWardrobeItemsId, useGetWardrobeCategories } from '../../api/endpoints/wardrobe/wardrobe';
 import { useGetOutfits } from '../../api/endpoints/outfits/outfits';
 import { usePostVtoGenerations } from '../../api/endpoints/vto/vto';
 import AddItemModal from './AddItemModal';
@@ -12,11 +12,18 @@ import { getOutfitLookImage } from '../../lib/image-utils';
 import { outfitHasActiveGeneration, outfitLookRefetchInterval, type OutfitLookState } from '../../lib/outfit-look';
 import { getErrorMessage } from '../../lib/errors';
 import { connectSse } from '../../lib/sse';
+import { mergeWardrobeStatus } from '../../lib/status-arbitration';
+import { useWardrobeList } from '../../hooks/useWardrobeList';
 import { GetWardrobe200Item } from '../../api/model/getWardrobe200Item';
 import { GetWardrobeParams } from '../../api/model/getWardrobeParams';
 import { GetOutfits200OutfitsItem } from '../../api/model/getOutfits200OutfitsItem';
 import { TaggingStatusResponse } from '../../api/model/taggingStatusResponse';
 import { useQueryClient } from '@tanstack/react-query';
+
+/** Whether the item still has a tagging task the aggregate stream can advance. */
+function isInFlightItem(item: GetWardrobe200Item): boolean {
+  return item.taggingStatus === 'processing' || item.taggingStatus === 'uploading';
+}
 
 function getTagStatusBadge(status: string | undefined) {
   switch (status) {
@@ -60,16 +67,13 @@ export default function WardrobePage() {
 
   const queryClient = useQueryClient();
 
-  const { data: wardrobeResponse, isLoading, refetch } = useGetWardrobe(filters, {
-    query: {
-      refetchInterval: (query) => {
-        const items = query.state.data as GetWardrobe200Item[] | undefined;
-        return items?.some((item) => (
-          item.taggingStatus === 'processing' || item.taggingStatus === 'uploading'
-        )) ? 10_000 : false;
-      },
-    },
-  });
+  // One merged list read on mount and on each recovery trigger; no interval.
+  const {
+    items: wardrobeData,
+    isLoading,
+    refetch,
+    notifyStreamState,
+  } = useWardrobeList(filters);
 
   const { data: categoriesResponse } = useGetWardrobeCategories();
   const { mutate: deleteItem } = useDeleteWardrobeItemsId();
@@ -84,43 +88,49 @@ export default function WardrobePage() {
   });
   const { mutateAsync: generateLook, isPending: isGeneratingLook } = usePostVtoGenerations();
 
-  const wardrobeData = useMemo<GetWardrobe200Item[]>(
-    () => (Array.isArray(wardrobeResponse) ? wardrobeResponse : []),
-    [wardrobeResponse],
-  );
   const categories = categoriesResponse?.categories ?? [];
 
+  /**
+   * The aggregate stream's cache-write boundary: one frame advances one item in
+   * every cached list that already holds it, and only when its version is newer.
+   * A filtered list is never given an item it does not contain, and the list is
+   * never refetched for a frame.
+   */
+  const applyStatusFrame = useCallback((frame: TaggingStatusResponse) => {
+    queryClient.setQueriesData<GetWardrobe200Item[]>({ queryKey: ['/wardrobe'] }, (cached) => {
+      if (!Array.isArray(cached)) return cached;
+      let changed = false;
+      const next = cached.map((item) => {
+        if (item.id !== frame.item_id) return item;
+        const merged = mergeWardrobeStatus(item, frame);
+        if (merged !== item) changed = true;
+        return merged;
+      });
+      return changed ? next : cached;
+    });
+  }, [queryClient]);
+
+  const hasInFlightItem = wardrobeData.some(isInFlightItem);
+
   useEffect(() => {
-    if (!wardrobeData || !Array.isArray(wardrobeData)) return;
+    if (!hasInFlightItem) return;
 
-    const connections: Array<ReturnType<typeof connectSse>> = [];
-
-    for (const item of wardrobeData as GetWardrobe200Item[]) {
-      if (item.taggingStatus === 'processing' || item.taggingStatus === 'uploading') {
-        // A status frame advances the item only when its version is newer than
-        // the state the list already shows; a duplicate or out-of-order frame
-        // leaves the cached state alone.
-        let lastSeenVersion = item.taggingStateVersion;
-        const conn = connectSse<TaggingStatusResponse>(
-          `/wardrobe/items/${item.id}/stream`,
-          (data) => {
-            if (data.state_version <= lastSeenVersion) return;
-            lastSeenVersion = data.state_version;
-            queryClient.invalidateQueries({ queryKey: ['/wardrobe'] });
-          },
-          {
-            eventName: 'status',
-            isTerminal: (data) => data.tagging_status === 'ready' || data.tagging_status === 'failed',
-          },
-        );
-        connections.push(conn);
-      }
-    }
+    // One caller-scoped stream per open tab, independent of the batch size. It
+    // stays open across a terminal frame and closes only when nothing is in
+    // flight; a reconnect reports `open` again, which re-reads the list once.
+    const connection = connectSse<TaggingStatusResponse>(
+      '/wardrobe/status/stream',
+      applyStatusFrame,
+      {
+        eventName: 'status',
+        onStateChange: notifyStreamState,
+      },
+    );
 
     return () => {
-      connections.forEach((c) => c.close());
+      connection.close();
     };
-  }, [wardrobeData, queryClient]);
+  }, [hasInFlightItem, applyStatusFrame, notifyStreamState]);
 
   const handleDelete = (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -252,7 +262,7 @@ export default function WardrobePage() {
             const color = getColorFromAttributes(item.styleAttributes);
             const material = getMaterialFromAttributes(item.styleAttributes);
             const statusBadge = getTagStatusBadge(item.taggingStatus);
-            const isProcessing = item.taggingStatus === 'processing' || item.taggingStatus === 'uploading';
+            const isProcessing = isInFlightItem(item);
             const primaryImage = item.images.find((image) => image.isPrimary) ?? item.images[0];
 
             return (
@@ -397,14 +407,14 @@ export default function WardrobePage() {
           onClose={() => setIsAddModalOpen(false)}
           onSuccess={handleRefresh}
           // A confirmed photo is an ordinary item: refreshing puts it in front of
-          // the page's existing poll and status stream, and the live list lets each
-          // created row show that item's tagging status without a new endpoint.
+          // the page's aggregate status stream, and the live list lets each created
+          // row show that item's tagging status without a new endpoint.
           items={wardrobeData}
           onItemsCreated={() => {
             // The Service creates the item with category 'pending', which an active
             // category filter excludes; clearing it keeps the new item in front of
-            // the page's poll and status stream so the dialog's row can leave
-            // processing. No endpoint, interval or query is added.
+            // the page's status stream so the dialog's row can leave processing.
+            // No endpoint, interval or query is added.
             if (activeCategory !== 'all') {
               setActiveCategory('all');
               setFilters({});

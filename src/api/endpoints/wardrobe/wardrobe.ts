@@ -616,6 +616,90 @@ export function useGetWardrobeItemsIdStream<TData = Awaited<ReturnType<typeof ge
 
 
 
+export const getWardrobeStatusStream = (
+
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<TaggingStatusResponse>(
+      {url: `/wardrobe/status/stream`, method: 'GET', signal
+    },
+      options);
+    }
+
+
+
+
+export const getGetWardrobeStatusStreamQueryKey = () => {
+    return [
+    `/wardrobe/status/stream`
+    ] as const;
+    }
+
+
+export const getGetWardrobeStatusStreamQueryOptions = <TData = Awaited<ReturnType<typeof getWardrobeStatusStream>>, TError = void>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getWardrobeStatusStream>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetWardrobeStatusStreamQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getWardrobeStatusStream>>> = ({ signal }) => getWardrobeStatusStream(requestOptions, signal);
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getWardrobeStatusStream>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetWardrobeStatusStreamQueryResult = NonNullable<Awaited<ReturnType<typeof getWardrobeStatusStream>>>
+export type GetWardrobeStatusStreamQueryError = void
+
+
+export function useGetWardrobeStatusStream<TData = Awaited<ReturnType<typeof getWardrobeStatusStream>>, TError = void>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getWardrobeStatusStream>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getWardrobeStatusStream>>,
+          TError,
+          Awaited<ReturnType<typeof getWardrobeStatusStream>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetWardrobeStatusStream<TData = Awaited<ReturnType<typeof getWardrobeStatusStream>>, TError = void>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getWardrobeStatusStream>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getWardrobeStatusStream>>,
+          TError,
+          Awaited<ReturnType<typeof getWardrobeStatusStream>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetWardrobeStatusStream<TData = Awaited<ReturnType<typeof getWardrobeStatusStream>>, TError = void>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getWardrobeStatusStream>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useGetWardrobeStatusStream<TData = Awaited<ReturnType<typeof getWardrobeStatusStream>>, TError = void>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getWardrobeStatusStream>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetWardrobeStatusStreamQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
 export const postWardrobeItemsIdUploadUrl = (
     id: string,
     postWardrobeItemsIdUploadUrlBody: PostWardrobeItemsIdUploadUrlBody,

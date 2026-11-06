@@ -48,7 +48,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/AnyWear-Service-API
-          ref: 984cf547139aee2d0bc0a0cbc605a16ef5670e62
+          ref: 698cd51c0d2b9008a81f587d405c4d4cecb2015b
           path: api
           token: ${{ steps.generate-token.outputs.token }}
           persist-credentials: false

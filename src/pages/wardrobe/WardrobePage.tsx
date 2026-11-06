@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useDeleteWardrobeItemsId, useGetWardrobeCategories } from '../../api/endpoints/wardrobe/wardrobe';
 import { useGetOutfits } from '../../api/endpoints/outfits/outfits';
 import { usePostVtoGenerations } from '../../api/endpoints/vto/vto';
@@ -23,6 +23,11 @@ import { useQueryClient } from '@tanstack/react-query';
 /** Whether the item still has a tagging task the aggregate stream can advance. */
 function isInFlightItem(item: GetWardrobe200Item): boolean {
   return item.taggingStatus === 'processing' || item.taggingStatus === 'uploading';
+}
+
+/** Whether a tagging lifecycle ended; a newer `processing` is a new one (a re-tag). */
+function isTerminalTaggingStatus(status: string): boolean {
+  return status === 'ready' || status === 'failed';
 }
 
 function getTagStatusBadge(status: string | undefined) {
@@ -91,24 +96,47 @@ export default function WardrobePage() {
   const categories = categoriesResponse?.categories ?? [];
 
   /**
+   * The terminal frame emits at the same version that wrote the generated name
+   * and category, so it schedules one merged list read. The read runs through
+   * `useWardrobeList`'s loop: it coalesces with an in-flight read and gets the
+   * trailing read rather than one request per frame. This map is the per-item
+   * guard: a replayed or out-of-order terminal frame at a version already
+   * handled schedules nothing, while a newer terminal version (a re-tag that
+   * finished) may schedule one.
+   */
+  const lastTerminalReadVersion = useRef(new Map<string, number>());
+
+  /**
    * The aggregate stream's cache-write boundary: one frame advances one item in
    * every cached list that already holds it, and only when its version is newer.
-   * A filtered list is never given an item it does not contain, and the list is
-   * never refetched for a frame.
+   * A filtered list is never given an item it does not contain. A non-terminal
+   * frame merges in place; a terminal frame additionally schedules the one list
+   * read that brings the fields the frame does not carry.
    */
   const applyStatusFrame = useCallback((frame: TaggingStatusResponse) => {
+    let advanced = false;
+
     queryClient.setQueriesData<GetWardrobe200Item[]>({ queryKey: ['/wardrobe'] }, (cached) => {
       if (!Array.isArray(cached)) return cached;
       let changed = false;
       const next = cached.map((item) => {
         if (item.id !== frame.item_id) return item;
+        // A frame at (or below) the cached version cannot be the transition that
+        // wrote a newer name: the item already held that version.
+        if (frame.state_version > item.taggingStateVersion) advanced = true;
         const merged = mergeWardrobeStatus(item, frame);
         if (merged !== item) changed = true;
         return merged;
       });
       return changed ? next : cached;
     });
-  }, [queryClient]);
+
+    if (!advanced || !isTerminalTaggingStatus(frame.tagging_status)) return;
+    const scheduled = lastTerminalReadVersion.current.get(frame.item_id);
+    if (scheduled !== undefined && frame.state_version <= scheduled) return;
+    lastTerminalReadVersion.current.set(frame.item_id, frame.state_version);
+    void refetch();
+  }, [queryClient, refetch]);
 
   const hasInFlightItem = wardrobeData.some(isInFlightItem);
 

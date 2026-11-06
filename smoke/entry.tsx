@@ -1,22 +1,29 @@
 import { createRoot } from 'react-dom/client';
 import { appDataDir, join } from '@tauri-apps/api/path';
-import { exists } from '@tauri-apps/plugin-fs';
+import { exists, writeFile } from '@tauri-apps/plugin-fs';
 import CachedImage from '../src/components/CachedImage';
 
 // Smoke-only entry, built to `dist-smoke/` and never shipped. It mounts the real
-// `CachedImage` twice against a loopback fixture so the packaged WebDriver run can
-// prove the narrowed capability, the asset protocol and the production CSP:
+// `CachedImage` twice against a loopback fixture so the packaged run can prove the
+// narrowed capability, the asset protocol and the production CSP:
 //
 // 1. cold mount: `exists()` is false, so the component downloads the fixture and
 //    writes it under the app-data cache directory through `writeFile`
 // 2. remount with a changed React `key`: `exists()` is true, so the component paints
 //    from `convertFileSrc` and does not touch the network again
 //
-// `window.__smoke` is the only result channel: WebDriver reads it with
-// `execute/sync`, so CSP evidence does not depend on a console-log channel.
+// The same result object is published twice, through two independent channels:
+//
+// - `window.__smoke`, read by WebDriver `execute/sync` on a non-elevated runner
+// - `$APPDATA/cache/images/smoke-result.json`, written through the very capability
+//   under test (`fs:allow-write-file` on `$APPDATA/cache/images/**`) so a hosted,
+//   elevated Windows runner — where WebView2 refuses the EdgeDriver attach — can
+//   still read the same facts from a file. Neither channel carries a fact the
+//   other does not; the file is the same JSON object plus the `channel` marker.
 
 const FIXTURE_URL = 'http://127.0.0.1:38471/fixture.png';
 const CACHE_KEY = 'smoke-fixture';
+const RESULT_FILE = 'smoke-result.json';
 const MOUNT_TIMEOUT_MS = 30_000;
 const WATCHDOG_TIMEOUT_MS = 90_000;
 
@@ -25,8 +32,10 @@ interface CapturedViolation {
   blockedURI: string;
 }
 
-interface SmokeSuccess {
+interface SmokeResult {
+  schema_version: 1;
   done: true;
+  channel: 'page';
   cachePath: string;
   existsAfter: boolean;
   imgSrc: string;
@@ -36,13 +45,15 @@ interface SmokeSuccess {
 }
 
 interface SmokeFailure {
+  schema_version: 1;
   done: false;
+  channel: 'page';
   error: string;
 }
 
 declare global {
   interface Window {
-    __smoke?: SmokeSuccess | SmokeFailure;
+    __smoke?: SmokeResult | SmokeFailure;
   }
 }
 
@@ -59,11 +70,26 @@ const rootElement = document.getElementById('root');
 if (rootElement === null) throw new Error('smoke/index.html must provide #root');
 const root = createRoot(rootElement);
 let settled = false;
+let cacheDirectory = '';
 
-function fail(message: string): void {
+/** Writes either channel's payload through the capability under test. */
+async function writeResultFile(payload: SmokeResult | SmokeFailure): Promise<void> {
+  const path = await join(cacheDirectory, RESULT_FILE);
+  await writeFile(path, new TextEncoder().encode(`${JSON.stringify(payload)}\n`));
+}
+
+async function publishFailure(message: string): Promise<void> {
   if (settled) return;
   settled = true;
-  window.__smoke = { done: false, error: message };
+  const failure: SmokeFailure = { schema_version: 1, done: false, channel: 'page', error: message };
+  if (cacheDirectory !== '') {
+    try {
+      await writeResultFile(failure);
+    } catch {
+      // The failure file is best effort; the window channel still carries the error.
+    }
+  }
+  window.__smoke = failure;
 }
 
 /** Mount the component and resolve once its `<img>` reports a load. */
@@ -119,7 +145,8 @@ async function probeFetchBlocked(): Promise<boolean> {
 async function run(): Promise<void> {
   try {
     const appData = await appDataDir();
-    const cachePath = await join(appData, 'cache', 'images', `${CACHE_KEY}.jpg`);
+    cacheDirectory = await join(appData, 'cache', 'images');
+    const cachePath = await join(cacheDirectory, `${CACHE_KEY}.jpg`);
 
     // Cold mount: the fixture is downloaded and written through the capability.
     await mountImage(1);
@@ -130,10 +157,11 @@ async function run(): Promise<void> {
 
     const snapshot = [...violations];
     const fetchBlocked = await probeFetchBlocked();
-    if (settled) return;
-    settled = true;
-    window.__smoke = {
+
+    const result: SmokeResult = {
+      schema_version: 1,
       done: true,
+      channel: 'page',
       cachePath,
       existsAfter,
       imgSrc: cached.src,
@@ -141,10 +169,19 @@ async function run(): Promise<void> {
       violations: snapshot,
       fetchBlocked,
     };
+
+    // File channel first, so a partially written file is never published as a
+    // success by the window channel; both carry the same object.
+    await writeResultFile(result);
+    if (settled) return;
+    settled = true;
+    window.__smoke = result;
   } catch (error) {
-    fail(error instanceof Error ? error.message : String(error));
+    await publishFailure(error instanceof Error ? error.message : String(error));
   }
 }
 
-window.setTimeout(() => fail(`smoke entry did not finish within ${WATCHDOG_TIMEOUT_MS} ms`), WATCHDOG_TIMEOUT_MS);
+window.setTimeout(() => {
+  void publishFailure(`smoke entry did not finish within ${WATCHDOG_TIMEOUT_MS} ms`);
+}, WATCHDOG_TIMEOUT_MS);
 void run();

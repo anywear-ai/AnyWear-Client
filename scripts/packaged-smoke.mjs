@@ -6,7 +6,21 @@
 // `src-tauri/tauri.smoke.conf.json`, and reads `window.__smoke` from the smoke-only
 // entry through WebDriver `execute/sync`.
 //
-// Assertions:
+// Hosted Windows runners are elevated, and an elevated WebView2 host ignores the
+// browser arguments EdgeDriver uses for its remote-debugging attach, so the
+// WebDriver session cannot be created there (`DevToolsActivePort file doesn't
+// exist`). The smoke therefore has two evidence channels over the same packaged
+// binary, the same `$APPDATA/cache/images/**` capability and the same CSP:
+//
+// 1. WebDriver: `window.__smoke`, the first attempt on a non-elevated runner.
+// 2. App-written file: `$APPDATA/cache/images/smoke-result.json`, written by the
+//    smoke entry through `fs:allow-write-file` and read here. Used only when the
+//    WebDriver attach fails with the elevation/DevToolsActivePort failure (or when
+//    `SMOKE_CHANNEL=file` is set), and recorded in `result.json` as
+//    `evidence.channel: "file"` with `evidence.webdriver_error` naming the attach
+//    failure. The fallback is announced on the console; it is never silent.
+//
+// Assertions (both channels):
 // - the cold mount wrote the fixture under `$APPDATA/cache/images` of the app-data
 //   directory named by `com.anywear.app` (`existsAfter`, `cachePath`)
 // - the remount painted from the asset protocol (`imgSrc` begins
@@ -14,22 +28,25 @@
 // - no `securitypolicyviolation` was captured during the cache cycle
 // - an in-page fetch to `https://example.com` is blocked by the smoke policy
 //
-// Evidence: `smoke-artifacts/result.json`, `smoke-artifacts/cache-listing.txt` and
-// `smoke-artifacts/screenshot.png`. The script exits non-zero on any failure.
+// Evidence: `smoke-artifacts/result.json`, `smoke-artifacts/cache-listing.txt` and,
+// when WebDriver produced one, `smoke-artifacts/screenshot.png`. The script exits
+// non-zero on any assertion failure or when the file never appears.
 //
 // Usage:
 //   node scripts/packaged-smoke.mjs
 //   SMOKE_BINARY=C:\path\to\anywear.exe node scripts/packaged-smoke.mjs
+//   SMOKE_CHANNEL=file node scripts/packaged-smoke.mjs
+//   SMOKE_RESULT_PATH=C:\path\to\smoke-result.json node scripts/packaged-smoke.mjs
 //
 // Requires `tauri-driver` and a matching `msedgedriver.exe` on PATH (or
-// `NATIVE_DRIVER` pointing at the driver). Node 24 provides `fetch`, so this script
-// adds no dependency.
+// `NATIVE_DRIVER` pointing at the driver) for the WebDriver channel. Node 24
+// provides `fetch`, so this script adds no dependency.
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateSync } from 'node:zlib';
 
@@ -43,7 +60,10 @@ const DRIVER_BASE_URL = `http://${FIXTURE_HOST}:${DRIVER_PORT}`;
 const DRIVER_START_TIMEOUT_MS = 60_000;
 const APP_START_TIMEOUT_MS = 240_000;
 const SMOKE_DEADLINE_MS = 480_000;
+const FILE_CHANNEL_TIMEOUT_MS = 120_000;
 const DEFAULT_BINARY = 'src-tauri/target/release/anywear.exe';
+const RESULT_FILE_NAME = 'smoke-result.json';
+const SMOKE_CHANNEL = (process.env.SMOKE_CHANNEL ?? '').toLowerCase();
 
 class SmokeError extends Error {}
 
@@ -181,6 +201,11 @@ async function webdriverRequest(pathname, { method = 'GET', body, timeoutMs = 60
   return parsed;
 }
 
+/** The elevated-host attach failure this smoke falls back from; no other error does. */
+function isElevationAttachFailure(error) {
+  return /DevToolsActivePort/i.test(error instanceof Error ? error.message : String(error));
+}
+
 /** `msedgedriver.exe` on PATH, or an explicit `NATIVE_DRIVER`; passed to tauri-driver when known. */
 function resolveNativeDriver() {
   if (process.env.NATIVE_DRIVER) return process.env.NATIVE_DRIVER;
@@ -227,12 +252,12 @@ function spawnDriver() {
   return state;
 }
 
-async function stopDriver(state) {
-  if (state === null || state.exited) return;
+/** Force-kills a process and its descendants; best effort on every platform. */
+async function killProcessTree(pid) {
+  if (pid === undefined || pid === null) return;
   if (process.platform === 'win32') {
-    // `tauri-driver` owns the msedgedriver child; kill the whole tree.
     await new Promise((resolvePromise) => {
-      const killer = spawn('taskkill', ['/pid', String(state.child.pid), '/T', '/F'], {
+      const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
         stdio: 'ignore',
         windowsHide: true,
       });
@@ -241,7 +266,29 @@ async function stopDriver(state) {
     });
     return;
   }
-  state.child.kill('SIGTERM');
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    // Already gone.
+  }
+}
+
+/** Kills any packaged app process, including one a failed WebDriver attempt left. */
+async function killAppProcesses(application) {
+  if (process.platform !== 'win32') return;
+  await new Promise((resolvePromise) => {
+    const killer = spawn('taskkill', ['/IM', basename(application), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    killer.on('exit', resolvePromise);
+    killer.on('error', resolvePromise);
+  });
+}
+
+async function stopDriver(state) {
+  if (state === null || state.exited) return;
+  await killProcessTree(state.child.pid);
 }
 
 async function waitForDriver(state) {
@@ -340,6 +387,56 @@ async function deleteSession(sessionId) {
   }
 }
 
+// --- app-written file channel ---------------------------------------------
+
+async function removeStaleResult(path) {
+  if (path === null) return;
+  try {
+    await rm(path, { force: true });
+  } catch {
+    // A path that cannot be removed is reported when the file is read.
+  }
+}
+
+/**
+ * Launches the packaged binary directly and waits for the smoke entry to write its
+ * result through `fs:allow-write-file`. Used only for the elevated-host fallback,
+ * and the assertions are the same ones the WebDriver channel applies.
+ */
+async function waitForAppResultFile(application, path, deadline) {
+  await killAppProcesses(application);
+  // Give the killed WebDriver-launched process a moment to release the WebView2
+  // user-data directory before the direct launch opens it.
+  await sleep(1_000);
+  await removeStaleResult(path);
+
+  const app = spawn(application, [], { stdio: 'ignore', windowsHide: true });
+  try {
+    let lastError = 'the result file never appeared';
+    while (Date.now() < deadline) {
+      try {
+        const parsed = JSON.parse(await readFile(path, 'utf8'));
+        if (parsed !== null && typeof parsed === 'object') {
+          if (parsed.done === false) {
+            throw new SmokeError(`the app-written result reported a failure: ${parsed.error}`);
+          }
+          if (parsed.done === true) return parsed;
+        }
+        lastError = `the result file carried no usable result: ${JSON.stringify(parsed).slice(0, 500)}`;
+      } catch (error) {
+        if (error instanceof SmokeError) throw error;
+        lastError = error.message;
+      }
+      await sleep(500);
+    }
+    throw new SmokeError(
+      `the app did not write the smoke result file within ${FILE_CHANNEL_TIMEOUT_MS / 1000} s: ${path} (${lastError})`,
+    );
+  } finally {
+    await killProcessTree(app.pid);
+  }
+}
+
 // --- assertions and artifacts ---------------------------------------------
 
 function assertSmoke(result) {
@@ -391,12 +488,17 @@ async function writeResult(result) {
 
 const startedAt = Date.now();
 const binary = resolve(REPOSITORY_ROOT, process.env.SMOKE_BINARY ?? DEFAULT_BINARY);
+const resultPath = process.env.SMOKE_RESULT_PATH
+  ?? (process.env.APPDATA === undefined
+    ? null
+    : join(process.env.APPDATA, 'com.anywear.app', 'cache', 'images', RESULT_FILE_NAME));
 const result = {
   schema_version: 1,
   status: 'failed',
   binary,
   fixture: { url: FIXTURE_URL, requests: 0 },
   driver: { command: 'tauri-driver', native_driver: null },
+  evidence: { channel: null },
 };
 let driverState = null;
 let sessionId = null;
@@ -413,12 +515,49 @@ try {
   }
 
   fixture = await startFixtureServer();
-  driverState = spawnDriver();
-  result.driver.native_driver = driverState.nativeDriver ?? 'resolved by tauri-driver from PATH';
-  await waitForDriver(driverState);
+  await removeStaleResult(resultPath);
 
-  sessionId = await createSession(binary);
-  const smoke = await waitForSmokeResult(sessionId, startedAt + SMOKE_DEADLINE_MS);
+  let smoke = null;
+  let channel = null;
+  let webdriverError = null;
+
+  if (SMOKE_CHANNEL === 'file') {
+    webdriverError = 'skipped by SMOKE_CHANNEL=file';
+    console.warn('[packaged-smoke] SMOKE_CHANNEL=file: skipping the WebDriver attempt; using the app-written result file.');
+  } else {
+    driverState = spawnDriver();
+    result.driver.native_driver = driverState.nativeDriver ?? 'resolved by tauri-driver from PATH';
+    await waitForDriver(driverState);
+    try {
+      sessionId = await createSession(binary);
+    } catch (error) {
+      if (!isElevationAttachFailure(error)) throw error;
+      webdriverError = error instanceof Error ? error.message : String(error);
+      console.warn(`[packaged-smoke] WebDriver attach failed: ${webdriverError}`);
+      console.warn(
+        '[packaged-smoke] This hosted runner is elevated, so WebView2 refuses the EdgeDriver remote-debugging attach. '
+          + 'Falling back to the app-written result file; the same packaged binary, CSP and capability are exercised.',
+      );
+      await stopDriver(driverState);
+      driverState = null;
+      await killAppProcesses(binary);
+    }
+  }
+
+  if (sessionId !== null) {
+    smoke = await waitForSmokeResult(sessionId, startedAt + SMOKE_DEADLINE_MS);
+    channel = 'webdriver';
+  } else {
+    if (resultPath === null) {
+      throw new SmokeError('cannot derive the app-written result path: APPDATA is not set and SMOKE_RESULT_PATH is empty');
+    }
+    channel = 'file';
+    smoke = await waitForAppResultFile(binary, resultPath, Date.now() + FILE_CHANNEL_TIMEOUT_MS);
+  }
+
+  result.evidence.channel = channel;
+  if (channel === 'file') result.evidence.result_path = resultPath;
+  if (webdriverError !== null) result.evidence.webdriver_error = webdriverError;
   Object.assign(result, {
     cachePath: smoke.cachePath,
     existsAfter: smoke.existsAfter,
@@ -429,17 +568,27 @@ try {
   });
   result.fixture.requests = fixture.requestCount();
   result.duration_ms = Date.now() - startedAt;
-  screenshot = await captureScreenshot(sessionId);
+
+  if (channel === 'webdriver' && sessionId !== null) {
+    screenshot = await captureScreenshot(sessionId);
+  }
+
   assertSmoke(smoke);
 
   result.status = 'passed';
   result.duration_ms = Date.now() - startedAt;
 
   await writeCacheListing(smoke.cachePath);
-  await writeFile(join(ARTIFACTS_DIRECTORY, 'screenshot.png'), screenshot);
+  if (screenshot !== null) {
+    await writeFile(join(ARTIFACTS_DIRECTORY, 'screenshot.png'), screenshot);
+  }
   await writeResult(result);
 
-  console.log(`packaged smoke passed in ${result.duration_ms} ms`);
+  console.log(`packaged smoke passed in ${result.duration_ms} ms (evidence channel: ${channel})`);
+  if (channel === 'file') {
+    console.log(`  note: WebDriver attach was unavailable; the app wrote the same result to ${resultPath}`);
+    console.log('  note: no screenshot exists in file mode');
+  }
   console.log(`  binary: ${binary}`);
   console.log(`  cache:  ${smoke.cachePath} (existsAfter=${smoke.existsAfter})`);
   console.log(`  imgSrc: ${smoke.imgSrc} (naturalWidth=${smoke.naturalWidth})`);

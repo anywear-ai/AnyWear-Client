@@ -10,6 +10,7 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+dist-smoke
 *.local
 
 # Editor directories and files
@@ -27,5 +28,6 @@ dist-ssr
 .env
 playwright-report/
 test-results/
+smoke-artifacts/
 
 .worktree/

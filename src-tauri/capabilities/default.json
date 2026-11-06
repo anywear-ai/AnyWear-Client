@@ -5,17 +5,24 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "opener:default",
-    "fs:allow-exists",
-    "fs:allow-mkdir",
-    "fs:allow-write-file",
     "log:default",
     {
-      "identifier": "fs:scope",
+      "identifier": "fs:allow-exists",
       "allow": [
         { "path": "$APPDATA/cache/images" },
         { "path": "$APPDATA/cache/images/**" }
       ]
+    },
+    {
+      "identifier": "fs:allow-mkdir",
+      "allow": [
+        { "path": "$APPDATA/cache" },
+        { "path": "$APPDATA/cache/images" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-write-file",
+      "allow": [{ "path": "$APPDATA/cache/images/**" }]
     }
   ]
 }

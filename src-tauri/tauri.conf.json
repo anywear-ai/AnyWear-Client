@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri-app",
+  "productName": "AnyWear",
   "version": "0.1.0",
   "identifier": "com.anywear.app",
   "build": {
@@ -12,22 +12,28 @@
   "app": {
     "windows": [
       {
-        "title": "tauri-app",
+        "title": "AnyWear",
         "width": 800,
         "height": 600
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' asset: http://asset.localhost data: https://*.cloudfront.net https://*.s3.ap-east-1.amazonaws.com; connect-src 'self' ipc: http://ipc.localhost https://*.cloudfront.net https://*.s3.ap-east-1.amazonaws.com https://cognito-idp.ap-east-1.amazonaws.com; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: http://localhost:1420 http://localhost:3000 https://*.cloudfront.net https://*.s3.ap-east-1.amazonaws.com; connect-src 'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420 ws://localhost:1421 http://localhost:3000 https://*.cloudfront.net https://*.s3.ap-east-1.amazonaws.com https://cognito-idp.ap-east-1.amazonaws.com; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/cache/images", "$APPDATA/cache/images/**"]
+        "scope": ["$APPDATA/cache/images/**"]
       }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "AnyWear",
+    "copyright": "Copyright © 2026 AnyWear",
+    "category": "Lifestyle",
+    "shortDescription": "AnyWear — your wardrobe, styled.",
+    "longDescription": "AnyWear is a virtual try-on and wardrobe client. Capture your clothes, generate looks, and see them on your digital mannequin.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

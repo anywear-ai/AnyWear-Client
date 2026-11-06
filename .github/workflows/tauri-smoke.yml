@@ -1,0 +1,75 @@
+name: Packaged Desktop Smoke
+
+# The Windows packaged runtime proof: the shipped capability, asset-protocol scope
+# and production CSP plus one guarded loopback origin, exercised against a binary
+# built from `src-tauri/tauri.smoke.conf.json`. It installs `tauri-driver` and a
+# matching Edge WebDriver, builds no installer, needs no signing identity and
+# publishes nothing. Called by `check.yml` after the unit tests.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  tauri-smoke:
+    name: Packaged Desktop Smoke
+    runs-on: windows-latest
+    # The smoke's own bound is 15 minutes; the extra time covers the two cargo
+    # installs and the Tauri release build on a cold cache.
+    timeout-minutes: 45
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      SMOKE_BINARY: src-tauri/target/release/anywear.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.18.0
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+
+      # `msedgedriver-tool.exe` downloads the build matching the installed WebView2
+      # into the current directory and prints nothing we need; the directory is what
+      # `tauri-driver` searches when it resolves `msedgedriver.exe` from PATH.
+      - name: Install Matching Edge WebDriver
+        shell: pwsh
+        run: |
+          cargo install --git https://github.com/chippers/msedgedriver-tool
+          & "$env:USERPROFILE\.cargo\bin\msedgedriver-tool.exe"
+          "$PWD" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Get-ChildItem msedgedriver.exe | Select-Object Name, Length
+
+      - name: Build Smoke Binary
+        run: pnpm exec tauri build --no-bundle --config src-tauri/tauri.smoke.conf.json
+
+      - name: Run Packaged Smoke
+        timeout-minutes: 15
+        run: node scripts/packaged-smoke.mjs
+
+      - name: Upload Smoke Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-smoke-evidence
+          path: smoke-artifacts/
+          if-no-files-found: warn
+          retention-days: 7

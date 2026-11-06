@@ -23,7 +23,7 @@ const read = (name) => readFileSync(join(workflowsDirectory, name), 'utf8');
 
 const automaticEntry = 'check.yml';
 const manualEntry = 'release.yml';
-const calledWorkflows = ['build.yml', 'test.yml', 'browser.yml'];
+const calledWorkflows = ['build.yml', 'test.yml', 'browser.yml', 'tauri-smoke.yml'];
 
 // #268: the one `paths-ignore` declaration a `main`-push trigger carries. The literal
 // is the contract — ten comment lines, then the trigger with the single quoted
@@ -131,8 +131,8 @@ function envSection(workflow) {
   return rest.slice(0, next < 0 ? undefined : next);
 }
 
-test('the workflow directory contains exactly the five repository workflows', () => {
-  assert.deepEqual(workflowFiles, ['browser.yml', 'build.yml', 'check.yml', 'release.yml', 'test.yml']);
+test('the workflow directory contains exactly the six repository workflows', () => {
+  assert.deepEqual(workflowFiles, ['browser.yml', 'build.yml', 'check.yml', 'release.yml', 'tauri-smoke.yml', 'test.yml']);
 });
 
 test('the repository exposes exactly two entries: one automatic check and one publication entry', () => {
@@ -294,14 +294,15 @@ test('the only activation switch in any workflow is ENABLE_BETA_MUTATION', () =>
   }
 });
 
-test('check.yml wires the three called workflows and maps the App secret only on build', () => {
+test('check.yml wires the four called workflows and maps the App secret only on build', () => {
   const check = read(automaticEntry);
-  assert.deepEqual(jobNames(check), ['build', 'test', 'browser']);
+  assert.deepEqual(jobNames(check), ['build', 'test', 'tauri-smoke', 'browser']);
 
   const build = jobSection(check, 'build');
   const unitTest = jobSection(check, 'test');
+  const desktopSmoke = jobSection(check, 'tauri-smoke');
   const browser = jobSection(check, 'browser');
-  for (const [name, section] of [['build', build], ['test', unitTest], ['browser', browser]]) {
+  for (const [name, section] of [['build', build], ['test', unitTest], ['tauri-smoke', desktopSmoke], ['browser', browser]]) {
     assert.ok(section.length > 0, `check.yml must declare the ${name} job`);
   }
 
@@ -312,6 +313,10 @@ test('check.yml wires the three called workflows and maps the App secret only on
   assert.match(unitTest, /^ {4}needs: \[build\]$/m);
   assert.match(unitTest, /^ {4}uses: \.\/\.github\/workflows\/test\.yml$/m);
   assert.doesNotMatch(unitTest, /secrets:/);
+
+  assert.match(desktopSmoke, /^ {4}needs: \[test\]$/m);
+  assert.match(desktopSmoke, /^ {4}uses: \.\/\.github\/workflows\/tauri-smoke\.yml$/m);
+  assert.doesNotMatch(desktopSmoke, /secrets:/);
 
   assert.match(browser, /^ {4}needs: \[test\]$/m);
   assert.match(browser, /^ {4}uses: \.\/\.github\/workflows\/browser\.yml$/m);

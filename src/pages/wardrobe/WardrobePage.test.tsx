@@ -48,7 +48,11 @@ interface SseConnectionMock {
 }
 
 /** Every aggregate stream the page opened, in order. */
-const sseStreams = vi.hoisted(() => ({ connections: [] as SseConnectionMock[] }));
+const sseStreams = vi.hoisted(() => ({
+  connections: [] as SseConnectionMock[],
+  /** Whether a new connection reports a successful open immediately. */
+  autoOpen: true,
+}));
 
 vi.mock('../../lib/sse', () => ({
   connectSse: (
@@ -58,10 +62,10 @@ vi.mock('../../lib/sse', () => ({
   ) => {
     const connection: SseConnectionMock = { path, onEvent, options, closed: false };
     sseStreams.connections.push(connection);
-    // The real connection reports `connecting` then `open`; the first open is
-    // not a recovery trigger, a reopen after `reconnecting` is.
+    // The real connection reports `connecting` and then either `open` or, when
+    // the attempt fails, `reconnecting` until a later attempt opens.
     options.onStateChange?.('connecting');
-    options.onStateChange?.('open');
+    if (sseStreams.autoOpen) options.onStateChange?.('open');
     return {
       close: () => {
         connection.closed = true;
@@ -267,6 +271,7 @@ beforeEach(() => {
   createOutfitModal.props = null;
   addItemModal.props = null;
   sseStreams.connections.splice(0);
+  sseStreams.autoOpen = true;
   queryClients.splice(0).forEach((client) => client.clear());
   wardrobeItems = [];
   wardrobeHandler = null;
@@ -751,7 +756,7 @@ describe('WardrobePage aggregate status stream', () => {
     });
   });
 
-  it('reads the merged list once per recovery trigger and collapses concurrent triggers', async () => {
+  it('reads the merged list once per recovery trigger and one trailing read for overlapping triggers', async () => {
     wardrobeItems = fiftyProcessingItems();
     renderPage();
     await waitFor(() => expect(wardrobeRequests()).toHaveLength(1));
@@ -766,7 +771,7 @@ describe('WardrobePage aggregate status stream', () => {
         wardrobeRequests().length,
         `${label}: one read after ${before}`,
       ).toBe(before + 1));
-      // Let the read settle so the next trigger is not coalesced into it.
+      // Let the read settle so the next trigger starts its own read.
       await flush();
     };
 
@@ -791,33 +796,63 @@ describe('WardrobePage aggregate status stream', () => {
       window.dispatchEvent(new Event('focus'));
     });
 
-    // Two triggers while one read is in flight are still one read.
-    let release!: (items: GetWardrobe200Item[]) => void;
-    const gate = new Promise<GetWardrobe200Item[]>((resolve) => {
-      release = resolve;
-    });
-    let coalescedReads = 0;
+    // Triggers while one read is in flight collapse into that read plus exactly
+    // one trailing read; nothing overlaps the trailing read, so it is the last.
+    let releaseLeading!: (items: GetWardrobe200Item[]) => void;
+    let releaseTrailing!: (items: GetWardrobe200Item[]) => void;
+    let reads = 0;
     wardrobeHandler = () => {
-      coalescedReads += 1;
-      return gate;
+      reads += 1;
+      if (reads === 1) {
+        return new Promise<GetWardrobe200Item[]>((resolve) => { releaseLeading = resolve; });
+      }
+      if (reads === 2) {
+        return new Promise<GetWardrobe200Item[]>((resolve) => { releaseTrailing = resolve; });
+      }
+      return Promise.resolve(wardrobeItems);
     };
+
     act(() => {
       document.dispatchEvent(new Event('visibilitychange'));
       window.dispatchEvent(new Event('online'));
     });
     await flush();
-    expect(coalescedReads).toBe(1);
+    expect(reads).toBe(1);
 
-    const readsWhilePending = coalescedReads;
     act(() => { window.dispatchEvent(new Event('focus')); });
     await flush();
-    expect(coalescedReads).toBe(readsWhilePending);
+    expect(reads).toBe(1);
 
     await act(async () => {
-      release(wardrobeItems);
+      releaseLeading(wardrobeItems);
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    expect(reads).toBe(2);
+
+    await act(async () => {
+      releaseTrailing(wardrobeItems);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(reads).toBe(2);
     wardrobeHandler = null;
+  });
+
+  it('re-reads the list when the first stream open follows failed attempts', async () => {
+    sseStreams.autoOpen = false;
+    wardrobeItems = [wardrobeItem({ id: 'item-1', taggingStatus: 'processing', taggingStateVersion: 1 })];
+    renderPage();
+    await waitFor(() => expect(sseStreams.connections).toHaveLength(1));
+    const connection = sseStreams.connections[0];
+    const before = wardrobeRequests().length;
+
+    // The first attempt never opens: the connection drops into `reconnecting`
+    // and the list may have moved on while no stream was live.
+    act(() => connection.options.onStateChange?.('reconnecting'));
+    act(() => connection.options.onStateChange?.('open'));
+
+    await waitFor(() => expect(wardrobeRequests().length).toBe(before + 1));
+    await flush();
+    expect(wardrobeRequests().length).toBe(before + 1);
   });
 
   it('schedules no list interval while items are processing', async () => {
@@ -838,5 +873,80 @@ describe('WardrobePage aggregate status stream', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('WardrobePage list reads after confirmations', () => {
+  it('runs one trailing read when a second confirmation commits during a read', async () => {
+    renderPage();
+    await waitFor(() => expect(wardrobeRequests()).toHaveLength(1));
+    const requestsAfterMount = wardrobeRequests().length;
+
+    const props = openAddItemDialog();
+    let releaseLeading!: (items: GetWardrobe200Item[]) => void;
+    let reads = 0;
+    wardrobeHandler = () => {
+      reads += 1;
+      if (reads === 1) {
+        return new Promise<GetWardrobe200Item[]>((resolve) => { releaseLeading = resolve; });
+      }
+      return Promise.resolve(wardrobeItems);
+    };
+
+    // Confirmation #1 refreshes the list; its read is still in flight.
+    act(() => props.onItemsCreated?.());
+    await flush();
+    expect(reads).toBe(1);
+
+    // Confirmation #2 commits while that read is in flight. Its refresh joins
+    // the read whose snapshot predates #2, so item 2 is not in that response.
+    wardrobeItems = [
+      wardrobeItem({ id: 'item-1', name: 'Item 1', taggingStatus: 'processing' }),
+      wardrobeItem({ id: 'item-2', name: 'Item 2', taggingStatus: 'processing' }),
+    ];
+    act(() => props.onItemsCreated?.());
+    await flush();
+    expect(reads).toBe(1);
+
+    await act(async () => {
+      // The leading read answers with the pre-#2 snapshot: only item 1.
+      releaseLeading([wardrobeItem({ id: 'item-1', name: 'Item 1', taggingStatus: 'processing' })]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // Exactly one trailing read runs after the leading one settles, and it sees
+    // both confirmed items.
+    await waitFor(() => expect(reads).toBe(2));
+    await flush();
+    expect(reads).toBe(2);
+    expect(wardrobeRequests().length).toBe(requestsAfterMount + 2);
+    await waitFor(() => expect(screen.getByText('Item 2')).toBeInTheDocument());
+    expect(screen.getByText('Item 1')).toBeInTheDocument();
+    wardrobeHandler = null;
+  });
+
+  it('runs no trailing read when nothing overlaps the read', async () => {
+    renderPage();
+    await waitFor(() => expect(wardrobeRequests()).toHaveLength(1));
+    const props = openAddItemDialog();
+
+    let reads = 0;
+    wardrobeHandler = () => {
+      reads += 1;
+      return Promise.resolve(wardrobeItems);
+    };
+
+    act(() => props.onItemsCreated?.());
+    await waitFor(() => expect(reads).toBe(1));
+    // The read settled before the next trigger, so there is nothing to trail.
+    await flush();
+    expect(reads).toBe(1);
+
+    act(() => props.onItemsCreated?.());
+    await waitFor(() => expect(reads).toBe(2));
+    await flush();
+    expect(reads).toBe(2);
+    expect(wardrobeRequests()).toHaveLength(3);
+    wardrobeHandler = null;
   });
 });

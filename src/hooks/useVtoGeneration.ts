@@ -1,10 +1,16 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { usePostVtoGenerations, useGetVtoGenerationsGenerationId } from '../api/endpoints/vto/vto';
+import {
+  getGetVtoGenerationsGenerationIdQueryKey,
+  getVtoGenerationsGenerationId,
+  usePostVtoGenerations,
+  useGetVtoGenerationsGenerationId,
+} from '../api/endpoints/vto/vto';
 import type { PostVtoGenerationsBody } from '../api/model/postVtoGenerationsBody';
 import type { VtoStatusResponse } from '../api/model/vtoStatusResponse';
 import type { VtoStatusResponseStatus } from '../api/model/vtoStatusResponseStatus';
 import { useQueryClient } from '@tanstack/react-query';
 import { connectSse } from '../lib/sse';
+import { mergeVtoStatus } from '../lib/status-arbitration';
 
 /** A terminal status needs no reconnect: the stream that reported it is done. */
 function isTerminalStatus(data: VtoStatusResponse): boolean {
@@ -21,6 +27,17 @@ export default function useVtoGeneration() {
   const statusQuery = useGetVtoGenerationsGenerationId(vtoId ?? '', {
     query: {
       enabled: !!vtoId,
+      queryFn: async ({ signal }) => {
+        if (!vtoId) throw new Error('A VTO generation id is required to read its status');
+        const fetched = await getVtoGenerationsGenerationId(vtoId, undefined, signal);
+        // The 10-second read is a fallback, not a second writer: it resolves
+        // through the same arbiter as the stream, so a request that started
+        // before a newer terminal frame returns the cached terminal status.
+        const cached = queryClient.getQueryData<VtoStatusResponse>(
+          getGetVtoGenerationsGenerationIdQueryKey(vtoId),
+        );
+        return mergeVtoStatus(cached, fetched);
+      },
       refetchInterval: (query) => {
         if (!vtoId) return false;
         const data = query.state.data as VtoStatusResponse | undefined;
@@ -42,19 +59,28 @@ export default function useVtoGeneration() {
 
     if (!vtoId || isTerminal) return;
 
-    const queryKey = [`/vto/generations/${vtoId}`];
+    const queryKey = getGetVtoGenerationsGenerationIdQueryKey(vtoId);
 
     sseRef.current = connectSse<VtoStatusResponse>(
       `/vto/generations/${vtoId}/stream`,
       (data) => {
-        // Only `event: status` frames reach this callback; a duplicate or
-        // out-of-order frame carries a state_version that is not newer than the
-        // cached one and must leave the newer state in place.
+        // Only `event: status` frames reach this callback. Both channels merge
+        // through the arbiter: a duplicate or out-of-order frame leaves the newer
+        // cached state in place, and an equal version refreshes the signed URL.
         const cached = queryClient.getQueryData<VtoStatusResponse>(queryKey);
-        if (cached && data.state_version <= cached.state_version) return;
-        queryClient.setQueryData(queryKey, data);
+        const merged = mergeVtoStatus(cached, data);
+        if (merged === cached) return;
+        queryClient.setQueryData(queryKey, merged);
       },
-      { eventName: 'status', isTerminal: isTerminalStatus },
+      {
+        eventName: 'status',
+        // Close on the status that is actually held: an older terminal frame
+        // cannot close a stream whose newer lifecycle just started.
+        isTerminal: (data) => {
+          const cached = queryClient.getQueryData<VtoStatusResponse>(queryKey);
+          return isTerminalStatus(mergeVtoStatus(cached, data));
+        },
+      },
     );
 
     return () => {
@@ -81,5 +107,5 @@ export default function useVtoGeneration() {
     invalidateProfile();
   }, [generateMutation, queryClient, invalidateProfile]);
 
-  return { generate, status, result, errorMessage, isPolling, vtoId, isStarting: generateMutation.isPending };
+  return { generate, status, result, errorMessage, isPolling, isTerminal, vtoId, isStarting: generateMutation.isPending };
 }

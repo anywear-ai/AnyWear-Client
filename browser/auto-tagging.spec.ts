@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import type { GetWardrobe200Item } from '../src/api/model/getWardrobe200Item';
+import type { TaggingStatusResponse } from '../src/api/model/taggingStatusResponse';
 import { mockClientBoundaries, expectOnlyMockedCalls } from './mock-boundaries';
 import { mockAmplifySession } from './auth-session';
 
@@ -16,15 +17,35 @@ const mockItem: GetWardrobe200Item = {
   createdAt: '2026-05-05T00:00:00.000Z', updatedAt: '2026-05-05T00:00:00.000Z',
 };
 
+/** The ready frame the aggregate stream sends for the item created by the upload. */
+const readyFrame: TaggingStatusResponse = {
+  item_id: ITEM_ID,
+  tagging_status: 'ready',
+  state_version: 2,
+  style_attributes: { color: 'Black', material: 'Cotton' },
+  weather_tags: ['Warm', 'Temperate'],
+  error_message: null,
+  images: [{ imageId: IMAGE_ID, url: 'https://example.com/test.jpg', view: null, isPrimary: true }],
+};
+
 interface MockState {
   items: GetWardrobe200Item[];
   mutations: Array<{ method: string; path: string; body: unknown }>;
   categories: Array<string | null>;
   uploadedForm?: string;
+  /** Holds the aggregate stream response until the test releases a frame. */
+  streamGate?: Promise<void>;
+  /** Frames the aggregate stream answers with. */
+  streamFrames: TaggingStatusResponse[];
+  streamRequests: number;
+}
+
+function emptyState(): MockState {
+  return { items: [], mutations: [], categories: [], streamFrames: [], streamRequests: 0 };
 }
 
 function stateWithItem(item = structuredClone(mockItem)): MockState {
-  return { items: [item], mutations: [], categories: [] };
+  return { ...emptyState(), items: [item] };
 }
 
 async function setupMock(page: Page, state: MockState) {
@@ -50,6 +71,16 @@ async function setupMock(page: Page, state: MockState) {
       const category = url.searchParams.get('category');
       state.categories.push(category);
       return json(state.items.filter(item => !category || item.category === category));
+    }
+    // One caller-scoped aggregate stream replaces the per-item streams. A test
+    // that needs a live transition holds the response and releases a frame.
+    if (method === 'GET' && path === '/wardrobe/status/stream') {
+      state.streamRequests += 1;
+      if (state.streamGate) await state.streamGate;
+      const body = state.streamFrames
+        .map((frame) => `event: status\ndata: ${JSON.stringify(frame)}\n\n`)
+        .join('');
+      return route.fulfill({ status: 200, contentType: 'text/event-stream', body }).catch(() => undefined);
     }
     if (method === 'POST' && path === '/wardrobe/upload-url') {
       state.mutations.push({ method, path, body: request.postDataJSON() });
@@ -78,9 +109,6 @@ async function setupMock(page: Page, state: MockState) {
       state.items = state.items.map(item => ({ ...item, taggingStatus: 'processing' }));
       return json({ itemId: ITEM_ID, taggingStatus: 'processing' }, 202);
     }
-    if (method === 'GET' && path === `/wardrobe/items/${ITEM_ID}/stream`) {
-      return route.fulfill({ contentType: 'text/event-stream', body: '' });
-    }
     return route.fallback();
   });
 }
@@ -91,10 +119,14 @@ test.describe('Wardrobe Auto-Tagging (mocked Client integration)', () => {
   });
   test.afterEach(({ page }) => expectOnlyMockedCalls(page));
 
-  test('uploads an image, shows processing and polls the ready item without reload', async ({ page }) => {
-    const state: MockState = { items: [], mutations: [], categories: [] };
+  test('uploads an image, shows processing and reaches ready on the status stream without reload', async ({ page }) => {
+    const state = emptyState();
+    let releaseStream!: () => void;
+    state.streamGate = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    state.streamFrames = [readyFrame];
     await setupMock(page, state);
-    await page.clock.install();
     await page.goto('/wardrobe');
     await expect(page.getByText('Your wardrobe is empty.', { exact: false })).toBeVisible();
     await page.getByRole('button', { name: 'Add Item', exact: true }).click();
@@ -115,14 +147,21 @@ test.describe('Wardrobe Auto-Tagging (mocked Client integration)', () => {
     expect(uploadedForm).toContain('x-amz-signature');
     expect(uploadedForm).toContain('name="file"; filename="dummy.png"');
     expect(uploadedForm?.trimEnd().endsWith('--')).toBe(true);
-    state.items[0] = { ...structuredClone(mockItem), taggingStatus: 'ready' };
-    await page.clock.fastForward(10_000);
+
+    // The page holds one aggregate stream while the item is in flight. The frame
+    // arrives on that stream: no list interval and no reload is involved.
+    await expect.poll(() => state.streamRequests).toBeGreaterThan(0);
+    const requestsBeforeRelease = state.streamRequests;
+    state.items[0] = { ...structuredClone(mockItem), taggingStatus: 'ready', taggingStateVersion: 2 };
+    releaseStream();
     await expect(page.getByText('Analyzing...', { exact: true })).not.toBeVisible();
     await expect(page.getByText('Black • Cotton', { exact: true })).toBeVisible();
+    expect(state.streamRequests).toBeGreaterThanOrEqual(requestsBeforeRelease);
+    await expect(page.getByText('My T-Shirt', { exact: true })).toBeVisible();
   });
 
   test('adds three photos in one action, keeps one failure in its row and retries only that row', async ({ page }) => {
-    const state: MockState = { items: [], mutations: [], categories: [] };
+    const state = emptyState();
     await setupMock(page, state);
 
     // Distinct file names: the duplicate collapse is by name, size and lastModified.

@@ -182,6 +182,55 @@ describe('useVtoGeneration recovery lifecycle', () => {
     expect(streamFetch).toHaveBeenCalledTimes(1);
   });
 
+  it('does not let a poll that started before a terminal frame overwrite it', async () => {
+    const { result } = renderGeneration();
+    await start(result);
+    expect(getStatus).toHaveBeenCalledTimes(1);
+
+    // The 10-second read starts while the run is still Processing and is held
+    // open; it is the request that will resolve after the newer stream frame.
+    let resolvePoll!: (status: VtoStatusResponse) => void;
+    getStatus.mockImplementationOnce(() => new Promise<VtoStatusResponse>((resolve) => {
+      resolvePoll = resolve;
+    }));
+    await advance(10_000);
+    expect(getStatus).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      streamControllers[0].enqueue(new TextEncoder().encode(
+        `event: status\ndata: ${JSON.stringify({
+          ...pendingStatus,
+          status: 'Complete',
+          state_version: 3,
+          imageId: 'image-9',
+          url: 'https://example.com/result.jpg',
+        })}\n\n`,
+      ));
+    });
+    await advance(1);
+    expect(result.current.status).toBe('Complete');
+    expect(result.current.isTerminal).toBe(true);
+    expect(result.current.isPolling).toBe(false);
+    expect(streamSignals[0].aborted).toBe(true);
+    const streamRequests = streamFetch.mock.calls.length;
+
+    // The older poll answers last; the arbiter keeps the terminal status and
+    // neither the stream nor the poll reopens against a finished run.
+    await act(async () => {
+      resolvePoll({ ...pendingStatus, state_version: 2 });
+    });
+    await advance(1);
+    expect(result.current.status).toBe('Complete');
+    expect(result.current.result?.state_version).toBe(3);
+    expect(result.current.isTerminal).toBe(true);
+    expect(result.current.isPolling).toBe(false);
+    expect(streamFetch).toHaveBeenCalledTimes(streamRequests);
+
+    await advance(60_000);
+    expect(getStatus).toHaveBeenCalledTimes(2);
+    expect(streamFetch).toHaveBeenCalledTimes(streamRequests);
+  });
+
   it('does not let a heartbeat frame replace cached state', async () => {
     const { result, queryClient } = renderGeneration();
     await start(result);

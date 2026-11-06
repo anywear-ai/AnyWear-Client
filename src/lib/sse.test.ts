@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchAuthSession } from 'aws-amplify/auth';
-import { ClientVersionUnsupportedError, connectSse } from './sse';
+import { ClientVersionUnsupportedError, SseIdleTimeoutError, connectSse } from './sse';
 import { CLIENT_VERSION } from './client-version';
 
 vi.mock('aws-amplify/auth', () => ({
@@ -246,5 +246,114 @@ describe('connectSse', () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(onStateChange).not.toHaveBeenCalledWith('reconnecting');
+  });
+
+  /**
+   * A stream that stays open until the request's signal aborts, which errors it
+   * the same way a real aborted `fetch` body does.
+   */
+  function silentStream(
+    signals: AbortSignal[],
+    controllers: ReadableStreamDefaultController<Uint8Array>[] = [],
+  ): typeof fetch {
+    return (async (_input: RequestInfo | URL, options?: RequestInit) => {
+      const signal = options?.signal as AbortSignal;
+      signals.push(signal);
+      return new Response(new ReadableStream({
+        start(controller) {
+          controllers.push(controller);
+          signal.addEventListener('abort', () => {
+            try {
+              controller.error(new DOMException('Aborted', 'AbortError'));
+            } catch {
+              // The stream may already be closed.
+            }
+          });
+        },
+      }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }) as typeof fetch;
+  }
+
+  it('aborts a stream with no frame of any kind for 45 seconds and reconnects', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
+      const signals: AbortSignal[] = [];
+      const onEvent = vi.fn();
+      const onError = vi.fn();
+      const fetchMock = vi.fn(silentStream(signals));
+      vi.stubGlobal('fetch', fetchMock);
+
+      connectSse('/events', onEvent, {
+        // The production window, advanced explicitly below.
+        idleTimeoutMs: 45_000,
+        initialRetryMs: 1,
+        maxRetryMs: 1,
+        onError,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // A frame may be due at any moment inside the window; 44.999 s is still
+      // silent but not yet a half-open socket.
+      await vi.advanceTimersByTimeAsync(44_999);
+      expect(signals[0].aborted).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(2);
+      expect(signals[0].aborted).toBe(true);
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0][0]).toBeInstanceOf(SseIdleTimeoutError);
+
+      // The abort routes through the existing backoff path, not a new one.
+      await vi.advanceTimersByTimeAsync(2);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(onEvent).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a filtered stream alive on frames the eventName filter discards', async () => {
+    const signals: AbortSignal[] = [];
+    const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
+    const onEvent = vi.fn();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const fetchMock = vi.fn(silentStream(signals, controllers));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const connection = connectSse('/events', onEvent, {
+      eventName: 'status',
+      idleTimeoutMs: 200,
+      initialRetryMs: 1,
+      maxRetryMs: 1,
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Heartbeats never reach the callback, but every one of them resets the
+      // idle window because it is recorded before the event-name filter.
+      for (let index = 0; index < 6; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        controllers[0].enqueue(encoder.encode('event: heartbeat\ndata: {}\n\n'));
+      }
+      expect(onEvent).not.toHaveBeenCalled();
+      expect(signals[0].aborted).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Once the heartbeats stop, the watchdog fires and the stream reconnects.
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      expect(signals[0].aborted).toBe(true);
+      for (let index = 0; index < 100 && fetchMock.mock.calls.length < 2; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(onEvent).not.toHaveBeenCalled();
+    } finally {
+      connection.close();
+    }
   });
 });

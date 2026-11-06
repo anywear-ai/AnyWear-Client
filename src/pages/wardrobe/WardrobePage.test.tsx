@@ -671,6 +671,119 @@ describe('WardrobePage aggregate status stream', () => {
     expect(screen.queryAllByText('Analyzing...')).toHaveLength(0);
   });
 
+  it('reads the list once on a terminal frame so the generated name reaches the card', async () => {
+    wardrobeItems = [wardrobeItem({
+      id: 'item-1',
+      name: null,
+      category: '',
+      taggingStatus: 'processing',
+      taggingStateVersion: 1,
+    })];
+    renderPage();
+    await waitFor(() => expect(wardrobeRequests()).toHaveLength(1));
+    await waitFor(() => expect(sseStreams.connections).toHaveLength(1));
+    expect(screen.getByRole('button', { name: 'View wardrobe item details' })).toBeInTheDocument();
+
+    // The terminal frame is emitted at the version that wrote the generated name
+    // and category, but carries neither; the one-shot read must bring them.
+    wardrobeItems = [wardrobeItem({
+      id: 'item-1',
+      name: 'Prada Argyle Short-Sleeve Knit Sweater',
+      category: 'Top',
+      taggingStatus: 'ready',
+      taggingStateVersion: 2,
+    })];
+
+    await pushFrames(sseStreams.connections[0], [statusFrame({
+      item_id: 'item-1',
+      tagging_status: 'ready',
+      state_version: 2,
+    })]);
+
+    await waitFor(() => expect(wardrobeRequests()).toHaveLength(2));
+    await waitFor(() => expect(screen.getByRole('button', {
+      name: 'View Prada Argyle Short-Sleeve Knit Sweater details',
+    })).toBeInTheDocument());
+    // One terminal frame, exactly one merged read.
+    await flush();
+    expect(wardrobeRequests()).toHaveLength(2);
+  });
+
+  it('does not read again for a duplicate terminal frame at the same version', async () => {
+    wardrobeItems = [wardrobeItem({
+      id: 'item-1',
+      name: null,
+      category: '',
+      taggingStatus: 'processing',
+      taggingStateVersion: 1,
+    })];
+    renderPage();
+    await waitFor(() => expect(sseStreams.connections).toHaveLength(1));
+    const connection = sseStreams.connections[0];
+
+    wardrobeItems = [wardrobeItem({
+      id: 'item-1',
+      name: 'Generated Name',
+      category: 'Top',
+      taggingStatus: 'ready',
+      taggingStateVersion: 2,
+    })];
+    await pushFrames(connection, [statusFrame({ item_id: 'item-1', tagging_status: 'ready', state_version: 2 })]);
+    await waitFor(() => expect(wardrobeRequests()).toHaveLength(2));
+    await flush();
+
+    // A replayed terminal frame at the same version adds nothing and reads nothing.
+    await pushFrames(connection, [statusFrame({ item_id: 'item-1', tagging_status: 'ready', state_version: 2 })]);
+    await flush();
+    expect(wardrobeRequests()).toHaveLength(2);
+  });
+
+  it('does not read the list for a non-terminal frame', async () => {
+    wardrobeItems = [wardrobeItem({
+      id: 'item-1',
+      name: null,
+      category: '',
+      taggingStatus: 'processing',
+      taggingStateVersion: 1,
+    })];
+    renderPage();
+    await waitFor(() => expect(sseStreams.connections).toHaveLength(1));
+    const requestsBeforeFrame = wardrobeRequests().length;
+
+    await pushFrames(sseStreams.connections[0], [statusFrame({
+      item_id: 'item-1',
+      tagging_status: 'processing',
+      state_version: 2,
+      style_attributes: { color: 'Blue', material: 'Cotton' },
+    })]);
+
+    await flush();
+    expect(wardrobeRequests()).toHaveLength(requestsBeforeFrame);
+    // The non-terminal frame still merges in place.
+    expect(screen.getByText('Blue • Cotton')).toBeInTheDocument();
+  });
+
+  it('collapses two terminal frames into one leading and one trailing read', async () => {
+    wardrobeItems = [
+      wardrobeItem({ id: 'item-a', name: null, category: '', taggingStatus: 'processing', taggingStateVersion: 1 }),
+      wardrobeItem({ id: 'item-b', name: null, category: '', taggingStatus: 'processing', taggingStateVersion: 1 }),
+    ];
+    renderPage();
+    await waitFor(() => expect(sseStreams.connections).toHaveLength(1));
+    const requestsBeforeFrames = wardrobeRequests().length;
+
+    await pushFrames(sseStreams.connections[0], [
+      statusFrame({ item_id: 'item-a', tagging_status: 'ready', state_version: 2 }),
+      statusFrame({ item_id: 'item-b', tagging_status: 'failed', state_version: 2 }),
+    ]);
+
+    // The first frame starts the read; the second arrives while it is in flight
+    // and joins its one trailing read instead of adding a third.
+    await waitFor(() => expect(wardrobeRequests().length).toBe(requestsBeforeFrames + 2));
+    await flush();
+    expect(wardrobeRequests().length).toBe(requestsBeforeFrames + 2);
+  });
+
   it('ignores an out-of-order frame that arrives after a terminal one', async () => {
     wardrobeItems = [wardrobeItem({ id: 'item-1', name: 'Coat', taggingStatus: 'processing', taggingStateVersion: 1 })];
     renderPage();

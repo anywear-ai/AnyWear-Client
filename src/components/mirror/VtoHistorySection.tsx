@@ -199,7 +199,7 @@ export default function VtoHistorySection({
               const imageId = gen.imageId;
               return (
                 <div key={gen.id} className="relative group bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-                  <div className="aspect-[3/4] bg-gray-200">
+                  <div data-testid="vto-history-media" className="relative aspect-[3/4] bg-gray-200 overflow-hidden">
                     {imageUrl ? (
                       <CachedImage
                         src={imageUrl}
@@ -212,6 +212,92 @@ export default function VtoHistorySection({
                         {gen.status === 'Failed' ? 'Generation failed' : 'No image'}
                       </div>
                     )}
+                    {/* The reveal is scoped to this overlay, not the card: a focused
+                        rating star outside it must not scrim the star. The overlay
+                        is a child of the media wrapper, so its box ends with the
+                        image and never covers the card body. */}
+                    <div
+                      data-testid="vto-history-actions"
+                      className={`absolute inset-0 bg-black/50 transition-opacity focus-within:transition-none flex flex-col items-center justify-center gap-2 p-3 ${
+                        confirmDeleteId === gen.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'
+                      }`}
+                    >
+                      {confirmDeleteId === gen.id ? (
+                        <>
+                          <p className="text-white text-xs font-medium text-center">Delete this try-on?</p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              restoreDeleteFocusId.current = null;
+                              deleteGeneration(gen.id);
+                              setConfirmDeleteId(null);
+                            }}
+                            className="w-full text-xs bg-red-500 text-white px-3 py-1.5 rounded hover:bg-red-600 text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                          >
+                            Yes, Delete
+                          </button>
+                          <button
+                            type="button"
+                            ref={cancelButtonRef}
+                            onClick={() => {
+                              restoreDeleteFocusId.current = gen.id;
+                              setConfirmDeleteId(null);
+                            }}
+                            className="w-full text-xs bg-white/90 text-gray-800 px-3 py-1.5 rounded hover:bg-white text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          {imageUrl && (
+                            <button
+                              type="button"
+                              onClick={() => setViewImageUrl(imageUrl)}
+                              className="w-full text-xs bg-white/90 text-gray-800 px-3 py-1.5 rounded hover:bg-white text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
+                            >
+                              View Full
+                            </button>
+                          )}
+                          {wearableItemIds.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => onReuseOutfit(wearableItemIds)}
+                              className="w-full text-xs bg-white/90 text-gray-800 px-3 py-1.5 rounded hover:bg-white text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
+                            >
+                              Reuse Outfit
+                            </button>
+                          )}
+                          {gen.status === 'Failed' && gen.items.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => handleRetry(gen)}
+                              aria-disabled={blockedReason || retryingId === gen.id ? 'true' : undefined}
+                              aria-describedby={blockedReason ? RETRY_BLOCKED_REASON_ID : undefined}
+                              className={`w-full text-xs bg-white/90 text-gray-800 px-3 py-1.5 rounded hover:bg-white text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 ${
+                                blockedReason ? 'opacity-50 cursor-not-allowed' : ''
+                              }`}
+                            >
+                              {retryingId === gen.id ? 'Retrying…' : 'Retry'}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            ref={(node) => {
+                              if (node) deleteButtonRefs.current.set(gen.id, node);
+                              else deleteButtonRefs.current.delete(gen.id);
+                            }}
+                            onClick={() => {
+                              restoreDeleteFocusId.current = null;
+                              setConfirmDeleteId(gen.id);
+                            }}
+                            className="w-full text-xs bg-red-500/90 text-white px-3 py-1.5 rounded hover:bg-red-500 text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                          >
+                            Delete
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                   <div className="p-2">
                     <div className="flex items-center justify-between mb-1">
@@ -240,90 +326,6 @@ export default function VtoHistorySection({
                       <p role="alert" className="mt-1 text-xs text-red-700">
                         {ratingFailures[gen.id]}
                       </p>
-                    )}
-                  </div>
-                  {/* The reveal is scoped to this overlay, not the card: a focused
-                      rating star outside it must not scrim the star. */}
-                  <div
-                    data-testid="vto-history-actions"
-                    className={`absolute inset-0 bg-black/50 transition-opacity focus-within:transition-none flex flex-col items-center justify-center gap-2 p-3 ${
-                      confirmDeleteId === gen.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'
-                    }`}
-                  >
-                    {confirmDeleteId === gen.id ? (
-                      <>
-                        <p className="text-white text-xs font-medium text-center">Delete this try-on?</p>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            restoreDeleteFocusId.current = null;
-                            deleteGeneration(gen.id);
-                            setConfirmDeleteId(null);
-                          }}
-                          className="w-full text-xs bg-red-500 text-white px-3 py-1.5 rounded hover:bg-red-600 text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
-                        >
-                          Yes, Delete
-                        </button>
-                        <button
-                          type="button"
-                          ref={cancelButtonRef}
-                          onClick={() => {
-                            restoreDeleteFocusId.current = gen.id;
-                            setConfirmDeleteId(null);
-                          }}
-                          className="w-full text-xs bg-white/90 text-gray-800 px-3 py-1.5 rounded hover:bg-white text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
-                        >
-                          Cancel
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        {imageUrl && (
-                          <button
-                            type="button"
-                            onClick={() => setViewImageUrl(imageUrl)}
-                            className="w-full text-xs bg-white/90 text-gray-800 px-3 py-1.5 rounded hover:bg-white text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
-                          >
-                            View Full
-                          </button>
-                        )}
-                        {wearableItemIds.length > 0 && (
-                          <button
-                            type="button"
-                            onClick={() => onReuseOutfit(wearableItemIds)}
-                            className="w-full text-xs bg-white/90 text-gray-800 px-3 py-1.5 rounded hover:bg-white text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
-                          >
-                            Reuse Outfit
-                          </button>
-                        )}
-                        {gen.status === 'Failed' && gen.items.length > 0 && (
-                          <button
-                            type="button"
-                            onClick={() => handleRetry(gen)}
-                            aria-disabled={blockedReason || retryingId === gen.id ? 'true' : undefined}
-                            aria-describedby={blockedReason ? RETRY_BLOCKED_REASON_ID : undefined}
-                            className={`w-full text-xs bg-white/90 text-gray-800 px-3 py-1.5 rounded hover:bg-white text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 ${
-                              blockedReason ? 'opacity-50 cursor-not-allowed' : ''
-                            }`}
-                          >
-                            {retryingId === gen.id ? 'Retrying…' : 'Retry'}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          ref={(node) => {
-                            if (node) deleteButtonRefs.current.set(gen.id, node);
-                            else deleteButtonRefs.current.delete(gen.id);
-                          }}
-                          onClick={() => {
-                            restoreDeleteFocusId.current = null;
-                            setConfirmDeleteId(gen.id);
-                          }}
-                          className="w-full text-xs bg-red-500/90 text-white px-3 py-1.5 rounded hover:bg-red-500 text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
-                        >
-                          Delete
-                        </button>
-                      </>
                     )}
                   </div>
                 </div>

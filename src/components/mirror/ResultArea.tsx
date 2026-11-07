@@ -8,19 +8,23 @@ interface ResultAreaProps {
   result: VtoStatusResponse | null;
   onRetry: () => void;
   onRate: (rating: number) => void;
-  currentRating: number | null;
+  ratingError: string | null;
+  ratingEchoResetToken?: number;
 }
 
 export default function ResultArea(props: ResultAreaProps) {
   return <ResultAreaContent key={props.vtoId ?? 'empty'} {...props} />;
 }
 
-function ResultAreaContent({ vtoId, result, onRetry, onRate, currentRating }: ResultAreaProps) {
+function ResultAreaContent({ vtoId, result, onRetry, onRate, ratingError, ratingEchoResetToken }: ResultAreaProps) {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const status = result?.status;
   const imageUrl = result?.url ?? null;
   const imageId = result?.imageId ?? null;
   const errorMessage = result?.error_message ?? null;
+  // The stored rating comes from the same status read as the image and status.
+  // An absent member from an older Service reads as unrated.
+  const currentRating = result?.rating ?? null;
 
   useEffect(() => {
     if (!vtoId || !status || status === 'Complete' || status === 'Failed') return;
@@ -91,17 +95,28 @@ function ResultAreaContent({ vtoId, result, onRetry, onRate, currentRating }: Re
           alt="Try-on result"
           className="mx-auto max-h-[70vh] w-full object-contain"
         />
-        <div className="p-4 border-t border-gray-100 flex items-center justify-between flex-wrap gap-3">
-          <RatingWidget rating={currentRating} onChange={onRate} />
-          <button
-            onClick={onRetry}
-            className="inline-flex items-center px-3 py-1.5 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-indigo-500"
-          >
-            <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            Retry
-          </button>
+        <div className="p-4 border-t border-gray-100">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <RatingWidget
+              rating={currentRating}
+              onChange={onRate}
+              echoResetToken={ratingEchoResetToken}
+            />
+            <button
+              onClick={onRetry}
+              className="inline-flex items-center px-3 py-1.5 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-indigo-500"
+            >
+              <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              Retry
+            </button>
+          </div>
+          {ratingError && (
+            <p role="alert" className="mt-2 text-xs text-red-700">
+              {ratingError}
+            </p>
+          )}
         </div>
       </div>
     );

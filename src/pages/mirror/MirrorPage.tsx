@@ -9,6 +9,7 @@ import TryOnButton from '../../components/mirror/TryOnButton';
 import ResultArea from '../../components/mirror/ResultArea';
 import VtoHistorySection from '../../components/mirror/VtoHistorySection';
 import useVtoGeneration from '../../hooks/useVtoGeneration';
+import useVtoRating from '../../hooks/useVtoRating';
 import { useGetUsersMe } from '../../api/endpoints/users/users';
 import { useGetVtoBasePhotos } from '../../api/endpoints/vto/vto';
 import { resolveBasePhotoSelection } from '../../lib/basePhotoSelection';
@@ -25,6 +26,7 @@ export default function MirrorPage() {
   const [prompt, setPrompt] = useState('');
 
   const { generate, result, errorMessage, isPolling, isStarting, vtoId } = useVtoGeneration();
+  const { save: saveRating, failures: ratingFailures, echoResetTokens: ratingEchoResetTokens } = useVtoRating();
   const { data: user } = useGetUsersMe();
   // The same `['/vto/base-photos']` query the selector runs: one request and
   // two subscribers, so the preselect reads the list it already fetched.
@@ -207,8 +209,9 @@ export default function MirrorPage() {
             vtoId={vtoId}
             result={result}
             onRetry={handleGenerate}
-            onRate={() => {}}
-            currentRating={null}
+            onRate={(rating) => saveRating(vtoId, rating)}
+            ratingError={vtoId ? ratingFailures[vtoId] ?? null : null}
+            ratingEchoResetToken={vtoId ? ratingEchoResetTokens[vtoId] ?? 0 : 0}
           />
         </section>
 

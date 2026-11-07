@@ -56,6 +56,8 @@ function mockHistory(overrides: Partial<ReturnType<typeof useVtoHistory>> = {}) 
     setFilters,
     rateGeneration,
     deleteGeneration,
+    ratingFailures: {},
+    ratingEchoResetTokens: {},
     ...overrides,
   });
 }
@@ -517,5 +519,63 @@ describe('VtoHistorySection delete confirmation focus', () => {
     expect(deleteGeneration).toHaveBeenCalledWith('gen-1');
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
     expect(document.activeElement).toBe(document.body);
+  });
+});
+
+describe('VtoHistorySection rating save', () => {
+  const SAVE_FAILURE = "Couldn't save your rating. Choose a star to try again.";
+
+  beforeEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    rows = [
+      generation({ id: 'gen-1', status: 'Complete' }),
+      generation({ id: 'gen-2', status: 'Complete' }),
+    ];
+    mockHistory();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('sends the chosen star for the card whose star was clicked', () => {
+    renderSection();
+
+    const fourStars = screen.getAllByRole('radio', { name: '4 stars' });
+    expect(fourStars).toHaveLength(2);
+    fireEvent.click(fourStars[0]);
+
+    expect(rateGeneration).toHaveBeenCalledTimes(1);
+    expect(rateGeneration).toHaveBeenCalledWith('gen-1', 4);
+  });
+
+  it('states a failed save on the card that sent it, clears that echo, and leaves the other card alone', () => {
+    const { props, rerender } = renderSection();
+    const fourStars = screen.getAllByRole('radio', { name: '4 stars' });
+    const sendingCard = fourStars[0].closest('.group');
+    const otherCard = fourStars[1].closest('.group');
+    expect(sendingCard).not.toBeNull();
+    expect(otherCard).not.toBeNull();
+
+    fourStars[0].focus();
+    fireEvent.click(fourStars[0]);
+    expect(screen.getByText('4 of 5 selected')).toBeInTheDocument();
+
+    mockHistory({
+      ratingFailures: { 'gen-1': SAVE_FAILURE },
+      ratingEchoResetTokens: { 'gen-1': 1 },
+    });
+    rerender(<VtoHistorySection {...props} />);
+
+    const alerts = screen.getAllByRole('alert');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toHaveTextContent(SAVE_FAILURE);
+    expect(alerts[0].closest('.group')).toBe(sendingCard);
+    expect(screen.queryByText('4 of 5 selected')).toBeNull();
+    expect(screen.getAllByRole('radio', { name: '4 stars' })[0]).toHaveAttribute('aria-checked', 'false');
+    // The other card and the section-level surface show nothing.
+    expect(otherCard?.querySelector('[role="alert"]')).toBeNull();
+    expect(screen.getAllByRole('radio', { name: '4 stars' })[1]).toHaveAttribute('aria-checked', 'false');
   });
 });

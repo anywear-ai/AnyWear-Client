@@ -96,7 +96,20 @@ export default function VtoHistorySection({
   credits,
   isGenerating,
 }: VtoHistorySectionProps) {
-  const { generations, total, page, nextPage, goToPage, isLoading, filters, setFilters, rateGeneration, deleteGeneration } = useVtoHistory();
+  const {
+    generations,
+    total,
+    page,
+    nextPage,
+    goToPage,
+    isLoading,
+    filters,
+    setFilters,
+    rateGeneration,
+    deleteGeneration,
+    ratingFailures,
+    ratingEchoResetTokens,
+  } = useVtoHistory();
   const [viewImageUrl, setViewImageUrl] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
@@ -217,7 +230,16 @@ export default function VtoHistorySection({
                     {gen.rating != null ? (
                       <RatingWidget rating={gen.rating} onChange={() => {}} readonly />
                     ) : gen.status === 'Complete' && (
-                      <RatingWidget rating={null} onChange={(r) => rateGeneration(gen.id, r)} />
+                      <RatingWidget
+                        rating={null}
+                        onChange={(r) => rateGeneration(gen.id, r)}
+                        echoResetToken={ratingEchoResetTokens[gen.id] ?? 0}
+                      />
+                    )}
+                    {ratingFailures[gen.id] && (
+                      <p role="alert" className="mt-1 text-xs text-red-700">
+                        {ratingFailures[gen.id]}
+                      </p>
                     )}
                   </div>
                   {/* The reveal is scoped to this overlay, not the card: a focused

@@ -1,7 +1,8 @@
 import { useState, useCallback } from 'react';
-import { useGetVtoGenerations, usePatchVtoGenerationsGenerationIdRating, useDeleteVtoGenerationsGenerationId } from '../api/endpoints/vto/vto';
+import { useGetVtoGenerations, useDeleteVtoGenerationsGenerationId } from '../api/endpoints/vto/vto';
 import type { GetVtoGenerationsParams } from '../api/model/getVtoGenerationsParams';
 import { keepPreviousData } from '@tanstack/react-query';
+import useVtoRating from './useVtoRating';
 
 const DEFAULT_LIMIT = 12;
 
@@ -19,7 +20,7 @@ export default function useVtoHistory() {
     query: { placeholderData: keepPreviousData },
   });
 
-  const rateMutation = usePatchVtoGenerationsGenerationIdRating();
+  const { save: saveRating, failures: ratingFailures, echoResetTokens: ratingEchoResetTokens } = useVtoRating();
   const deleteMutation = useDeleteVtoGenerationsGenerationId();
 
   const generations = data?.generations ?? [];
@@ -30,16 +31,11 @@ export default function useVtoHistory() {
     setPage(newPage);
   }, []);
 
+  // The rating hook invalidates the list, which refetches it; the previous
+  // `onSuccess: refetch` would have read the same list twice.
   const rateGeneration = useCallback((generationId: string, rating: number) => {
-    rateMutation.mutate(
-      { generationId, data: { rating } },
-      {
-        onSuccess: () => {
-          refetch();
-        },
-      }
-    );
-  }, [rateMutation, refetch]);
+    saveRating(generationId, rating);
+  }, [saveRating]);
 
   const deleteGeneration = useCallback((generationId: string) => {
     deleteMutation.mutate(
@@ -52,5 +48,18 @@ export default function useVtoHistory() {
     );
   }, [deleteMutation, refetch]);
 
-  return { generations, total, page, nextPage, goToPage, isLoading, filters, setFilters, rateGeneration, deleteGeneration };
+  return {
+    generations,
+    total,
+    page,
+    nextPage,
+    goToPage,
+    isLoading,
+    filters,
+    setFilters,
+    rateGeneration,
+    deleteGeneration,
+    ratingFailures,
+    ratingEchoResetTokens,
+  };
 }

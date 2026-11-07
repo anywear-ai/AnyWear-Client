@@ -156,6 +156,30 @@ describe('RatingWidget', () => {
     expect(screen.queryByText('4 of 5 selected')).toBeNull();
   });
 
+  it('clears the pending echo on a reset-token change without moving focus or changing the control contract', () => {
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <RatingWidget rating={null} onChange={onChange} echoResetToken={0} />
+    );
+    star('4 stars').focus();
+    fireEvent.click(star('4 stars'));
+    expect(star('4 stars')).toHaveFocus();
+    expect(screen.getByText('4 of 5 selected')).toBeInTheDocument();
+
+    rerender(<RatingWidget rating={null} onChange={onChange} echoResetToken={1} />);
+
+    expect(screen.queryByText('4 of 5 selected')).toBeNull();
+    expect(screen.getByText('Rate this result')).toBeInTheDocument();
+    expect(screen.queryByText(/Your rating:/)).toBeNull();
+    // The reset is in place: the clicked star keeps focus and the contract holds.
+    expect(star('4 stars')).toHaveFocus();
+    expect(screen.getAllByRole('radiogroup')).toHaveLength(1);
+    expect(screen.getByRole('radiogroup', { name: 'Rate this result' })).toBeInTheDocument();
+    stars().forEach((button) => expect(button).toHaveAttribute('aria-checked', 'false'));
+    expect(stars().map((button) => button.getAttribute('tabindex'))).toEqual(['0', '-1', '-1', '-1', '-1']);
+    STAR_NAMES.forEach((name) => expect(star(name)).toBeInTheDocument());
+  });
+
   it('keeps a stored zero rating keyboard-reachable', () => {
     render(<RatingWidget rating={0} onChange={() => {}} />);
 

@@ -5,6 +5,13 @@ interface RatingWidgetProps {
   rating: number | null;
   onChange: (rating: number) => void;
   readonly?: boolean;
+  /**
+   * A number that changes when a save for this control settles. The widget then
+   * drops its local echo, so a failed save stops showing the rejected value as
+   * the selection; it is cleared this way rather than by a remount, which would
+   * destroy the focused star.
+   */
+  echoResetToken?: number;
 }
 
 const STARS = [1, 2, 3, 4, 5] as const;
@@ -33,17 +40,27 @@ function StarIcon({ filled }: { filled: boolean }) {
   return <span className={filled ? 'text-indigo-500' : 'text-gray-300'}>{filled ? FILLED_STAR : OUTLINE_STAR}</span>;
 }
 
-export default function RatingWidget({ rating, onChange, readonly }: RatingWidgetProps) {
+export default function RatingWidget({ rating, onChange, readonly, echoResetToken }: RatingWidgetProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [echo, setEcho] = useState<{ base: number | null; value: number } | null>(null);
   const hadFocusRef = useRef(false);
   const readOnlyRef = useRef<HTMLParagraphElement>(null);
   const starRefs = useRef<Record<number, HTMLButtonElement | null>>({});
+  const echoResetTokenRef = useRef(echoResetToken);
 
   const echoShowing = echo !== null && echo.base === rating;
   const current = echoShowing ? echo.value : rating;
   const tabStop = current !== null && current >= 1 && current <= 5 ? current : 1;
   const displayValue = hoverIndex ?? current ?? 0;
+
+  // A settlement token change clears the echo in place. The star buttons keep
+  // their DOM nodes, so focus stays where it is and the roving tab stop returns
+  // to the stored value on the next render.
+  useLayoutEffect(() => {
+    if (echoResetTokenRef.current === echoResetToken) return;
+    echoResetTokenRef.current = echoResetToken;
+    setEcho(null);
+  }, [echoResetToken]);
 
   useLayoutEffect(() => {
     if (!readonly || !hadFocusRef.current) return;

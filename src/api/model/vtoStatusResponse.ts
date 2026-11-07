@@ -26,4 +26,10 @@ export interface VtoStatusResponse {
   created_at: string;
   /** @nullable */
   prompt_used?: string | null;
+  /**
+     * @minimum 0
+     * @maximum 5
+     * @nullable
+     */
+  rating: number | null;
 }

@@ -4,8 +4,10 @@
  * A status is applied only when its version — `state_version` in a wardrobe
  * frame compared against the cached item's `taggingStateVersion`, and
  * `state_version` for a VTO generation — is strictly newer than the version
- * already held for that resource. An equal version may replace `images` only
- * (the Service re-signs a URL without changing state), never status fields. An
+ * already held for that resource. An equal version may replace only what the
+ * Service republishes without changing state — `images` for a wardrobe item,
+ * and `imageId`, `url` and `rating` for a VTO generation, whose rating write
+ * does not bump `state_version` — never status fields. An
  * older version is ignored. A terminal status at a higher version is kept,
  * because a higher-version non-terminal status is a new lifecycle (a re-tag),
  * not a stale overwrite.
@@ -118,11 +120,12 @@ export function mergeWardrobeListResponse<TItem extends WardrobeListedItem>(
   });
 }
 
-/** The version and image members of a VTO status response the rule owns. */
+/** The version, image and rating members of a VTO status response the rule owns. */
 export interface VtoStatusSnapshot {
   state_version: StatusVersion;
   imageId: string | null;
   url: string | null;
+  rating: number | null;
 }
 
 /**
@@ -131,7 +134,9 @@ export interface VtoStatusSnapshot {
  * The poll and the stream are two channels for the same resource, so both pass
  * through here: a poll that started before a newer terminal frame and resolves
  * after it returns the cached terminal status instead of replacing it. An equal
- * version may replace the image identity and its signed URL only.
+ * version may replace the image identity, its signed URL and the rating only —
+ * the rating write does not move `state_version`, so an equal-version read is
+ * the only one that can carry a rating changed after the cached status.
  */
 export function mergeVtoStatus<TStatus extends VtoStatusSnapshot>(
   held: TStatus | undefined,
@@ -140,5 +145,10 @@ export function mergeVtoStatus<TStatus extends VtoStatusSnapshot>(
   const decision = decideStatusVersion(incoming.state_version, held?.state_version);
   if (held === undefined || decision === 'newer') return incoming;
   if (decision === 'older') return held;
-  return { ...held, imageId: incoming.imageId, url: incoming.url };
+  return {
+    ...held,
+    imageId: incoming.imageId,
+    url: incoming.url,
+    rating: incoming.rating,
+  };
 }

@@ -17,6 +17,7 @@ const pendingStatus: VtoStatusResponse = {
   imageId: null,
   url: null,
   created_at: '2026-10-03T00:00:00.000Z',
+  rating: null,
 };
 
 function createWrapper(queryClient: QueryClient) {

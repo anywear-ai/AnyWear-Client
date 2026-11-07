@@ -4,13 +4,18 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
-vi.mock('../../api/endpoints/vto/vto', () => ({
-  useGetVtoBasePhotos: vi.fn(),
-  usePostVtoBasePhotosUploadUrl: vi.fn(),
-  usePostVtoBasePhotosUpload: vi.fn(),
-  usePatchVtoBasePhotosId: vi.fn(),
-  useDeleteVtoBasePhotosId: vi.fn(),
-}));
+vi.mock('../../api/endpoints/vto/vto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/endpoints/vto/vto')>();
+  return {
+    ...actual,
+    useGetVtoBasePhotos: vi.fn(),
+    usePostVtoBasePhotosUploadUrl: vi.fn(),
+    usePostVtoBasePhotosUpload: vi.fn(),
+    usePatchVtoBasePhotosId: vi.fn(),
+    useDeleteVtoBasePhotosId: vi.fn(),
+    usePatchVtoGenerationsGenerationIdRating: vi.fn(),
+  };
+});
 
 vi.mock('../../api/endpoints/users/users', () => ({
   useGetUsersMe: vi.fn(),
@@ -52,6 +57,7 @@ import {
   useDeleteVtoBasePhotosId,
   useGetVtoBasePhotos,
   usePatchVtoBasePhotosId,
+  usePatchVtoGenerationsGenerationIdRating,
   usePostVtoBasePhotosUpload,
   usePostVtoBasePhotosUploadUrl,
 } from '../../api/endpoints/vto/vto';
@@ -63,6 +69,7 @@ const generate = vi.fn();
 const reservePhotoUpload = vi.fn();
 const confirmPhotoUpload = vi.fn();
 const deletePhoto = vi.fn();
+const rateGeneration = vi.fn();
 
 function photo(overrides: Record<string, unknown>) {
   return {
@@ -116,6 +123,7 @@ describe('MirrorPage', () => {
     vi.mocked(usePostVtoBasePhotosUpload).mockReturnValue({ mutateAsync: confirmPhotoUpload } as any);
     vi.mocked(usePatchVtoBasePhotosId).mockReturnValue({ mutate: vi.fn() } as any);
     vi.mocked(useDeleteVtoBasePhotosId).mockReturnValue({ mutate: deletePhoto } as any);
+    vi.mocked(usePatchVtoGenerationsGenerationIdRating).mockReturnValue({ mutateAsync: rateGeneration } as any);
     vi.mocked(uploadImageWithSignedPost).mockResolvedValue(undefined);
   });
 
@@ -187,6 +195,53 @@ describe('MirrorPage', () => {
       base_photo_id: 'photo-own',
       wearable_item_ids: ['item-1'],
     }));
+  });
+
+  it('sends the result-area star for the displayed generation, and the next star retries after a failure', async () => {
+    vi.mocked(useVtoGeneration).mockReturnValue({
+      generate,
+      result: {
+        generation_id: 'generation-1',
+        status: 'Complete',
+        state_version: 3,
+        imageId: 'image-1',
+        url: 'https://signed.example.com/result.jpg',
+        created_at: '2026-11-07T00:00:00.000Z',
+        rating: null,
+      },
+      errorMessage: null,
+      isPolling: false,
+      isStarting: false,
+      vtoId: 'generation-1',
+    } as any);
+    rateGeneration
+      .mockRejectedValueOnce({ response: { status: 500 } })
+      .mockResolvedValueOnce(undefined);
+
+    renderPage();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('radio', { name: '4 stars' }));
+      await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    });
+
+    expect(rateGeneration).toHaveBeenCalledWith({ generationId: 'generation-1', data: { rating: 4 } });
+    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't save your rating. Choose a star to try again.");
+    expect(screen.queryByText('4 of 5 selected')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('radio', { name: '5 stars' }));
+      await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    });
+
+    expect(rateGeneration).toHaveBeenCalledTimes(2);
+    expect(rateGeneration).toHaveBeenLastCalledWith({ generationId: 'generation-1', data: { rating: 5 } });
+    // The retry cleared the recorded failure; no second alert is left behind.
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('preselects the shared system photo for a caller who never chose a default', () => {

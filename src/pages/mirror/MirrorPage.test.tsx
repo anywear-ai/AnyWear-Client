@@ -195,6 +195,9 @@ describe('MirrorPage', () => {
       base_photo_id: 'photo-own',
       wearable_item_ids: ['item-1'],
     }));
+    // Items mode carries the optional name key with an undefined value; the
+    // Service must see no name at all, so the value is what the test reads.
+    expect(generate.mock.calls[0][0].outfit_name).toBeUndefined();
   });
 
   it('sends the result-area star for the displayed generation, and the next star retries after a failure', async () => {

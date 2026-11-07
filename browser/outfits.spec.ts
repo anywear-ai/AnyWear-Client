@@ -1,5 +1,6 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import type { GetOutfits200OutfitsItem } from '../src/api/model/getOutfits200OutfitsItem';
+import type { GetVtoBasePhotos200Item } from '../src/api/model/getVtoBasePhotos200Item';
 import type { GetWardrobe200Item } from '../src/api/model/getWardrobe200Item';
 import { mockClientBoundaries, expectOnlyMockedCalls } from './mock-boundaries';
 import { mockAmplifySession } from './auth-session';
@@ -7,6 +8,7 @@ import { mockAmplifySession } from './auth-session';
 const OUTFIT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const ITEM_ID_1 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const ITEM_ID_2 = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const BASE_PHOTO_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const GENERATION_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 const PRIMARY_IMAGE = 'https://example.com/tshirt-primary.jpg';
 const LOOK_IMAGE = 'https://example.com/outfit-look.png';
@@ -29,6 +31,17 @@ const mockWardrobeItems: GetWardrobe200Item[] = [
   { id: ITEM_ID_2, ownerId: 'test-user-id', name: 'Jeans', category: 'Bottom', images: [{ imageId: 'image-jeans', url: 'https://example.com/jeans.jpg', view: null, isPrimary: true }], taggingStatus: 'ready', weatherTags: [], styleAttributes: {}, isPublic: false, imageEmbedding: null, taggingStateVersion: 1, taggingErrorCode: null, taggingErrorMessage: null, createdAt: '2026-05-05T00:00:00.000Z', updatedAt: '2026-05-05T00:00:00.000Z' },
 ];
 
+/** The one base photo the Mirror preselects through its `isDefault` flag. */
+const mockBasePhoto: GetVtoBasePhotos200Item = {
+  id: BASE_PHOTO_ID,
+  userId: 'test-user-id',
+  imageId: 'image-base-photo',
+  url: 'https://example.com/base-photo.jpg',
+  isDefault: true,
+  source: 'user',
+  createdAt: '2026-06-01T00:00:00.000Z',
+};
+
 interface MockState {
   outfits: GetOutfits200OutfitsItem[];
   mutations: Array<{ method: string; path: string; body: unknown }>;
@@ -36,6 +49,16 @@ interface MockState {
 
 function outfitItems(ids: string[]) {
   return mockWardrobeItems.filter(item => ids.includes(item.id)).map(({ id, name, category, images }) => ({ id, name, category, images }));
+}
+
+/**
+ * The stand-in for the Service's derivation rule: with no name supplied, the
+ * returned outfit is named after its selected pieces. Only the Service tests
+ * prove the production rule; here the mock exists so the Client must render
+ * whatever name the response carries instead of inventing its own.
+ */
+function derivedOutfitName(ids: string[]) {
+  return outfitItems(ids).map(({ name, category }) => name?.trim() || category.trim()).join(', ');
 }
 
 async function setupOutfitMocks(page: Page, state: MockState) {
@@ -50,6 +73,27 @@ async function setupOutfitMocks(page: Page, state: MockState) {
     if (method === 'GET' && path === '/outfits') return json({ outfits: state.outfits });
     if (method === 'GET' && path === '/vto/base-photos') return json([]);
     if (method === 'GET' && path === '/vto/generations') return json({ generations: [], total: 0, page: 1, limit: 12, nextPage: null });
+    // A generation start opens the same status read and stream the Mirror uses;
+    // the terminal frame ends the stream and is what the test ends on.
+    const completedStatus = (generationId: string) => ({
+      generation_id: generationId,
+      status: 'Complete',
+      state_version: 1,
+      imageId: null,
+      url: null,
+      created_at: '2026-06-01T00:00:00.000Z',
+      rating: null,
+    });
+    const streamedGenerationId = path.match(/^\/vto\/generations\/([^/]+)\/stream$/)?.[1];
+    if (method === 'GET' && streamedGenerationId) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: `event: status\ndata: ${JSON.stringify(completedStatus(streamedGenerationId))}\n\n`,
+      });
+    }
+    const generationId = path.match(/^\/vto\/generations\/([^/]+)$/)?.[1];
+    if (method === 'GET' && generationId) return json(completedStatus(generationId));
     if (method === 'POST' && path === '/vto/generations') {
       const body = request.postDataJSON();
       state.mutations.push({ method, path, body });
@@ -59,7 +103,11 @@ async function setupOutfitMocks(page: Page, state: MockState) {
     if (method === 'POST' && path === '/outfits') {
       const body = request.postDataJSON();
       state.mutations.push({ method, path, body });
-      const outfit = { ...structuredClone(mockOutfit), name: body.name ?? null, wearableItems: outfitItems(body.wearable_item_ids) };
+      const outfit = {
+        ...structuredClone(mockOutfit),
+        name: body.name ?? derivedOutfitName(body.wearable_item_ids),
+        wearableItems: outfitItems(body.wearable_item_ids),
+      };
       state.outfits.push(outfit);
       return json(outfit, 201);
     }
@@ -254,6 +302,32 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     expect(state.mutations).toEqual([{ method: 'POST', path: '/outfits', body: { name: 'Office Ready', wearable_item_ids: [ITEM_ID_1, ITEM_ID_2] } }]);
   });
 
+  test('creates an outfit with a blank name and shows the Service-derived name', async ({ page }) => {
+    const state: MockState = { outfits: [], mutations: [] };
+    await setupOutfitMocks(page, state);
+    await page.goto('/wardrobe');
+    await page.getByRole('button', { name: 'Create Outfit', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Create Outfit' })).toBeVisible();
+    await page.getByRole('button', { name: 'T-Shirt', exact: true }).click();
+    await page.getByRole('button', { name: 'Jeans', exact: true }).click();
+    // The name field is never touched, so the request must leave it out.
+    await page.getByRole('button', { name: 'Create Outfit', exact: true }).last().click();
+    await expect(page.getByRole('heading', { name: 'Create Outfit' })).not.toBeVisible();
+
+    // The card heading is the name the Service returned, not one the page made up.
+    await expect(outfitCard(page, 'T-Shirt, Jeans').getByText('2 items', { exact: true })).toBeVisible();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Generate a look for T-Shirt, Jeans?' })).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+
+    // postDataJSON parsed the exact request bytes: the blank optional name is
+    // absent from the wire body, not present with an undefined or empty value.
+    expect(state.mutations).toEqual([
+      { method: 'POST', path: '/outfits', body: { wearable_item_ids: [ITEM_ID_1, ITEM_ID_2] } },
+    ]);
+  });
+
   test('selects a saved outfit in the Mirror picker with its completed look', async ({ page }) => {
     const state: MockState = { outfits: [structuredClone(mockOutfit)], mutations: [] };
     await setupOutfitMocks(page, state);
@@ -284,6 +358,35 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Generate look (1 credit)', exact: true }).click();
     await expect(page.getByRole('dialog')).not.toBeVisible();
     expect(state.mutations).toEqual([{ method: 'POST', path: '/vto/generations', body: { outfit_id: OUTFIT_ID } }]);
+  });
+
+  test('generates an item-mode try-on whose wire body omits the blank outfit name', async ({ page }) => {
+    const state: MockState = { outfits: [], mutations: [] };
+    await setupOutfitMocks(page, state);
+    // The default mock lists no base photos; this scenario needs the flagged
+    // default so the Mirror preselects it and the generate control enables.
+    await page.route('**/vto/base-photos', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([mockBasePhoto]),
+    }));
+    await page.goto('/mirror');
+
+    await expect(page.getByRole('button', { name: 'Selected base photo 1, default', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Select T-Shirt', exact: true }).click();
+    const generateButton = page.getByRole('button', { name: 'Generate try-on', exact: true });
+    await expect(generateButton).toBeEnabled();
+    await generateButton.click();
+
+    await expect.poll(() => state.mutations.length).toBe(1);
+    const [{ method, path, body }] = state.mutations;
+    expect(method).toBe('POST');
+    expect(path).toBe('/vto/generations');
+    // postDataJSON re-parses the exact request bytes, so this key list is the
+    // proof that the optional blank outfit name never reached the wire.
+    expect(Object.keys(body as Record<string, unknown>).sort()).toEqual(['base_photo_id', 'wearable_item_ids']);
+    expect(Object.keys(body as Record<string, unknown>)).not.toContain('outfit_name');
+    expect(body).toMatchObject({ base_photo_id: BASE_PHOTO_ID, wearable_item_ids: [ITEM_ID_1] });
   });
 
   test('selects wardrobe pieces with the keyboard and exposes the pressed state', async ({ page }) => {

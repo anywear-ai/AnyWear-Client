@@ -293,7 +293,7 @@ composes the utilities below.
 | Secondary action | White surface with a gray border, paired with the primary action |
 | Destructive action | `bg-red-600 text-white rounded-md`, hover `bg-red-700` |
 | Card | `bg-white rounded-lg shadow`, `p-6` for page-level cards; `hover:shadow-md` where the card is a link or tile |
-| History card actions | `bg-black/50` overlay over the whole card, revealed by pointer hover or by focus within the overlay itself; the actions stay in the tab order and the accessibility tree while hidden, and Delete keeps the overlay visible while it swaps the action set in place for a confirmation (`Yes, Delete` / `Cancel`) rather than opening a dialog |
+| History card actions | `bg-black/50` scrim over the card's image area only: an `absolute inset-0` child of the `relative aspect-[3/4]` media wrapper, revealed by pointer hover anywhere in the card or by focus within the overlay itself; the actions stay in the tab order and the accessibility tree while hidden, and Delete keeps the overlay visible while it swaps the action set in place for a confirmation (`Yes, Delete` / `Cancel`) rather than opening a dialog. The card body — timestamp, status badge, item count, rating and any rating-failure sentence — is outside the overlay and stays visible and pressable while the actions are revealed |
 | Dialog panel | White surface, `rounded-xl shadow-xl`, `z-10` for Add/Details and `z-50` for outfit dialogs and the history image viewer, whose panel is the image itself; dismissed by backdrop click and Escape, with focus moved into the panel on open and restored to the control that opened it on close. While any panel is open the page behind it does not scroll: the shared dialog hook hides body overflow on the first open panel and restores the previous inline value when the last one closes. |
 | Text input | White surface with `border-gray-300` and `rounded-md`; focus moves the border to indigo and, in the dialogs, paints the 2px indigo ring inset where a scrolling form would clip an offset. |
 | Status badge | `rounded-full` pill with `text-xs`, one of the pending, processing, or failed pairs from [Colors](#colors), always paired with text. The Add dialog's photo rows use the same pill for their step: the pending pair for `queued`, the processing pair for `reserving`, `uploading` and `confirming`, the failed pair for `failed`, and the app surface and body text colors (`bg-gray-100 text-gray-700`) for `created`. |
@@ -305,7 +305,11 @@ composes the utilities below.
 The History card actions row costs a second Components entry for one surface and restates
 Tailwind's `focus-within` and `group-hover` utilities instead of naming a project token. It is
 recorded because the reveal is the component's new interaction state, and an undocumented
-interaction state is the larger cost.
+interaction state is the larger cost. The overlay is contained rather than stacked: its box is
+the media wrapper's padding box, and that wrapper's `overflow-hidden` clips a taller action stack
+at the image edge instead of letting it spill onto the rating row. Containing the overlay puts it
+before the card body in the DOM, so a card's tab and reading order runs actions, then timestamp,
+badge, item count and rating.
 
 Focus in the four Wardrobe dialogs is a 2px indigo ring, defined per control rather
 than inherited from a shared component: `focus:` on controls, `focus-within:` on the labels

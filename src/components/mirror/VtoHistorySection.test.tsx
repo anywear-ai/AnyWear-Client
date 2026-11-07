@@ -110,9 +110,74 @@ describe('VtoHistorySection action reveal', () => {
     expect(overlay.className).toContain('opacity-0');
     expect(overlay.className).not.toContain('group-focus-within');
 
-    // The card keeps `group` for the pointer path only.
-    expect(overlay.parentElement?.className).toContain('group');
-    expect(overlay.parentElement?.className).not.toContain('group-focus-within');
+    // The overlay's box is the media wrapper, and the card root keeps `group`
+    // for the pointer path only.
+    const media = overlay.parentElement;
+    expect(media).toHaveAttribute('data-testid', 'vto-history-media');
+    expect(media?.className).toContain('relative');
+    expect(media?.className).toContain('aspect-[3/4]');
+    expect(media?.className).toContain('overflow-hidden');
+    const card = overlay.closest('.group');
+    expect(card?.className).toContain('group');
+    expect(card?.className).not.toContain('group-focus-within');
+  });
+
+  it('keeps the rating control and the failure sentence outside the media wrapper', () => {
+    rows = [generation({ id: 'gen-1', status: 'Complete' })];
+    mockHistory({
+      ratingFailures: { 'gen-1': "Couldn't save your rating. Choose a star to try again." },
+    });
+    renderSection();
+
+    const overlay = screen.getByTestId('vto-history-actions');
+    const media = screen.getByTestId('vto-history-media');
+    const radiogroup = screen.getByRole('radiogroup', { name: 'Rate this result' });
+    const alert = screen.getByRole('alert');
+    const card = overlay.closest('.group');
+
+    expect(overlay.parentElement).toBe(media);
+    expect(overlay.contains(radiogroup)).toBe(false);
+    expect(media.contains(radiogroup)).toBe(false);
+    expect(media.querySelector('[role="radiogroup"]')).toBeNull();
+    expect(media.contains(alert)).toBe(false);
+    expect(media.querySelector('[role="alert"]')).toBeNull();
+    // The card holds both, so the containment is parentage, not absence.
+    expect(card).not.toBeNull();
+    expect(card?.contains(overlay)).toBe(true);
+    expect(card?.contains(radiogroup)).toBe(true);
+    expect(card?.contains(alert)).toBe(true);
+  });
+
+  it('keeps the five reveal tokens and adds no pointer-events or z-index token', () => {
+    renderSection();
+    const overlay = screen.getByTestId('vto-history-actions');
+
+    expect(overlay.className).toContain('absolute inset-0');
+    expect(overlay.className).toContain('opacity-0');
+    expect(overlay.className).toContain('group-hover:opacity-100');
+    expect(overlay.className).toContain('focus-within:opacity-100');
+    expect(overlay.className).toContain('focus-within:transition-none');
+    expect(overlay.className).not.toContain('group-focus-within');
+    expect(overlay.className).not.toContain('pointer-events');
+    expect(overlay.className).not.toContain('z-');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    const confirmation = screen.getByTestId('vto-history-actions');
+    expect(confirmation.className).toContain('opacity-100');
+    expect(confirmation.className).not.toContain('opacity-0');
+    expect(confirmation.className).not.toContain('pointer-events');
+    expect(confirmation.className).not.toContain('z-');
+  });
+
+  it('renders a rated card as read-only text with no pressable star', () => {
+    rows = [generation({ id: 'gen-1', status: 'Complete', rating: 4 })];
+    mockHistory();
+    renderSection();
+
+    expect(screen.getByText('Your rating: 4/5')).toBeInTheDocument();
+    expect(screen.queryByRole('radiogroup')).toBeNull();
+    expect(screen.queryAllByRole('radio')).toHaveLength(0);
+    expect(screen.getByTestId('vto-history-media').querySelector('[role="radio"]')).toBeNull();
   });
 
   it('keeps the actions in the tab order and the accessibility tree while hidden', () => {

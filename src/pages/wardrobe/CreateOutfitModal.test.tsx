@@ -230,6 +230,27 @@ describe('CreateOutfitModal', () => {
     );
   });
 
+  it('omits the name key from the wire body when the name field is left untouched', () => {
+    const mutate = vi.fn();
+    setupMocks();
+    vi.mocked(usePostOutfits).mockReturnValue({
+      mutate,
+      isPending: false,
+    } as any);
+
+    render(<CreateOutfitModal {...defaultProps} />);
+
+    fireEvent.click(screen.getByText('T-Shirt'));
+    fireEvent.click(screen.getByRole('button', { name: 'Create Outfit' }));
+
+    const body = mutate.mock.calls[0][0].data;
+    expect(body.name).toBeUndefined();
+    // The body the mutation holds still names the field; the serialized request
+    // is what reaches the Service, and JSON.stringify drops an undefined value.
+    expect(JSON.stringify(body)).toBe('{"wearable_item_ids":["item-1"]}');
+    expect(JSON.stringify(body)).not.toContain('"name"');
+  });
+
   it('strips whitespace from name before creating', () => {
     const mutate = vi.fn();
     setupMocks();

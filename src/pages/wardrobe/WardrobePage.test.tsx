@@ -320,6 +320,32 @@ describe('WardrobePage saved outfit look cards', () => {
     expect(screen.getByRole('button', { name: 'New look for Rainy Day' })).toBeInTheDocument();
   });
 
+  it('renders an unnamed outfit as Untitled Outfit and a Service-derived name verbatim', () => {
+    mockOutfits({
+      outfits: [
+        outfit({ id: 'outfit-unnamed', name: null, wearableItems: [] }),
+        outfit({
+          id: 'outfit-derived',
+          name: 'T-Shirt, Jeans',
+          wearableItems: [
+            { id: 'item-1', name: 'T-Shirt', category: 'Top', images: [] },
+            { id: 'item-2', name: 'Jeans', category: 'Bottom', images: [] },
+          ],
+        }),
+      ],
+    });
+
+    renderPage({ seed: [] });
+
+    // A null name keeps the page's own fallback, and its only edit control names
+    // that fallback rather than an absent string.
+    expect(screen.getByRole('heading', { name: 'Untitled Outfit' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit outfit' })).toBeInTheDocument();
+    // A derived name comes from the Service and is shown exactly as returned.
+    expect(screen.getByRole('heading', { name: 'T-Shirt, Jeans' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit T-Shirt, Jeans' })).toBeInTheDocument();
+  });
+
   it('never derives the image from wearable items: no look shows the empty state and Generate look', () => {
     renderPage({ seed: [] });
 

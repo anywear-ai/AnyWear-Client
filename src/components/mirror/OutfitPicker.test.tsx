@@ -84,6 +84,23 @@ describe('OutfitPicker', () => {
     expect(screen.getByText('0 items')).toBeDefined();
   });
 
+  it('renders a Service-derived name verbatim beside the unnamed fallback', () => {
+    const derivedNameOutfit = {
+      ...structuredClone(mockOutfits.outfits[0]),
+      id: 'outfit-3',
+      name: 'T-Shirt, Jeans',
+      wearableItems: [],
+      latestGeneration: null,
+      look: null,
+    };
+    mockData({ outfits: [mockOutfits.outfits[1], derivedNameOutfit] });
+
+    render(<OutfitPicker selectedOutfitId={null} onSelect={() => {}} />);
+
+    expect(screen.getByText('Untitled Outfit')).toBeDefined();
+    expect(screen.getByText('T-Shirt, Jeans')).toBeDefined();
+  });
+
   it('renders the completed look with the same per-generation cache key as the Wardrobe card', () => {
     mockData(mockOutfits);
 

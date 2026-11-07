@@ -165,12 +165,14 @@ describe('mergeVtoStatus', () => {
     state_version: 2,
     imageId: null,
     url: null,
+    rating: null,
   };
   const complete: VtoStatusSnapshot & { status: string } = {
     status: 'Complete',
     state_version: 3,
     imageId: 'image-9',
     url: 'https://example.com/result.jpg',
+    rating: null,
   };
 
   it('applies a newer status', () => {
@@ -188,6 +190,26 @@ describe('mergeVtoStatus', () => {
 
     expect(merged.status).toBe('Complete');
     expect(merged.url).toBe('https://example.com/resigned.jpg');
+  });
+
+  it('takes the rating from an equal-version status, which the rating write does not version', () => {
+    const cached: VtoStatusSnapshot & { status: string } = { ...complete, rating: null };
+    const rated: VtoStatusSnapshot & { status: string } = { ...complete, rating: 4 };
+
+    const merged = mergeVtoStatus(cached, rated);
+
+    expect(merged.rating).toBe(4);
+    expect(merged.status).toBe('Complete');
+    expect(merged.imageId).toBe('image-9');
+  });
+
+  it('keeps the cached rating when an older status arrives', () => {
+    const cached: VtoStatusSnapshot & { status: string } = { ...complete, rating: 4 };
+
+    const merged = mergeVtoStatus(cached, { ...processing, rating: null });
+
+    expect(merged).toBe(cached);
+    expect(merged.rating).toBe(4);
   });
 
   it('applies the first status when nothing is cached', () => {

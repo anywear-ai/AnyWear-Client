@@ -91,6 +91,39 @@ describe('useVtoRating', () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['/vto/generations'] });
   });
 
+  it('presents nothing as stored until the rating write settles', async () => {
+    const { queryClient, result } = setup();
+    const statusKey = getGetVtoGenerationsGenerationIdQueryKey('generation-1');
+    queryClient.setQueryData(statusKey, status({ rating: null }));
+    let resolveWrite!: () => void;
+    patchRating.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveWrite = resolve; }),
+    );
+
+    act(() => {
+      result.current.save('generation-1', 4);
+    });
+
+    // The deciding check for acceptance criterion 5: while the write is in
+    // flight, nothing the surface reads has moved. A hook that wrote the
+    // acknowledged rating into the cache before awaiting would fail here.
+    expect(patchRating).toHaveBeenCalledTimes(1);
+    expect(patchRating).toHaveBeenCalledWith({ generationId: 'generation-1', data: { rating: 4 } });
+    expect(queryClient.getQueryData(statusKey)).toEqual(status({ rating: null }));
+    expect(result.current.echoResetTokens['generation-1']).toBeUndefined();
+    expect(result.current.failures).toEqual({});
+
+    await act(async () => {
+      resolveWrite();
+      await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    });
+
+    expect(queryClient.getQueryData(statusKey)).toEqual(status({ rating: 4 }));
+    expect(result.current.echoResetTokens['generation-1']).toBe(1);
+  });
+
   it('writes and bumps nothing without a mounted status read, while still invalidating the history list', async () => {
     const { queryClient, result } = setup();
     const statusKey = getGetVtoGenerationsGenerationIdQueryKey('generation-1');

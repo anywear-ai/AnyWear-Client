@@ -15,3 +15,50 @@ body {
   background-color: #f9fafb;
   color: #111827;
 }
+
+/*
+ * Mobile touch layer.
+ *
+ * `manipulation` keeps the browser's double-tap zoom and the 300 ms tap delay
+ * off controls while leaving panning and pinch-zoom available. The interactive
+ * shell and imagery opt out of text selection and the iOS long-press callout;
+ * editable fields opt back in, because selecting text inside an input is the
+ * expected behaviour everywhere. `overscroll-behavior-y: contain` stops the
+ * whole page from rubber-banding past its content on Android and iOS.
+ *
+ * Android WebView's native long-press menu cannot be disabled by CSS alone; the
+ * Tauri shell installs a `contextmenu` guard for that (src/lib/touch.ts).
+ */
+button,
+a,
+label,
+select,
+summary,
+[role="button"],
+img,
+svg {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+button,
+a,
+label,
+select,
+summary,
+[role="button"] {
+  touch-action: manipulation;
+}
+
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+html,
+body {
+  overscroll-behavior-y: contain;
+}

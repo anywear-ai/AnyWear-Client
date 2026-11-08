@@ -46,6 +46,10 @@ vi.mock('../../lib/imageUpload', async (importOriginal) => {
   return { ...actual, uploadImageWithSignedPost: vi.fn() };
 });
 
+vi.mock('../../lib/imagePreparation', () => ({
+  prepareImageForUpload: vi.fn(),
+}));
+
 vi.mock('../../components/CachedImage', () => ({
   default: ({ src, cacheKey, alt, className, ...rest }: any) => (
     <img src={src} alt={alt} className={className} data-cache-key={cacheKey} {...rest} />
@@ -64,6 +68,7 @@ import {
 import { useGetUsersMe } from '../../api/endpoints/users/users';
 import useVtoGeneration from '../../hooks/useVtoGeneration';
 import { uploadImageWithSignedPost } from '../../lib/imageUpload';
+import { prepareImageForUpload } from '../../lib/imagePreparation';
 
 const generate = vi.fn();
 const reservePhotoUpload = vi.fn();
@@ -125,6 +130,9 @@ describe('MirrorPage', () => {
     vi.mocked(useDeleteVtoBasePhotosId).mockReturnValue({ mutate: deletePhoto } as any);
     vi.mocked(usePatchVtoGenerationsGenerationIdRating).mockReturnValue({ mutateAsync: rateGeneration } as any);
     vi.mocked(uploadImageWithSignedPost).mockResolvedValue(undefined);
+    vi.mocked(prepareImageForUpload).mockImplementation(
+      async (file: File) => new File([file], file.name, { type: 'image/jpeg' }),
+    );
   });
 
   afterEach(() => {

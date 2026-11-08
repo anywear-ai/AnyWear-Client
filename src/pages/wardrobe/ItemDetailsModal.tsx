@@ -6,6 +6,7 @@ import type { PostWardrobeItemsIdUploadUrl200 } from '../../api/model/postWardro
 import CachedImage from '../../components/CachedImage';
 import { AXIOS_INSTANCE } from '../../api/custom-instance';
 import { resolveImageContentType, uploadImageWithSignedPost, validateImageFile } from '../../lib/imageUpload';
+import { prepareImageForUpload } from '../../lib/imagePreparation';
 import { getErrorMessage } from '../../lib/errors';
 import useAccessibleDialog from '../../hooks/useAccessibleDialog';
 
@@ -117,7 +118,9 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
   })));
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [isAddingImage, setIsAddingImage] = useState(false);
-  const addImageInputRef = useRef<HTMLInputElement>(null);
+  const [addImageError, setAddImageError] = useState<string | null>(null);
+  const libraryInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
 
   const { mutateAsync: updateItem, isPending: isUpdating } = usePatchWardrobeItemsId();
   const { mutateAsync: deleteItem, isPending: isDeleting } = useDeleteWardrobeItemsId();
@@ -210,12 +213,19 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
   };
 
   const handleAddImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const input = e.target;
+    const file = input.files?.[0];
+    // A cancelled camera or picker supplies no file: nothing changed, so no hint
+    // is raised and both entries stay available.
     if (!file || !item.id) return;
 
     setIsAddingImage(true);
+    setAddImageError(null);
     try {
       validateImageFile(file);
+      // The orientation is baked and the bytes re-encoded before the reservation,
+      // so the declared content type and the stored object agree.
+      const prepared = await prepareImageForUpload(file);
 
       // Reserve the additional image, upload it through the signed policy, then
       // confirm. The confirmation returns the image record it attached, so the
@@ -223,12 +233,12 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
       // fresh `url`, and the PATCH that saves this list carries image ids only.
       const { data: reservation } = await AXIOS_INSTANCE.post<PostWardrobeItemsIdUploadUrl200>(
         `/wardrobe/items/${item.id}/upload-url`,
-        { contentType: resolveImageContentType(file) },
+        { contentType: resolveImageContentType(prepared) },
       );
 
       if (!reservation?.upload?.url) throw new Error('Failed to reserve the upload');
 
-      await uploadImageWithSignedPost(reservation.upload, file);
+      await uploadImageWithSignedPost(reservation.upload, prepared);
 
       const { data: confirmed } = await AXIOS_INSTANCE.post<PostWardrobeItemsIdUpload200>(
         `/wardrobe/items/${item.id}/upload`,
@@ -244,10 +254,12 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
       setSelectedImageIndex(images.length);
     } catch (error) {
       console.error('Failed to add image:', error);
-      alert(getErrorMessage(error, 'Failed to upload additional image'));
+      // The cause stays inline: a decode failure or an unreadable format is a
+      // hint next to the two entries, not a dialog the user has to dismiss.
+      setAddImageError(getErrorMessage(error, 'Failed to upload additional image'));
     } finally {
       setIsAddingImage(false);
-      if (addImageInputRef.current) addImageInputRef.current.value = '';
+      input.value = '';
     }
   };
 
@@ -355,28 +367,51 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
                         </button>
                       </div>
                     ))}
-                    <button
-                      type="button"
-                      aria-label="Add image"
-                      onClick={() => addImageInputRef.current?.click()}
-                      disabled={isAddingImage}
-                      className="w-16 h-16 rounded border-2 border-dashed border-gray-300 flex items-center justify-center text-gray-400 hover:border-gray-500 hover:text-gray-600 transition flex-shrink-0 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                    >
-                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                      </svg>
-                    </button>
-                    <input
-                      ref={addImageInputRef}
-                      type="file"
-                      accept="image/jpeg,image/png,image/webp"
-                      capture="environment"
-                      className="hidden"
-                      onChange={handleAddImage}
-                    />
                   </div>
                 )}
               </div>
+
+              {/* Both capture entries stay visible whatever the gallery holds,
+                  so a photo that cannot be decoded leaves the library one click
+                  away instead of a dead end. */}
+              <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => libraryInputRef.current?.click()}
+                  disabled={isAddingImage}
+                  className="inline-flex justify-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+                >
+                  {isAddingImage ? 'Uploading...' : 'Choose from library'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => cameraInputRef.current?.click()}
+                  disabled={isAddingImage}
+                  className="inline-flex justify-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+                >
+                  Take photo
+                </button>
+                <input
+                  ref={libraryInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  className="hidden"
+                  onChange={handleAddImage}
+                />
+                <input
+                  ref={cameraInputRef}
+                  type="file"
+                  // `image/*` is the branch wry sends to ACTION_IMAGE_CAPTURE;
+                  // with only JPEG/PNG/WebP listed it opens the file picker.
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                  onChange={handleAddImage}
+                />
+              </div>
+              {addImageError && (
+                <p className="mt-2 text-sm text-red-600" role="alert">{addImageError}</p>
+              )}
 
               <form onSubmit={handleUpdate} className="mt-4 space-y-3 max-h-[50vh] overflow-y-auto">
                 <div className="grid grid-cols-2 gap-3">

@@ -34,6 +34,9 @@
     "category": "Lifestyle",
     "shortDescription": "AnyWear — your wardrobe, styled.",
     "longDescription": "AnyWear is a virtual try-on and wardrobe client. Capture your clothes, generate looks, and see them on your digital mannequin.",
+    "android": {
+      "minSdkVersion": 30
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

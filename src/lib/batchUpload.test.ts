@@ -64,6 +64,7 @@ function recorder(): Recording {
 }
 
 interface StubDeps extends BatchUploadDeps {
+  prepare: MockedFunction<NonNullable<BatchUploadDeps['prepare']>>;
   reserve: MockedFunction<BatchUploadDeps['reserve']>;
   postBytes: MockedFunction<BatchUploadDeps['postBytes']>;
   confirm: MockedFunction<BatchUploadDeps['confirm']>;
@@ -71,6 +72,7 @@ interface StubDeps extends BatchUploadDeps {
 
 function stubDeps(overrides: Partial<BatchUploadDeps> = {}): StubDeps {
   const deps = {
+    prepare: vi.fn(async (file: File) => file),
     reserve: vi.fn(async (file: File) => ({
       reservationId: `res-${file.name}`,
       upload: { url: 'https://s3.example.com/upload', fields: { key: file.name } },
@@ -149,7 +151,7 @@ describe('planBatch', () => {
 describe('createBatchPhotos', () => {
   it('fails a photo the per-photo rules refuse, before any request', async () => {
     const heic = { name: 'IMG_0001.HEIC', size: 1024, lastModified: 1, type: '' } as unknown as File;
-    const oversize = photoFile('huge.jpg', 11 * 1024 * 1024);
+    const oversize = photoFile('huge.jpg', 31 * 1024 * 1024);
     const notAnImage = { name: 'notes.txt', size: 10, lastModified: 1, type: 'text/plain' } as unknown as File;
 
     const photos = createBatchPhotos([heic, oversize, notAnImage]);
@@ -157,7 +159,7 @@ describe('createBatchPhotos', () => {
     expect(photos.map((photo) => photo.status)).toEqual(['failed', 'failed', 'failed']);
     expect(photos.every((photo) => photo.failureKind === 'precheck')).toBe(true);
     expect(photos[0].error).toContain('HEIC/HEIF');
-    expect(photos[1].error).toBe('Image must be 10MB or smaller');
+    expect(photos[1].error).toBe('Image must be 30MB or smaller');
     expect(photos[2].error).toBe('Select an image file');
 
     const deps = stubDeps();
@@ -201,8 +203,10 @@ describe('runBatch', () => {
     const run = runBatch(photos, deps, record.onChange);
 
     // Three slots start; the fourth photo is still queued and holds no reservation.
+    // Preparation is asynchronous even when it succeeds, so the reservations are
+    // observed once each started photo has finished preparing.
     expect(MAX_CONCURRENT_UPLOADS).toBe(3);
-    expect(deps.reserve).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() => expect(deps.reserve).toHaveBeenCalledTimes(3));
     expect(deps.reserve.mock.calls.map(([file]) => (file as File).name)).toEqual([
       'p-0.png',
       'p-1.png',
@@ -269,6 +273,52 @@ describe('runBatch', () => {
     expect(new Set(itemIds).size).toBe(3);
     // No more photos than the runner's slots were ever in flight together.
     expect(peakInFlight).toBeLessThanOrEqual(MAX_CONCURRENT_UPLOADS);
+  });
+
+  it('prepares each photo before reserving and reserves and posts the prepared file', async () => {
+    const deps = stubDeps({
+      prepare: vi.fn(async (file: File) => new File([file], `prepared-${file.name}`, { type: 'image/jpeg' })),
+    });
+
+    const record = await settle(createBatchPhotos([photoFile('a.png'), photoFile('b.png')]), deps);
+
+    // One preparation per photo, and the reservation and the S3 body both carry
+    // the prepared bytes rather than the original file.
+    expect(deps.prepare).toHaveBeenCalledTimes(2);
+    expect(deps.reserve.mock.calls.map(([file]) => file.name)).toEqual(['prepared-a.png', 'prepared-b.png']);
+    expect(deps.postBytes.mock.calls.map(([, file]) => file.name)).toEqual(['prepared-a.png', 'prepared-b.png']);
+    const statuses = record.steps.filter((step) => step.name === 'a.png').map((step) => step.status);
+    expect(statuses[0]).toBe('preparing');
+    expect(statuses).toContain('reserving');
+    expect(record.latest.get('a.png')?.status).toBe('created');
+  });
+
+  it('fails a photo whose preparation throws without any request, then re-prepares it on Retry', async () => {
+    const prepare = vi.fn()
+      .mockRejectedValueOnce(new Error('Could not process this image'))
+      .mockImplementation(async (file: File) => file);
+    const deps = stubDeps({ prepare });
+
+    const first = await settle(createBatchPhotos([photoFile('broken.jpg')]), deps);
+
+    expect(first.latest.get('broken.jpg')).toMatchObject({
+      status: 'failed',
+      failureKind: 'prepare',
+      error: 'Could not process this image',
+    });
+    // A decode failure reserves nothing: no request could describe bytes that do
+    // not exist.
+    expect(deps.reserve).not.toHaveBeenCalled();
+    expect(deps.postBytes).not.toHaveBeenCalled();
+    expect(deps.confirm).not.toHaveBeenCalled();
+
+    const retry = await settle([first.latest.get('broken.jpg')!], deps);
+
+    expect(retry.latest.get('broken.jpg')?.status).toBe('created');
+    expect(prepare).toHaveBeenCalledTimes(2);
+    // The retry re-pre-processes and then makes the normal three calls once.
+    expect(deps.reserve).toHaveBeenCalledTimes(1);
+    expect(deps.confirm).toHaveBeenCalledTimes(1);
   });
 
   it('fails one photo without aborting or blocking the others', async () => {

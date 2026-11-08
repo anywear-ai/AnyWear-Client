@@ -74,12 +74,17 @@ export default function MainLayout() {
         </div>
       </nav>
 
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 lg:px-8">
+      {/* `pb-24` below `sm` keeps the last card scrollable clear of the fixed
+          bottom navigation; the desktop breakpoint keeps the original `py-6`.
+          The safe-area inset itself is consumed by the Android shell
+          (MainActivity), not by CSS, so this is the only bottom clearance the
+          page owns. */}
+      <main className="mx-auto w-full max-w-7xl flex-1 px-4 pt-6 pb-24 sm:px-6 sm:pb-6 lg:px-8">
         <Outlet />
       </main>
       
       {/* Mobile Bottom Navigation */}
-      <div className="sm:hidden fixed bottom-0 w-full bg-white border-t border-gray-200">
+      <nav aria-label="Mobile navigation" className="sm:hidden fixed bottom-0 w-full bg-white border-t border-gray-200">
         <div className="flex justify-around py-3">
           <NavLink to="/dashboard" end className={mobileLinkClass}>
             <span className="text-xs">Dashboard</span>
@@ -97,7 +102,7 @@ export default function MainLayout() {
             <span className="text-xs">Settings</span>
           </NavLink>
         </div>
-      </div>
+      </nav>
     </div>
   );
 }

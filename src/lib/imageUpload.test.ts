@@ -25,10 +25,18 @@ describe('imageUpload', () => {
     expect(() => validateImageFile(new File(['text'], 'notes.txt', { type: 'text/plain' })))
       .toThrow('Select an image file');
 
-    const oversized = new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'large.jpg', {
+    const oversized = new File([new Uint8Array(30 * 1024 * 1024 + 1)], 'large.jpg', {
       type: 'image/jpeg',
     });
-    expect(() => validateImageFile(oversized)).toThrow('Image must be 10MB or smaller');
+    expect(() => validateImageFile(oversized)).toThrow('Image must be 30MB or smaller');
+  });
+
+  it('admits a 10–30 MiB original so preparation can shrink it', () => {
+    const cameraOriginal = new File([new Uint8Array(20 * 1024 * 1024)], 'IMG_0001.jpg', {
+      type: 'image/jpeg',
+    });
+
+    expect(() => validateImageFile(cameraOriginal)).not.toThrow();
   });
 
   it('rejects HEIC/HEIF by filename when the browser omits the MIME type', () => {
@@ -41,7 +49,7 @@ describe('imageUpload', () => {
 
     // The format is named before the size, so an oversized HEIC tells the user
     // to re-encode rather than to shrink a file that would fail anyway.
-    const oversized = new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'camera.heic');
+    const oversized = new File([new Uint8Array(30 * 1024 * 1024 + 1)], 'camera.heic');
     expect(() => validateImageFile(oversized)).toThrow(HEIC_UNSUPPORTED_MESSAGE);
   });
 

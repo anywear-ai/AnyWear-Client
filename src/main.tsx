@@ -6,6 +6,7 @@ import "./lib/amplify"; // Initialize Amplify
 
 import { warn, debug, trace, info, error } from '@tauri-apps/plugin-log';
 import { isTauri } from '@tauri-apps/api/core';
+import { installContextMenuGuard } from './lib/touch';
 
 function forwardConsole(
   fnName: 'log' | 'debug' | 'info' | 'warn' | 'error',
@@ -31,6 +32,9 @@ if (isTauri()) {
   forwardConsole('info', info);
   forwardConsole('warn', warn);
   forwardConsole('error', error);
+  // Android WebView opens its own long-press menu regardless of the CSS opt-out;
+  // the shell cancels it except over editable fields.
+  installContextMenuGuard();
 }
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

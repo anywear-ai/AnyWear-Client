@@ -31,6 +31,7 @@ function statusBadgeClass(status: BatchPhotoStatus): string {
   switch (status) {
     case 'queued':
       return `${pill} bg-blue-100 text-blue-800`;
+    case 'preparing':
     case 'reserving':
     case 'uploading':
     case 'confirming':
@@ -46,6 +47,8 @@ function statusLabel(status: BatchPhotoStatus): string {
   switch (status) {
     case 'queued':
       return 'Queued';
+    case 'preparing':
+      return 'Preparing';
     case 'reserving':
       return 'Reserving';
     case 'uploading':
@@ -251,7 +254,7 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
                       </svg>
                       <div className="flex flex-wrap justify-center gap-x-4 gap-y-1 text-sm text-gray-600">
                         <label className={fileInputLabelClass}>
-                          <span>Upload a file or take a photo</span>
+                          <span>Choose from library</span>
                           <input
                             id="add-item-image"
                             type="file"
@@ -266,12 +269,14 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
                           />
                         </label>
                         <label className={fileInputLabelClass}>
-                          <span>Take a photo</span>
+                          <span>Take photo</span>
                           <input
                             id="add-item-camera"
                             type="file"
                             disabled={isRunning}
-                            accept="image/jpeg,image/png,image/webp"
+                            // `image/*` is what makes wry take the camera branch:
+                            // with only JPEG/PNG/WebP listed it opens the file picker.
+                            accept="image/*"
                             capture="environment"
                             className="sr-only"
                             onChange={(e) => {
@@ -281,7 +286,7 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
                           />
                         </label>
                       </div>
-                      <p className="text-xs text-gray-500">PNG, JPG or WebP up to 10MB</p>
+                      <p className="text-xs text-gray-500">PNG, JPG or WebP up to 30MB</p>
                     </div>
                   </div>
 

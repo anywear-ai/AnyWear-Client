@@ -17,6 +17,10 @@ vi.mock('../../lib/imageUpload', async (importOriginal) => {
   return { ...actual, uploadImageWithSignedPost: vi.fn() };
 });
 
+vi.mock('../../lib/imagePreparation', () => ({
+  prepareImageForUpload: vi.fn(),
+}));
+
 vi.mock('../../components/CachedImage', () => ({
   default: ({ src, cacheKey, alt, className, ...rest }: any) => (
     <img src={src} alt={alt} className={className} data-cache-key={cacheKey} {...rest} />
@@ -25,6 +29,7 @@ vi.mock('../../components/CachedImage', () => ({
 
 import BasePhotoSelector from './BasePhotoSelector';
 import { HEIC_UNSUPPORTED_MESSAGE, uploadImageWithSignedPost } from '../../lib/imageUpload';
+import { prepareImageForUpload } from '../../lib/imagePreparation';
 import {
   useDeleteVtoBasePhotosId,
   useGetVtoBasePhotos,
@@ -48,6 +53,9 @@ describe('BasePhotoSelector', () => {
     vi.mocked(usePatchVtoBasePhotosId).mockReturnValue({ mutate: setDefault } as any);
     vi.mocked(useDeleteVtoBasePhotosId).mockReturnValue({ mutate: deletePhoto } as any);
     vi.mocked(uploadImageWithSignedPost).mockResolvedValue(undefined);
+    vi.mocked(prepareImageForUpload).mockImplementation(
+      async (file: File) => new File([file], file.name, { type: 'image/jpeg' }),
+    );
   });
 
   afterEach(() => {
@@ -115,6 +123,44 @@ describe('BasePhotoSelector', () => {
     expect(reservePhotoUpload).not.toHaveBeenCalled();
   });
 
+  it('renders both capture entries with the attributes each system path needs', () => {
+    const { container } = renderSelector([]);
+    const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+    expect(inputs).toHaveLength(2);
+    // The camera entry carries `image/*`: that is the branch wry sends to
+    // ACTION_IMAGE_CAPTURE, and one shot is one file.
+    const camera = inputs.find((input) => input.getAttribute('accept') === 'image/*')!;
+    expect(camera).toHaveAttribute('capture', 'environment');
+    expect(camera).not.toHaveAttribute('multiple');
+    // The library entry keeps the narrow list: it only ever opens the picker.
+    const library = inputs.find((input) => input.getAttribute('accept') === 'image/jpeg,image/png,image/webp');
+    expect(library).toBeDefined();
+    expect(library).not.toHaveAttribute('capture');
+    expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument();
+  });
+
+  it('shows a decode failure inline and leaves the library entry as the retry', async () => {
+    vi.mocked(prepareImageForUpload).mockRejectedValueOnce(new Error('Could not process this image'));
+    const { container } = renderSelector([]);
+    const library = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+
+    // A cancelled picker supplies no file: no hint, no request.
+    fireEvent.change(library, { target: { files: [] } });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(reservePhotoUpload).not.toHaveBeenCalled();
+
+    fireEvent.change(library, {
+      target: { files: [new File(['bytes'], 'photo.jpg', { type: 'image/jpeg' })] },
+    });
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Could not process this image');
+    expect(reservePhotoUpload).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
+  });
+
   it('renders the effective default across own and system photos', () => {
     renderSelector([ownPhoto, systemPhoto]);
 
@@ -173,6 +219,8 @@ describe('BasePhotoSelector', () => {
     await waitFor(() => expect(onUploaded).toHaveBeenCalledWith('photo-new'));
     // The page owns adoption; the selector must not select the photo itself.
     expect(onSelect).not.toHaveBeenCalled();
+    // The reservation names the prepared JPEG, not the picked PNG.
+    expect(reservePhotoUpload).toHaveBeenCalledWith({ data: { contentType: 'image/jpeg' } });
     expect(uploadImageWithSignedPost).toHaveBeenCalledWith(
       { url: 'https://upload.example.com', fields: { key: 'base-photos/new.jpg' } },
       expect.any(File),

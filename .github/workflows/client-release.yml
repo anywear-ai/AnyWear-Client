@@ -80,7 +80,8 @@ jobs:
           cat preflight.txt >> "$GITHUB_OUTPUT"
 
       # One bounded read of the existing release decides the four-state machine:
-      # absent, draft, published with a complete asset set (idempotent green), or
+      # absent, draft, published with a complete asset set (downloads and verifies
+      # the release's own SHA256SUMS, then ends green only when they match), or
       # published with a gap (hard refusal). The token is the run's own
       # GITHUB_TOKEN, not a signing secret.
       - name: Classify the existing release state
@@ -390,6 +391,14 @@ jobs:
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
+      # `tauri android build` compiles the Rust crate for each Android ABI and does
+      # not install the targets itself. The four Rust Android targets are the set a
+      # Tauri v2 Android build covers: 64-bit ARM (aarch64), 32-bit ARM (armv7),
+      # 32-bit x86 (i686) and 64-bit x86 (x86_64); #279 owns the final ABI split.
+      - name: Add the Android Rust targets
+        shell: bash
+        run: rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+
       # Never initialize the Android project in CI: it is committed by #279, and CI
       # only materializes the uncommitted signing material next to it.
       - name: Materialize the Android keystore
@@ -527,6 +536,7 @@ jobs:
           cp artifacts/windows/build-metadata.json release-assets/build-metadata.json
           cp "docs/client-release-notes/client-v${RELEASE_VERSION}.md" release-assets/RELEASE-NOTES.md
           node scripts/assert-client-release.mjs assets --version "$RELEASE_VERSION" --platforms "$DECLARED_PLATFORMS" --directory release-assets
+          node scripts/assert-client-release.mjs sizes --directory release-assets
 
       # GNU coreutils text mode: `<64 lowercase hex><two spaces><basename>`, LF,
       # `LC_ALL=C sort`, no header, no comment, no directory prefix, and no line
@@ -554,7 +564,7 @@ jobs:
       - name: Upload the assembled release bundle
         uses: actions/upload-artifact@v4
         with:
-          name: client-release-bundle
+          name: client-release-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             release-assets/
             SHA256SUMS
@@ -585,7 +595,7 @@ jobs:
       - name: Download the assembled release bundle
         uses: actions/download-artifact@v4
         with:
-          name: client-release-bundle
+          name: client-release-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: release
 
       # A rerun that finds its own draft adopts it: a draft's assets are still

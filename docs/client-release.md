@@ -80,9 +80,10 @@ are prerequisites for a signed, immutable release:
 
 5. The pipeline takes over: `preflight` validates identity and state, `verify`
    runs the tests on the tagged revision, the three platform jobs check their own
-   secrets and sign and verify their own binaries, `assemble` writes `SHA256SUMS`
-   and one attestation, and `publish` creates a draft, uploads, checks the checksums
-   back, flips it to a prerelease and reads it back.
+   secrets and sign and verify their own binaries, `assemble` asserts the declared
+   platforms and the 2 GiB single-file limit, writes `SHA256SUMS` and one
+   attestation, and `publish` creates a draft, uploads, checks the checksums back,
+   flips it to a prerelease and reads it back.
 6. Hand the Release link to testers.
 
 There is no manual dispatch, so the only recovery is a re-run:
@@ -97,8 +98,8 @@ four states:
 | State | Condition | What the pipeline does |
 | --- | --- | --- |
 | `absent` | No release and no tag collision for the commit | Builds and publishes |
-| `draft` | A draft release exists for this tag | Adopts the draft: replaces its assets, then publishes |
-| `published`, complete | A published release whose assets equal the declared set | Ends green without rebuilding; no second release |
+| `draft` | A draft release exists for this tag | Adopts the draft: purges and replaces its assets, then publishes |
+| `published`, complete | A published release whose assets equal the declared set | Downloads the release's own `SHA256SUMS` and verifies every listed digest; ends green only when they all match, without rebuilding; no second release |
 | `published`, incomplete | A published release missing a declared asset | Hard refusal: an immutable release cannot be patched in place; withdraw it and cut a patch |
 
 ### Release-level monotonicity
@@ -260,6 +261,9 @@ Rollback means:
   the uploaded bytes with `sha256sum -c`, and only then flips the draft. The
   readback asserts draft state, prerelease flag, tag name and the asset inventory
   against the declared platform list.
+- `assemble` refuses an asset above GitHub's 2 GiB single-file limit and reports the
+  set's total before upload, so an oversized installer stops the run with no
+  Release.
 - The pipeline never asserts `isImmutable`; that setting is an administrative
   precondition recorded above, not a `contents: write` read.
 - No workflow creates or moves a tag, deletes a release, or edits a release before

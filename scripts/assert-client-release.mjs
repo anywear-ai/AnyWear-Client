@@ -10,7 +10,9 @@
 //   - the four-state preflight machine (`absent`, `draft`, `published` with a
 //     complete asset set, `published` with a gap);
 //   - the declared-platform list and the asset set it requires;
-//   - the GNU coreutils text-mode `SHA256SUMS` format;
+//   - the 2 GiB single-file asset limit and the total the assembled set weighs;
+//   - the GNU coreutils text-mode `SHA256SUMS` format, and the digest match that
+//     the idempotent `published` rerun verifies against the release's own file;
 //   - the per-platform, per-secret fail-closed message.
 //
 // Every rule is a pure function so `scripts/assert-client-release.node-test.mjs`
@@ -20,15 +22,18 @@
 //
 //   verify      offline: tag syntax + the committed release notes (the local gate)
 //   preflight   offline: verify + lightweight tag + on main + monotonic + platforms
-//   state       one bounded `gh` read: the four-state classification (+ duplicate)
+//   state       one bounded `gh` read: the four-state classification (+ duplicate),
+//               and the checksum match when a published release is complete
 //   assets      offline: the assembled directory has one asset per declared platform
+//   sizes       offline: every asset is below 2 GiB, and the set's total is reported
 //   checksums   offline: print the canonical SHA256SUMS, or verify a written one
 //   inventory   offline: the release readback matches the declared set and checksums
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /** The only accepted release tag shape. Leading zeros are refused. */
@@ -195,6 +200,34 @@ export function assertDeclaredAssets({ version, declaredPlatforms: platforms, as
   throw new ClientReleaseError(`the assembled asset set is missing a declared platform artifact (${detail})`);
 }
 
+/** GitHub Releases' single-file upload limit for one release asset: 2 GiB. */
+export const MAX_RELEASE_ASSET_BYTES = 2 * 1024 * 1024 * 1024;
+
+/** The name and size of every file in one assembled directory. */
+export function assetSizes(directory) {
+  return readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => ({ name: entry.name, size: statSync(join(directory, entry.name)).size }));
+}
+
+/**
+ * Refuses an asset above the single-file limit and reports the set's total.
+ * `assets` is fixed input (`[{ name, size }]`), so the rule is testable without
+ * writing a 2 GiB file; `assemble` runs it over the directory it is about to
+ * upload.
+ */
+export function assertAssetSizes({ assets, limit = MAX_RELEASE_ASSET_BYTES }) {
+  const oversized = assets.filter((asset) => asset.size > limit);
+  if (oversized.length > 0) {
+    const detail = oversized.map((asset) => `\`${asset.name}\` is ${asset.size} bytes`).join('; ');
+    throw new ClientReleaseError(`a release asset is above the ${limit}-byte single-file limit: ${detail}`);
+  }
+  return {
+    count: assets.length,
+    total: assets.reduce((sum, asset) => sum + asset.size, 0),
+  };
+}
+
 /**
  * The four-state preflight classification.
  *
@@ -330,6 +363,67 @@ export function assertChecksumText(text) {
   return entries;
 }
 
+/** The SHA-256 of one downloaded file, or a named failure when it is absent. */
+function sha256File(path) {
+  try {
+    return createHash('sha256').update(readFileSync(path)).digest('hex');
+  } catch {
+    throw new ClientReleaseError(`the release has no \`${basename(path)}\`; its SHA256SUMS cannot be verified`);
+  }
+}
+
+/**
+ * The digest rule of the idempotent rerun: every line of the release's own
+ * `SHA256SUMS` must match the downloaded bytes, or the published state is not a
+ * green no-op. Fixed input, so the node test covers match, mismatch and absence.
+ */
+export function verifyChecksumSet({ checksums, digests }) {
+  const violations = [];
+  for (const { digest, name } of checksums) {
+    const actual = digests instanceof Map ? digests.get(name) : digests[name];
+    if (actual === undefined) violations.push(`\`${name}\` is not part of the download`);
+    else if (actual !== digest) violations.push(`\`${name}\` does not match SHA256SUMS`);
+  }
+  if (violations.length > 0) {
+    throw new ClientReleaseError(`the published release does not match its own SHA256SUMS: ${violations.join('; ')}`);
+  }
+  return checksums.length;
+}
+
+/** Downloads one release's assets; injectable so the node test needs no network. */
+export function downloadPublishedRelease({ repo, tag, directory, gh = runGh }) {
+  const result = gh(['release', 'download', tag, '--repo', repo, '--dir', directory]);
+  if (result.status !== 0) {
+    throw new ClientReleaseError(`\`gh release download ${tag} --repo ${repo}\` failed: ${ghDetail(result) || `exit ${result.status}`}`);
+  }
+}
+
+/**
+ * Verifies a published release against its own `SHA256SUMS` with read-only
+ * permissions. `download` and `hash` are injectable: the CLI passes the real `gh
+ * release download` and SHA-256 reader, and the node test supplies fixed bytes.
+ */
+export function verifyPublishedReleaseChecksums({
+  repo,
+  tag,
+  download = downloadPublishedRelease,
+  hash = sha256File,
+}) {
+  const directory = mkdtempSync(join(tmpdir(), 'client-release-published-'));
+  try {
+    download({ repo, tag, directory });
+    const checksumsPath = join(directory, 'SHA256SUMS');
+    if (!existsSync(checksumsPath)) {
+      throw new ClientReleaseError(`the published release \`${tag}\` has no \`SHA256SUMS\` asset; the idempotent rerun cannot verify its bytes`);
+    }
+    const checksums = assertChecksumText(readFileSync(checksumsPath, 'utf8'));
+    const digests = new Map(checksums.map(({ name }) => [name, hash(join(directory, name))]));
+    return verifyChecksumSet({ checksums, digests });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function assetNamesOf(view) {
   return (view.assets ?? []).map((asset) => (typeof asset === 'string' ? asset : asset.name));
 }
@@ -420,7 +514,10 @@ function ghDetail(result) {
 /**
  * The four-state release check. It reads GitHub through `gh` only: one
  * `gh release view` for this tag, one `gh release list` for the duplicate-commit
- * rule. `gh` and `git` are injectable, and the classification itself is
+ * rule, and — when a published release is complete — one `gh release download`
+ * followed by the release's own `SHA256SUMS` check, which is what makes the
+ * idempotent rerun a verified no-op rather than a name comparison. `gh`, `git`
+ * and the checksum verifier are injectable, and the classification itself is
  * `classifyReleaseState`, so the node test needs no network.
  */
 export function readReleaseState({
@@ -430,6 +527,7 @@ export function readReleaseState({
   root = process.cwd(),
   gh = runGh,
   git = (args) => gitText(root, args),
+  verifyChecksums = (options) => verifyPublishedReleaseChecksums(options),
 }) {
   const view = gh(['release', 'view', tag, '--repo', repo, '--json', 'isDraft,isPrerelease,tagName,assets']);
   let release = null;
@@ -442,14 +540,20 @@ export function readReleaseState({
     release = JSON.parse(view.stdout);
   }
   const classification = classifyReleaseState({ tag, release, declaredPlatforms: platforms });
-  if (classification.state === 'published' && !classification.complete) {
-    const detail = [
-      ...classification.missing.map((name) => `missing ${name}`),
-      ...classification.extra.map((name) => `unexpected ${name}`),
-    ].join(', ');
-    throw new ClientReleaseError(
-      `the published release \`${tag}\` does not match the declared asset set (${detail}); an immutable release cannot be patched in place, so withdraw it and cut a new patch version`,
-    );
+  if (classification.state === 'published') {
+    if (!classification.complete) {
+      const detail = [
+        ...classification.missing.map((name) => `missing ${name}`),
+        ...classification.extra.map((name) => `unexpected ${name}`),
+      ].join(', ');
+      throw new ClientReleaseError(
+        `the published release \`${tag}\` does not match the declared asset set (${detail}); an immutable release cannot be patched in place, so withdraw it and cut a new patch version`,
+      );
+    }
+    // A published release with a complete asset set is a green rerun only when the
+    // bytes still match the published checksums; the tag cannot move, so this is a
+    // check of the release, not of the build.
+    verifyChecksums({ repo, tag });
   }
   const listing = gh(['release', 'list', '--repo', repo, '--limit', '100', '--json', 'tagName']);
   if (listing.status !== 0) {
@@ -542,6 +646,16 @@ export async function main({
           .map((entry) => entry.name);
         assertDeclaredAssets({ version, declaredPlatforms: platforms, assetNames: names });
         log(`every declared platform (${platforms.join(', ')}) has an asset in ${options.directory ?? '.'}`);
+        return 0;
+      }
+      case 'sizes': {
+        const directory = resolve(commandRoot, options.directory ?? '.');
+        const limit = options.limit === undefined ? MAX_RELEASE_ASSET_BYTES : Number(options.limit);
+        if (!Number.isSafeInteger(limit) || limit <= 0) {
+          throw new ClientReleaseError(`\`--limit\` must be a positive integer, found \`${options.limit}\``);
+        }
+        const result = assertAssetSizes({ assets: assetSizes(directory), limit });
+        log(`${result.count} release asset(s), ${result.total} byte(s) total, each at or below ${limit} bytes`);
         return 0;
       }
       case 'checksums': {

@@ -691,6 +691,47 @@ test('#278: client-release.yml carries the Android job contract', () => {
     assert.match(android, new RegExp(`secrets\\.${secret}\\b`), `package-android must declare ${secret}`);
   }
   assert.doesNotMatch(android, /tauri android init/, 'CI never initializes the Android project');
+
+  // Technical Design §9 and ADR-0036 §8: the Rust Android targets are installed
+  // before the build. `tauri android build` does not install them itself, so a
+  // missing step would only fail when #279 first enables this leg.
+  const targets = stepSection(android, 'Add the Android Rust targets');
+  for (const target of ['aarch64-linux-android', 'armv7-linux-androideabi', 'i686-linux-android', 'x86_64-linux-android']) {
+    assert.match(targets, new RegExp(`\\b${target}\\b`), `package-android must install ${target}`);
+  }
+  assert.ok(
+    android.indexOf('Add the Android Rust targets') < android.indexOf('Build the signed Android packages'),
+    'the Rust Android targets must be installed before the Android build',
+  );
+});
+
+test('#278: client-release.yml compares its assembled and uploaded inventories', () => {
+  const workflow = read(tagEntry);
+  const assemble = jobSection(workflow, 'assemble');
+  // The declared platform list from preflight decides what must exist; deleting
+  // either call leaves only the pure functions tested, not their wiring.
+  assert.match(
+    assemble,
+    /node scripts\/assert-client-release\.mjs assets --version "\$RELEASE_VERSION" --platforms "\$DECLARED_PLATFORMS" --directory release-assets/,
+    'assemble must compare its asset set with the declared platform list',
+  );
+  assert.match(
+    assemble,
+    /node scripts\/assert-client-release\.mjs sizes --directory release-assets/,
+    'assemble must assert the 2 GiB single-file limit before upload',
+  );
+
+  const publish = jobSection(workflow, 'publish');
+  assert.match(
+    publish,
+    /node scripts\/assert-client-release\.mjs inventory --tag "\$TAG" --view uploaded-release\.json --expect draft --platforms "\$DECLARED_PLATFORMS" --checksums release\/SHA256SUMS/,
+    'publish must compare the uploaded draft with the declared platform list',
+  );
+  assert.match(
+    publish,
+    /node scripts\/assert-client-release\.mjs inventory --tag "\$TAG" --view published-release\.json --expect published --platforms "\$DECLARED_PLATFORMS" --checksums release\/SHA256SUMS/,
+    'publish must compare the published readback with the same declared list',
+  );
 });
 
 test('#278: client-release.yml proves the asset set with one checksum-derived attestation', () => {
@@ -728,13 +769,32 @@ test('#278: client-release.yml creates a draft, verifies it, flips it and reads 
   assert.match(publish, /gh release edit "\$TAG" --repo anywear-ai\/AnyWear-Client --draft=false --prerelease --latest=false/);
   assert.equal([...workflow.matchAll(/gh release edit/g)].length, 1, 'the flip is the only release edit');
   assert.doesNotMatch(workflow, /--clobber/);
-  assert.doesNotMatch(workflow, /gh release delete/);
   assert.equal([...workflow.matchAll(/isImmutable == true/g)].length, 0, 'the pipeline does not assert an administrator-only setting');
   assert.doesNotMatch(workflow, /git tag/, 'no workflow creates a tag');
 
   const readback = publish.indexOf('Verify the uploaded draft');
   const flip = publish.indexOf('gh release edit');
   assert.ok(readback >= 0 && flip > readback, 'the readback and checksum verification precede the flip');
+
+  // A release object is never deleted: the only delete path is the draft-only
+  // purge of an adopted draft's assets, and it is gated on the `draft` state.
+  assert.doesNotMatch(workflow, /gh release delete/, 'no workflow deletes a release');
+  const deletePaths = [...workflow.matchAll(/gh api\s+(?:-X|--method)[=\s]+DELETE\s+"?([^"\s]+)"?/g)].map((match) => match[1]);
+  assert.deepEqual(
+    deletePaths,
+    ['repos/anywear-ai/AnyWear-Client/releases/assets/$asset_id'],
+    'the only API delete is the draft asset purge, never a release object',
+  );
+  const adopt = stepSection(publish, 'Adopt the existing draft');
+  assert.match(adopt, /^ {8}if: needs\.preflight\.outputs\.state == 'draft'$/m, 'the purge runs only against a draft');
+  assert.match(adopt, /releases\/assets\/\$asset_id/);
+
+  // The 90-day assembled bundle is named for the tag and the run, as §7 records.
+  assert.equal(
+    [...workflow.matchAll(/^ {10}name: client-release-\$\{\{ github\.ref_name \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/gm)].length,
+    2,
+    'the producer and the consumer name the same release bundle artifact',
+  );
 });
 
 test('#278: both publication workflows carry the identical reviewed Beta constants', () => {

@@ -14,7 +14,8 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -23,6 +24,8 @@ import {
   CHECKSUM_EXCLUDED_NAMES,
   ClientReleaseError,
   FIXED_ASSET_NAMES,
+  MAX_RELEASE_ASSET_BYTES,
+  assertAssetSizes,
   assertChecksumText,
   assertCommitIsOnMain,
   assertDeclaredAssets,
@@ -30,6 +33,7 @@ import {
   assertReleaseMonotonic,
   assertReleaseNotes,
   assertReleaseView,
+  assetSizes,
   checksumEntries,
   classifyReleaseState,
   compareReleaseVersions,
@@ -44,6 +48,8 @@ import {
   platformOfAssetName,
   readReleaseState,
   releaseNotesPath,
+  verifyChecksumSet,
+  verifyPublishedReleaseChecksums,
 } from './assert-client-release.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -176,11 +182,12 @@ test('the four preflight states classify absent, draft, complete and gapped rele
   assert.deepEqual(extra.extra, ['stray.exe']);
 });
 
-test('the state reader refuses a published release with a gap and adopts a draft', () => {
+test('the state reader verifies a published release’s own checksums and adopts a draft', () => {
   const tag = 'client-v0.1.0';
   const platforms = ['windows', 'macos'];
   const complete = expectedAssetNames('0.1.0', platforms).map((name) => ({ name }));
   const git = () => 'f'.repeat(40);
+  const verified = [];
   const runtime = (view, releases = []) => ({
     gh: (args) => {
       if (args[1] === 'view') return view;
@@ -188,13 +195,19 @@ test('the state reader refuses a published release with a gap and adopts a draft
       throw new Error(`unexpected gh invocation: ${args.join(' ')}`);
     },
     git,
+    verifyChecksums: (options) => {
+      verified.push(options);
+      return 0;
+    },
   });
 
   const absent = runtime({ status: 1, stdout: '', stderr: 'release not found' });
   assert.equal(readReleaseState({ repo: 'anywear-ai/AnyWear-Client', tag, declaredPlatforms: platforms, ...absent }).state, 'absent');
+  assert.deepEqual(verified, [], 'an absent release has no checksums to verify');
 
   const draft = runtime({ status: 0, stdout: JSON.stringify({ isDraft: true, isPrerelease: true, tagName: tag, assets: [] }), stderr: '' });
   assert.equal(readReleaseState({ repo: 'anywear-ai/AnyWear-Client', tag, declaredPlatforms: platforms, ...draft }).state, 'draft');
+  assert.deepEqual(verified, [], 'a draft is adopted, not verified');
 
   const published = runtime({
     status: 0,
@@ -202,6 +215,20 @@ test('the state reader refuses a published release with a gap and adopts a draft
     stderr: '',
   });
   assert.equal(readReleaseState({ repo: 'anywear-ai/AnyWear-Client', tag, declaredPlatforms: platforms, ...published }).state, 'published');
+  assert.deepEqual(verified, [{ repo: 'anywear-ai/AnyWear-Client', tag }], 'a complete published release is verified before ending green');
+
+  const mismatch = runtime({
+    status: 0,
+    stdout: JSON.stringify({ isDraft: false, isPrerelease: true, tagName: tag, assets: complete }),
+    stderr: '',
+  });
+  mismatch.verifyChecksums = () => {
+    throw new ClientReleaseError('the published release does not match its own SHA256SUMS: `build-metadata.json` does not match SHA256SUMS');
+  };
+  assert.throws(
+    () => readReleaseState({ repo: 'anywear-ai/AnyWear-Client', tag, declaredPlatforms: platforms, ...mismatch }),
+    /does not match its own SHA256SUMS/,
+  );
 
   const gapped = runtime({
     status: 0,
@@ -251,6 +278,83 @@ test('a declared platform with no artifact stops assembly', () => {
 
   assert.deepEqual(platformAssetNames('0.1.0').android, ['AnyWear-0.1.0-android.apk', 'AnyWear-0.1.0-android.aab']);
   assert.deepEqual(FIXED_ASSET_NAMES, ['build-metadata.json', 'RELEASE-NOTES.md', 'SHA256SUMS', 'SHA256SUMS.sigstore.json']);
+});
+
+test('every release asset is below the 2 GiB single-file limit and the total is reported', () => {
+  const nearLimit = [
+    { name: 'AnyWear-0.1.0-windows-x64-setup.exe', size: 80 * 1024 * 1024 },
+    { name: 'AnyWear-0.1.0-macos-universal.dmg', size: MAX_RELEASE_ASSET_BYTES },
+  ];
+  assert.equal(MAX_RELEASE_ASSET_BYTES, 2 * 1024 * 1024 * 1024);
+  assert.deepEqual(assertAssetSizes({ assets: nearLimit }), {
+    count: 2,
+    total: 80 * 1024 * 1024 + MAX_RELEASE_ASSET_BYTES,
+  });
+  assert.deepEqual(assertAssetSizes({ assets: [{ name: 'exact.bin', size: 100 }], limit: 100 }), { count: 1, total: 100 });
+
+  assert.throws(
+    () => assertAssetSizes({ assets: [...nearLimit, { name: 'huge.exe', size: MAX_RELEASE_ASSET_BYTES + 1 }] }),
+    /`huge\.exe` is 2147483649 bytes/,
+  );
+  assert.throws(
+    () => assertAssetSizes({ assets: [{ name: 'over.bin', size: 101 }], limit: 100 }),
+    /is above the 100-byte single-file limit: `over\.bin` is 101 bytes/,
+  );
+
+  const directory = mkdtempSync(join(tmpdir(), 'client-sizes-'));
+  writeFileSync(join(directory, 'a.bin'), 'a');
+  writeFileSync(join(directory, 'b.bin'), 'bb');
+  assert.deepEqual(assertAssetSizes({ assets: assetSizes(directory) }), { count: 2, total: 3 });
+});
+
+test('the published rerun verifies the release’s own SHA256SUMS against the downloaded bytes', () => {
+  const contents = {
+    'AnyWear-0.1.0-windows-x64-setup.exe': 'windows-bytes',
+    'build-metadata.json': '{"schema_version":3}',
+  };
+  const checksums = Object.entries(contents).map(([name, text]) => ({
+    digest: createHash('sha256').update(text).digest('hex'),
+    name,
+  }));
+  const checksumText = formatChecksums(checksums);
+  const hash = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
+  const downloadWriting = (overrides = {}) => ({ directory }) => {
+    writeFileSync(join(directory, 'SHA256SUMS'), checksumText);
+    for (const [name, text] of Object.entries(contents)) {
+      writeFileSync(join(directory, name), overrides[name] ?? text);
+    }
+  };
+
+  assert.equal(
+    verifyPublishedReleaseChecksums({ repo: 'anywear-ai/AnyWear-Client', tag: 'client-v0.1.0', download: downloadWriting(), hash }),
+    2,
+    'matching bytes are the only green outcome',
+  );
+  assert.throws(
+    () => verifyPublishedReleaseChecksums({
+      repo: 'anywear-ai/AnyWear-Client',
+      tag: 'client-v0.1.0',
+      download: downloadWriting({ 'build-metadata.json': '{"schema_version":3,"tampered":true}' }),
+      hash,
+    }),
+    /`build-metadata\.json` does not match SHA256SUMS/,
+  );
+  assert.throws(
+    () => verifyPublishedReleaseChecksums({
+      repo: 'anywear-ai/AnyWear-Client',
+      tag: 'client-v0.1.0',
+      download: ({ directory }) => {
+        writeFileSync(join(directory, 'build-metadata.json'), '{"schema_version":3}');
+      },
+      hash,
+    }),
+    /has no `SHA256SUMS` asset; the idempotent rerun cannot verify its bytes/,
+  );
+
+  assert.throws(
+    () => verifyChecksumSet({ checksums, digests: new Map([['build-metadata.json', checksums[1].digest]]) }),
+    /`AnyWear-0\.1\.0-windows-x64-setup\.exe` is not part of the download/,
+  );
 });
 
 test('the checksum format accepts the canonical text and refuses each of the six rule breaks', () => {

@@ -450,10 +450,18 @@ test('the commit must be in the main history', () => {
 });
 
 test('the Android platform is declared only when the Android project is present', () => {
-  assert.deepEqual(declaredPlatforms(repositoryRoot), ['windows', 'macos'], 'the landing revision has no src-tauri/gen/android');
-  const root = mkdtempSync(join(tmpdir(), 'client-android-'));
-  mkdirSync(join(root, 'src-tauri', 'gen', 'android'), { recursive: true });
-  assert.deepEqual(declaredPlatforms(root), ['windows', 'macos', 'android']);
+  // Behaviour over the `root` parameter only: this holds on any revision, so a
+  // sibling issue that commits `src-tauri/gen/android` cannot turn it red.
+  const bare = mkdtempSync(join(tmpdir(), 'client-android-bare-'));
+  assert.deepEqual(declaredPlatforms(bare), ['windows', 'macos'], 'a root with no src-tauri/gen declares only the desktop platforms');
+
+  const generated = mkdtempSync(join(tmpdir(), 'client-android-gen-'));
+  mkdirSync(join(generated, 'src-tauri', 'gen'), { recursive: true });
+  assert.deepEqual(declaredPlatforms(generated), ['windows', 'macos'], 'src-tauri/gen without android/ is not the Android project');
+
+  const android = mkdtempSync(join(tmpdir(), 'client-android-project-'));
+  mkdirSync(join(android, 'src-tauri', 'gen', 'android'), { recursive: true });
+  assert.deepEqual(declaredPlatforms(android), ['windows', 'macos', 'android'], 'the committed Android project adds the platform');
 });
 
 test('a second release for the same commit is refused', () => {

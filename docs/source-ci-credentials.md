@@ -173,7 +173,8 @@ receives it. `scripts/source-ci-credential-boundary.mjs` therefore exports a clo
   principal;
 - a `run:` body invokes a cloud CLI (`aws`, `gcloud`, `az`, `sam`, `cdk`,
   `terraform`, `pulumi`, `eksctl`), directly or behind `sudo`, `pnpm exec`, `npx`,
-  `&` or `$()` — the packaging entry runs no cloud CLI.
+  `&` or `$()` where the substitution closes on the same body line — the packaging
+  entry runs no cloud CLI.
 
 These four packaging-entry rules read `client-release.yml` only. `release.yml` is
 the web-publication entry: it declares its own `environment:` and assumes its own

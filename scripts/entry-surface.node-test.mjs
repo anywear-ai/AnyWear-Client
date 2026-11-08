@@ -5,13 +5,13 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 // #163: the repository-side census of the entry face. Client ends this change with
-// exactly two entries — one automatic check and one publication entry that runs on
-// a merge to `main` and on a manual dispatch — one dispatch surface and one
-// activation switch, and the publication chain keeps the only AWS-credential job
-// behind the credential-free verify job with a credential-free record job after it
-// and a credential-free dispatch job after that. These are source assertions, read
-// as text with no YAML dependency, so the next change cannot drift the entry face
-// without failing `pnpm run test:run`.
+// exactly three entries — one automatic check, one tag-triggered binary publication
+// (#278) and one publication entry that runs on a merge to `main` and on a manual
+// dispatch — one dispatch surface and one activation switch, and the publication
+// chain keeps the only AWS-credential job behind the credential-free verify job with
+// a credential-free record job after it and a credential-free dispatch job after
+// that. These are source assertions, read as text with no YAML dependency, so the
+// next change cannot drift the entry face without failing `pnpm run test:run`.
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const workflowsDirectory = join(repositoryRoot, '.github', 'workflows');
@@ -22,6 +22,7 @@ const workflowFiles = readdirSync(workflowsDirectory, { withFileTypes: true })
 const read = (name) => readFileSync(join(workflowsDirectory, name), 'utf8');
 
 const automaticEntry = 'check.yml';
+const tagEntry = 'client-release.yml';
 const manualEntry = 'release.yml';
 const calledWorkflows = ['build.yml', 'test.yml', 'browser.yml', 'tauri-smoke.yml'];
 
@@ -131,22 +132,50 @@ function envSection(workflow) {
   return rest.slice(0, next < 0 ? undefined : next);
 }
 
-test('the workflow directory contains exactly the six repository workflows', () => {
-  assert.deepEqual(workflowFiles, ['browser.yml', 'build.yml', 'check.yml', 'release.yml', 'tauri-smoke.yml', 'test.yml']);
+test('the workflow directory contains exactly the seven repository workflows', () => {
+  assert.deepEqual(workflowFiles, [
+    'browser.yml',
+    'build.yml',
+    'check.yml',
+    'client-release.yml',
+    'release.yml',
+    'tauri-smoke.yml',
+    'test.yml',
+  ]);
 });
 
-test('the repository exposes exactly two entries: one automatic check and one publication entry', () => {
+test('the repository exposes exactly three entries, one per trigger class', () => {
   // An entry is a workflow with a repository event or a dispatch surface. Everything
   // else must be a called workflow, which has no entry identity of its own.
   const entries = workflowFiles.filter((name) => {
     const declared = triggers(read(name));
     return declared.some((trigger) => trigger === 'push' || trigger === 'pull_request' || trigger === 'workflow_dispatch');
   });
-  assert.deepEqual(entries, [automaticEntry, manualEntry]);
+  assert.deepEqual(entries, [automaticEntry, tagEntry, manualEntry]);
+
+  // The three classes are mutually exclusive and each is carried by exactly one
+  // workflow: `check.yml` is the only pull-request entry, `release.yml` the only
+  // manual dispatch surface, and `client-release.yml` the only tag entry (a tag
+  // trigger with no branch filter).
+  const isTagEntry = (name) => {
+    const on = onSection(read(name));
+    return /^ {4}tags:/m.test(on) && !/^ {4}branches:/m.test(on);
+  };
+  assert.deepEqual(workflowFiles.filter((name) => triggers(read(name)).includes('pull_request')), [automaticEntry]);
+  assert.deepEqual(workflowFiles.filter((name) => triggers(read(name)).includes('workflow_dispatch')), [manualEntry]);
+  assert.deepEqual(workflowFiles.filter(isTagEntry), [tagEntry]);
+  for (const name of entries) {
+    const classes = [
+      triggers(read(name)).includes('pull_request'),
+      triggers(read(name)).includes('workflow_dispatch'),
+      isTagEntry(name),
+    ].filter(Boolean).length;
+    assert.equal(classes, 1, `${name} must belong to exactly one trigger class`);
+  }
 
   // `check.yml` stays the only automatic check: it is the only workflow that runs on
   // pull requests, and the only one whose push event is a check rather than a
-  // publication.
+  // publication tag.
   const checks = workflowFiles.filter((name) => triggers(read(name)).includes('pull_request'));
   assert.deepEqual(checks, [automaticEntry]);
   assert.deepEqual(triggers(read(automaticEntry)).sort(), ['pull_request', 'push']);
@@ -500,4 +529,289 @@ test('#226: the verify checkout fetches the history the version-bump check reads
 
   // The called test workflow fetches the same way, for the same check.
   assert.match(stepSection(read('test.yml'), 'Checkout'), /^ {10}fetch-depth: 0$/m);
+});
+
+/** The job-level `permissions:` grants of one job section, as `name: level` lines. */
+function jobPermissions(section) {
+  const match = /^ {4}permissions:\n((?: {6}[a-z0-9-]+: [a-z]+(?:\n|$))+)/m.exec(section);
+  if (!match) return [];
+  return match[1].trim().split('\n').map((line) => line.trim());
+}
+
+// #278: the Client binary publication entry. The contract below is the issue's
+// acceptance list read as source: a tag-only trigger, seven jobs in order, one
+// release write and one attestation site, no cloud credential, every install
+// locked, sibling platform jobs, fail-closed credentials naming the missing
+// secret, signature verification on each platform, one checksum-derived
+// attestation, and a draft-then-flip publication that never clobbers and never
+// deletes a release.
+test('#278: client-release.yml is the tag-only binary publication entry', () => {
+  const workflow = read(tagEntry);
+  assert.deepEqual(triggers(workflow), ['push']);
+  assert.match(onSection(workflow), /^ {2}push:\n {4}tags: \['client-v\[0-9\]\*'\]$/m);
+  assert.doesNotMatch(onSection(workflow), /workflow_dispatch|branches:|paths-ignore|paths:/);
+  // GitHub does not evaluate path filters on a tag push, so none may be declared.
+  assert.doesNotMatch(workflow, /paths-ignore/);
+  assert.deepEqual(jobNames(workflow), [
+    'preflight',
+    'verify',
+    'package-windows',
+    'package-macos',
+    'package-android',
+    'assemble',
+    'publish',
+  ]);
+});
+
+test('#278: client-release.yml keeps one release write and one attestation site', () => {
+  const workflow = read(tagEntry);
+  const names = jobNames(workflow);
+  const sections = Object.fromEntries(names.map((name) => [name, jobSection(workflow, name)]));
+
+  assert.equal(
+    /^permissions:\n((?: {2}[a-z0-9-]+: [a-z]+(?:\n|$))+)/m.exec(workflow)?.[1],
+    '  contents: read\n',
+    'the workflow-level permission is exactly read-only contents',
+  );
+
+  const grants = Object.fromEntries(names.map((name) => [name, jobPermissions(sections[name])]));
+  assert.deepEqual(names.filter((name) => grants[name].includes('contents: write')), ['publish'], 'publish is the only release writer');
+  assert.deepEqual(names.filter((name) => grants[name].includes('id-token: write')), ['assemble'], 'assemble is the only OIDC holder');
+  assert.deepEqual(names.filter((name) => grants[name].includes('attestations: write')), ['assemble'], 'assemble is the only attestation writer');
+  assert.doesNotMatch(workflow, /artifact-metadata/, 'container-image metadata permission is not part of this boundary');
+});
+
+test('#278: client-release.yml holds no AWS credential, environment or switch', () => {
+  const workflow = read(tagEntry);
+  assert.doesNotMatch(workflow, /^ {4}environment:/m, 'no job declares an environment');
+  assert.doesNotMatch(workflow, /configure-aws-credentials/);
+  assert.doesNotMatch(workflow, /secrets: inherit/);
+  assert.doesNotMatch(workflow, /\baws\b/, 'no step runs the AWS CLI');
+  assert.doesNotMatch(workflow, /\bENABLE_[A-Z0-9_]+\b/, 'the binary publication has no activation switch');
+  // `preflight` calculates the declared platform list; it never reads a secret, so
+  // missing signing credentials surface in the platform job that needs them.
+  assert.doesNotMatch(jobSection(workflow, 'preflight'), /secrets\./);
+});
+
+test('#278: client-release.yml installs from the lockfile in every installing job', () => {
+  const workflow = read(tagEntry);
+  assert.deepEqual(
+    [...workflow.matchAll(/^ {8}run: pnpm install.*$/gm)].map((match) => match[0]),
+    [
+      '        run: pnpm install --frozen-lockfile',
+      '        run: pnpm install --frozen-lockfile',
+      '        run: pnpm install --frozen-lockfile',
+      '        run: pnpm install --frozen-lockfile',
+    ],
+    'verify and the three package jobs install exactly the committed lockfile',
+  );
+  assert.doesNotMatch(workflow, /--no-frozen-lockfile/);
+  assert.doesNotMatch(workflow, /pnpm install(?! --frozen-lockfile)/, 'a bare `pnpm install` is not allowed');
+});
+
+test('#278: client-release.yml keeps the three platform jobs independent', () => {
+  const workflow = read(tagEntry);
+  const platformJobs = ['package-windows', 'package-macos', 'package-android'];
+  for (const name of platformJobs) {
+    const section = jobSection(workflow, name);
+    assert.match(section, /^ {4}needs: \[preflight\]$/m, `${name} depends on preflight only`);
+    assert.doesNotMatch(section, /^ {4}strategy:/m, `${name} is a job, not a matrix member`);
+    for (const other of platformJobs.filter((candidate) => candidate !== name)) {
+      assert.ok(!section.includes(other), `${name} must not reference ${other}`);
+    }
+  }
+  assert.match(
+    jobSection(workflow, 'assemble'),
+    /^ {4}needs: \[preflight, verify, package-windows, package-macos, package-android\]$/m,
+    'assemble is the first job that waits for every platform',
+  );
+});
+
+test('#278: client-release.yml fails closed with the named platform credential error', () => {
+  const workflow = read(tagEntry);
+  const sites = {
+    'package-windows': {
+      platform: 'windows',
+      secrets: ['WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD'],
+      step: 'Require the Windows signing credentials',
+    },
+    'package-macos': {
+      platform: 'macos',
+      secrets: ['APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_API_KEY_P8'],
+      step: 'Require the macOS signing credentials',
+    },
+    'package-android': {
+      platform: 'android',
+      secrets: ['ANDROID_KEY_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD'],
+      step: 'Require the Android signing credentials',
+    },
+  };
+  for (const [job, site] of Object.entries(sites)) {
+    const section = jobSection(workflow, job);
+    assert.equal(
+      [...section.matchAll(/^ {6}- name: (.+)$/gm)][0]?.[1],
+      site.step,
+      `${job} must check its credentials before anything else`,
+    );
+    const credentialStep = stepSection(section, site.step);
+    for (const secret of site.secrets) {
+      assert.match(credentialStep, new RegExp(`\\$\\{\\{ secrets\\.${secret} \\}\\}`), `${credentialStep.split('\n')[0]} must read ${secret}`);
+    }
+    const article = 'a';
+    assert.ok(
+      credentialStep.includes(`is not configured; ${article} ${site.platform} release artifact cannot be produced`),
+      `${job} must fail with the named ${site.platform} message`,
+    );
+  }
+});
+
+test('#278: client-release.yml verifies every signature before assembly', () => {
+  const workflow = read(tagEntry);
+  const windows = stepSection(jobSection(workflow, 'package-windows'), 'Verify the Windows signature');
+  assert.match(windows, /Get-AuthenticodeSignature/);
+  assert.match(windows, /\.Status -ne 'Valid'/);
+
+  const macOS = stepSection(jobSection(workflow, 'package-macos'), 'Verify the macOS signature');
+  assert.match(macOS, /codesign -vvv --strict/);
+  assert.match(macOS, /spctl -a/);
+
+  const android = stepSection(jobSection(workflow, 'package-android'), 'Verify the Android signatures');
+  assert.match(android, /apksigner verify --print-certs/);
+});
+
+test('#278: client-release.yml carries the Android job contract', () => {
+  const android = jobSection(read(tagEntry), 'package-android');
+  assert.match(android, /^ {4}needs: \[preflight\]$/m);
+  assert.match(android, /needs\.preflight\.outputs\.android == 'true'/);
+  assert.match(android, /pnpm exec tauri android build --apk --aab/);
+  assert.match(android, /apksigner verify --print-certs/);
+  assert.match(android, /client-version\.json/);
+  assert.match(android, /versionCode/);
+  for (const secret of ['ANDROID_KEY_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD']) {
+    assert.match(android, new RegExp(`secrets\\.${secret}\\b`), `package-android must declare ${secret}`);
+  }
+  assert.doesNotMatch(android, /tauri android init/, 'CI never initializes the Android project');
+
+  // Technical Design §9 and ADR-0036 §8: the Rust Android targets are installed
+  // before the build. `tauri android build` does not install them itself, so a
+  // missing step would only fail when #279 first enables this leg.
+  const targets = stepSection(android, 'Add the Android Rust targets');
+  for (const target of ['aarch64-linux-android', 'armv7-linux-androideabi', 'i686-linux-android', 'x86_64-linux-android']) {
+    assert.match(targets, new RegExp(`\\b${target}\\b`), `package-android must install ${target}`);
+  }
+  assert.ok(
+    android.indexOf('Add the Android Rust targets') < android.indexOf('Build the signed Android packages'),
+    'the Rust Android targets must be installed before the Android build',
+  );
+});
+
+test('#278: client-release.yml compares its assembled and uploaded inventories', () => {
+  const workflow = read(tagEntry);
+  const assemble = jobSection(workflow, 'assemble');
+  // The declared platform list from preflight decides what must exist; deleting
+  // either call leaves only the pure functions tested, not their wiring.
+  assert.match(
+    assemble,
+    /node scripts\/assert-client-release\.mjs assets --version "\$RELEASE_VERSION" --platforms "\$DECLARED_PLATFORMS" --directory release-assets/,
+    'assemble must compare its asset set with the declared platform list',
+  );
+  assert.match(
+    assemble,
+    /node scripts\/assert-client-release\.mjs sizes --directory release-assets/,
+    'assemble must assert the 2 GiB single-file limit before upload',
+  );
+
+  const publish = jobSection(workflow, 'publish');
+  assert.match(
+    publish,
+    /node scripts\/assert-client-release\.mjs inventory --tag "\$TAG" --view uploaded-release\.json --expect draft --platforms "\$DECLARED_PLATFORMS" --checksums release\/SHA256SUMS/,
+    'publish must compare the uploaded draft with the declared platform list',
+  );
+  assert.match(
+    publish,
+    /node scripts\/assert-client-release\.mjs inventory --tag "\$TAG" --view published-release\.json --expect published --platforms "\$DECLARED_PLATFORMS" --checksums release\/SHA256SUMS/,
+    'publish must compare the published readback with the same declared list',
+  );
+});
+
+test('#278: client-release.yml proves the asset set with one checksum-derived attestation', () => {
+  const workflow = read(tagEntry);
+  const assemble = jobSection(workflow, 'assemble');
+  assert.equal([...assemble.matchAll(/uses: actions\/attest@v4/g)].length, 1, 'exactly one attestation action');
+  assert.match(assemble, /^ {10}subject-checksums: SHA256SUMS$/m);
+  assert.match(assemble, /cp "\$\{\{ steps\.attest\.outputs\.bundle-path \}\}" SHA256SUMS\.sigstore\.json/);
+  assert.doesNotMatch(workflow, /attest-build-provenance/);
+  // Coreutils text mode, `LC_ALL=C sort`, and never the binary flag.
+  assert.match(assemble, /sha256sum AnyWear-\* build-metadata\.json RELEASE-NOTES\.md \| LC_ALL=C sort > \.\.\/SHA256SUMS/);
+  assert.doesNotMatch(assemble, /sha256sum -b/);
+});
+
+test('#278: client-release.yml declares the assemble condition with the Android branch', () => {
+  const assemble = jobSection(read(tagEntry), 'assemble');
+  const condition = /^ {4}if: \$\{\{ ([\s\S]*?) \}\}$/m.exec(assemble)?.[1];
+  assert.ok(condition, 'assemble must declare its condition');
+  assert.equal(
+    condition.replace(/\s+/g, ' ').trim(),
+    "!cancelled() && needs.verify.result == 'success' "
+    + "&& needs.package-windows.result == 'success' "
+    + "&& needs.package-macos.result == 'success' "
+    + "&& (needs.package-android.result == 'success' || needs.package-android.result == 'skipped')",
+    'a declared platform that did not succeed must stop assembly',
+  );
+});
+
+test('#278: client-release.yml creates a draft, verifies it, flips it and reads it back', () => {
+  const workflow = read(tagEntry);
+  const publish = jobSection(workflow, 'publish');
+  assert.match(publish, /gh release create "\$TAG" --repo anywear-ai\/AnyWear-Client --verify-tag --draft --prerelease --latest=false/);
+  assert.match(publish, /gh release upload "\$TAG"/);
+  assert.match(publish, /sha256sum -c SHA256SUMS/);
+  assert.match(publish, /gh release edit "\$TAG" --repo anywear-ai\/AnyWear-Client --draft=false --prerelease --latest=false/);
+  assert.equal([...workflow.matchAll(/gh release edit/g)].length, 1, 'the flip is the only release edit');
+  assert.doesNotMatch(workflow, /--clobber/);
+  assert.equal([...workflow.matchAll(/isImmutable == true/g)].length, 0, 'the pipeline does not assert an administrator-only setting');
+  assert.doesNotMatch(workflow, /git tag/, 'no workflow creates a tag');
+
+  const readback = publish.indexOf('Verify the uploaded draft');
+  const flip = publish.indexOf('gh release edit');
+  assert.ok(readback >= 0 && flip > readback, 'the readback and checksum verification precede the flip');
+
+  // A release object is never deleted: the only delete path is the draft-only
+  // purge of an adopted draft's assets, and it is gated on the `draft` state.
+  assert.doesNotMatch(workflow, /gh release delete/, 'no workflow deletes a release');
+  const deletePaths = [...workflow.matchAll(/gh api\s+(?:-X|--method)[=\s]+DELETE\s+"?([^"\s]+)"?/g)].map((match) => match[1]);
+  assert.deepEqual(
+    deletePaths,
+    ['repos/anywear-ai/AnyWear-Client/releases/assets/$asset_id'],
+    'the only API delete is the draft asset purge, never a release object',
+  );
+  const adopt = stepSection(publish, 'Adopt the existing draft');
+  assert.match(adopt, /^ {8}if: needs\.preflight\.outputs\.state == 'draft'$/m, 'the purge runs only against a draft');
+  assert.match(adopt, /releases\/assets\/\$asset_id/);
+
+  // The 90-day assembled bundle is named for the tag and the run, as §7 records.
+  assert.equal(
+    [...workflow.matchAll(/^ {10}name: client-release-\$\{\{ github\.ref_name \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/gm)].length,
+    2,
+    'the producer and the consumer name the same release bundle artifact',
+  );
+});
+
+test('#278: both publication workflows carry the identical reviewed Beta constants', () => {
+  const constants = (name) => ['BETA_API_BASE_URL', 'BETA_COGNITO_USER_POOL_ID', 'BETA_COGNITO_CLIENT_ID'].map((constant) => {
+    const line = new RegExp(`^ {2}${constant}: '[^']*'$`, 'm').exec(read(name))?.[0];
+    assert.ok(line, `${name} must declare ${constant} as a reviewed workflow constant`);
+    return line;
+  });
+  assert.deepEqual(constants(tagEntry), constants(manualEntry), 'the two publication entries must compile the same interface');
+});
+
+test('#278: client-release.yml compiles the interface into every package job', () => {
+  const workflow = read(tagEntry);
+  for (const job of ['package-windows', 'package-macos', 'package-android']) {
+    const section = jobSection(workflow, job);
+    assert.match(section, /^ {10}VITE_API_BASE_URL: \$\{\{ env\.BETA_API_BASE_URL \}\}$/m, `${job} must compile the constants`);
+    assert.match(section, /^ {10}VITE_COGNITO_USER_POOL_ID: \$\{\{ env\.BETA_COGNITO_USER_POOL_ID \}\}$/m, `${job} must compile the constants`);
+    assert.match(section, /^ {10}VITE_COGNITO_CLIENT_ID: \$\{\{ env\.BETA_COGNITO_CLIENT_ID \}\}$/m, `${job} must compile the constants`);
+  }
 });

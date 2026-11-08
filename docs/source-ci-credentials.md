@@ -9,7 +9,11 @@ permission:
 | `build.yml` → `build` | `AnyWear-Service-API` | `contents: read` | Fetches the published OpenAPI specification the generated client comes from |
 | `release.yml` → `handoff` | `AnyWear-E2E` | `actions: write` | Dispatches the post-publication `smoke` run |
 
-This note records what each token may reach, why, and what happens when one is
+The tagged binary publication adds nine repository-scoped signing secrets, all
+private key material, and no external GitHub App token. Each is read by exactly one
+platform job in `client-release.yml` (§ [Signing secrets](#signing-secrets)).
+
+This note records what each credential may reach, why, and what happens when one is
 unavailable.
 
 ## What the source-CI credential is for
@@ -99,6 +103,52 @@ role. The one App token the chain mints is the `handoff` token above. The checko
 rules in this note — the full-commit specification pin, the `api` path, the
 generated token, the default credential everywhere else — still describe
 `build.yml` only, because it is the only site that checks another repository out.
+
+## Signing secrets
+
+`.github/workflows/client-release.yml` publishes signed platform binaries. It
+holds nine repository-scoped secrets, all private key material, and each is read by
+exactly one job:
+
+| Secret | Platform | Form | Only referencing job |
+| --- | --- | --- | --- |
+| `WINDOWS_CERTIFICATE` | Windows | base64-encoded OV code-signing `.pfx` | `package-windows` |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Windows | `.pfx` export password | `package-windows` |
+| `APPLE_CERTIFICATE` | macOS | base64-encoded Developer ID Application `.p12` | `package-macos` |
+| `APPLE_CERTIFICATE_PASSWORD` | macOS | `.p12` password | `package-macos` |
+| `APPLE_API_KEY_P8` | macOS | base64-encoded App Store Connect API `.p8` | `package-macos` |
+| `ANDROID_KEY_BASE64` | Android | base64-encoded upload keystore | `package-android` |
+| `ANDROID_KEYSTORE_PASSWORD` | Android | keystore password | `package-android` |
+| `ANDROID_KEY_ALIAS` | Android | key alias | `package-android` |
+| `ANDROID_KEY_PASSWORD` | Android | key password | `package-android` |
+
+Nothing else is a secret. `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
+`APPLE_API_ISSUER`, `APPLE_API_KEY`, the Windows timestamp URL and the three
+`BETA_*` interface constants are reviewed workflow constants, exactly like the
+interface constants in `release.yml`. The macOS ephemeral keychain password is
+generated per run with `openssl rand -hex 32` and is never configured.
+
+The boundary is source-level and enforced at review time, because GitHub scopes a
+repository secret to the repository, not to a job: any job that references a secret
+receives it. `scripts/source-ci-credential-boundary.mjs` therefore exports a closed
+`signingSites` table (job → the names that job may reference) and fails
+`pnpm run test:run` when:
+
+- a signing name appears in any job other than its designated platform job, in
+  either a `with:` or an `env:` value — Tauri reads `APPLE_*` and the Windows
+  certificate through the environment, so `env:` is scanned like `with:`;
+- a signing name appears in any workflow other than `client-release.yml`;
+- a job declares a write permission outside the named job that holds it: only
+  `client-release.yml:publish` holds `contents: write`, only
+  `client-release.yml:assemble` holds `id-token: write` and `attestations: write`,
+  and `release.yml:deploy` keeps the `id-token: write` it already had.
+
+`tokenSites` stays at exactly two: the tagged binary publication mints no App
+token, dispatches nothing and runs no cloud CLI. `preflight` references no secret at
+all, so a missing signing credential cannot fail it; each platform job checks its
+own names as its first step and fails closed with
+`::error::<SECRET_NAME> is not configured; a <platform> release artifact cannot be produced`
+before compiling. An unsigned installer is never uploaded to a released page.
 
 ## Caller secret mapping
 

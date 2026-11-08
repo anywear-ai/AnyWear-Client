@@ -51,6 +51,40 @@ export const tokenSites = [
 
 const specificationSite = tokenSites.find((site) => site.readsSpecification);
 
+/**
+ * #278: the nine signing secrets, each closed to the one platform job that reads
+ * it. GitHub scopes a repository secret to the repository, not to a job, so this
+ * table is the source-level boundary: a reference from another job (or from any
+ * other workflow) fails `pnpm run test:run` instead of widening what a tag run can
+ * read. The workflow that may carry them is named once, so the closed table cannot
+ * be satisfied by a same-named job in a different workflow.
+ */
+export const signingSites = {
+  'package-windows': ['WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD'],
+  'package-macos': ['APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_API_KEY_P8'],
+  'package-android': ['ANDROID_KEY_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD'],
+};
+
+/** The only workflow whose jobs may reference a signing secret. */
+export const signingWorkflow = 'client-release.yml';
+
+/**
+ * #278: the write permissions a job-level `permissions:` block may grant, each
+ * closed to the named job that holds it. `contents: read` is allowed on any job;
+ * `release.yml:deploy` already holds `id-token: write` for its AWS boundary and is
+ * named here rather than exempted implicitly.
+ */
+export const jobPermissionSites = {
+  'client-release.yml:publish': ['contents: write'],
+  'client-release.yml:assemble': ['id-token: write', 'attestations: write'],
+  'release.yml:deploy': ['id-token: write'],
+};
+
+/** Every signing secret name, and the job each is closed to. */
+export const signingSecretSites = new Map(
+  Object.entries(signingSites).flatMap(([job, names]) => names.map((name) => [name, job])),
+);
+
 export const sourceCiCredentialBoundary = {
   // The App-token action. Each site pins its own line of it by commit.
   tokenAction: {
@@ -397,8 +431,20 @@ export function parseWorkflow(text, file) {
 
     if (entry.key !== 'jobs') continue;
     for (const job of entriesAt(entry.block ?? [], 0, 2)) {
-      workflow.jobs.push({ id: job.key, number: job.number, workflow: workflow.file });
       const jobEntries = entriesAt(job.block ?? [], 0, 4);
+      const permissionsEntry = jobEntries.find((jobEntry) => jobEntry.key === 'permissions');
+      const jobEnvEntry = jobEntries.find((jobEntry) => jobEntry.key === 'env');
+      workflow.jobs.push({
+        id: job.key,
+        number: job.number,
+        workflow: workflow.file,
+        // The job-level permission grants and environment, so the boundary can
+        // confine a write permission and scan a value that every step inherits.
+        permissions: permissionsEntry
+          ? entryValues(entriesAt(permissionsEntry.block ?? [], 0, 6))
+          : undefined,
+        env: jobEnvEntry ? entryValues(entriesAt(jobEnvEntry.block ?? [], 0, 6)) : undefined,
+      });
       const uses = jobEntries.find((jobEntry) => jobEntry.key === 'uses');
       if (uses) {
         const secrets = jobEntries.find((jobEntry) => jobEntry.key === 'secrets');
@@ -420,6 +466,7 @@ export function parseWorkflow(text, file) {
       for (const step of stepEntries(stepsEntry.block, stepsEntry.block.indexOf(firstStep))) {
         const fields = stepFields(step);
         const withLine = step.options.find((line) => line.text === 'with:');
+        const envLine = step.options.find((line) => line.text === 'env:');
         steps.push({
           file: workflow.file,
           number: step.number,
@@ -428,6 +475,9 @@ export function parseWorkflow(text, file) {
           id: fields.get('id') ?? '',
           uses: fields.get('uses') ?? '',
           with: withLine ? entryValues(entriesAt(entryLines(step.options, step.options.indexOf(withLine)), 0, withLine.indent + 2)) : null,
+          // Tauri reads its signing material through the environment, so the
+          // secret scan covers `env:` as well as `with:`.
+          env: envLine ? entryValues(entriesAt(entryLines(step.options, step.options.indexOf(envLine)), 0, envLine.indent + 2)) : null,
         });
       }
     }
@@ -463,6 +513,36 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
   const credentialWorkflow = `${sourceCiCredentialBoundary.secretCallerJob}.yml`;
   const declaredSpecification = submoduleRepositories.get(sourceCiCredentialBoundary.specificationPath);
   const specificationOwner = declaredSpecification ? declaredSpecification.replace(/\/.*$/, '') : undefined;
+
+  /** A signing secret's only permitted site: the named job of the named workflow. */
+  const signingViolation = (file, job, secret, location) => {
+    const siteJob = signingSecretSites.get(secret);
+    if (siteJob === undefined) return undefined;
+    if (file === signingWorkflow && job === siteJob) return undefined;
+    return `${location} reads \`secrets.${secret}\`, which only \`${signingWorkflow}:${siteJob}\` may reference; signing is isolated per platform`;
+  };
+
+  /** A secret read outside both the App-token boundary and the signing table. */
+  const outsideBoundary = (file, job, secret, location) => {
+    if (signingSecretSites.has(secret)) return signingViolation(file, job, secret, location);
+    return `${location} reads \`secrets.${secret}\`, which is outside the credential boundary`;
+  };
+
+  /** A job-level write permission, confined to the job that holds it. */
+  const permissionViolation = (file, job, permission) => {
+    if (permission === 'contents: read') return undefined;
+    const sites = Object.entries(jobPermissionSites)
+      .filter(([, permissions]) => permissions.includes(permission))
+      .map(([site]) => site);
+    if (sites.length === 0) {
+      return `job \`${job}\` grants \`${permission}\`, which is not a reviewed job permission; only \`contents: write\` (\`client-release.yml:publish\`), \`id-token: write\` (\`client-release.yml:assemble\`, \`release.yml:deploy\`) and \`attestations: write\` (\`client-release.yml:assemble\`) are allowed`;
+    }
+    if (!sites.includes(`${file}:${job}`)) {
+      return `job \`${job}\` grants \`${permission}\`, which only ${sites.map((site) => `\`${site}\``).join(' and ')} may hold`;
+    }
+    return undefined;
+  };
+
   for (const { workflow } of documents) {
     if (!workflow.permissions) {
       violations.push(violation(workflow.file, 1, 'workflow must declare `permissions: contents: read`'));
@@ -472,6 +552,22 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
       const grants = [...workflow.permissions.grants.entries()];
       if (grants.length !== 1 || grants[0][0] !== 'contents' || grants[0][1] !== 'read') {
         violations.push(violation(workflow.file, workflow.permissions.number, `workflow permissions must be exactly \`contents: read\`, found ${JSON.stringify(Object.fromEntries(grants))}`));
+      }
+    }
+
+    // A job-level permission grant is confined to the named job that holds it, and
+    // a job-level `env:` value is scanned exactly like a step-level `env:` value:
+    // every step in the job inherits it.
+    for (const job of workflow.jobs) {
+      for (const [name, value] of job.permissions ?? []) {
+        const message = permissionViolation(workflow.file, job.id, `${name}: ${value}`);
+        if (message !== undefined) violations.push(violation(workflow.file, job.number, message));
+      }
+      for (const [name, value] of job.env ?? []) {
+        for (const secret of secretReferences(value)) {
+          const message = outsideBoundary(workflow.file, job.id, secret, `job \`${job.id}\` env \`${name}\``);
+          if (message !== undefined) violations.push(violation(workflow.file, job.number, message));
+        }
       }
     }
 
@@ -528,6 +624,14 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
   const seenSites = new Set();
 
   for (const step of steps) {
+    // Tauri reads `APPLE_*` and the Windows certificate through the environment,
+    // so a step-level `env:` value is governed exactly like a `with:` value.
+    for (const [name, value] of step.env ?? []) {
+      for (const secret of secretReferences(value)) {
+        const message = outsideBoundary(step.file, step.job, secret, `step \`${step.name}\` env \`${name}\``);
+        if (message !== undefined) violations.push(violation(step.file, step.number, message));
+      }
+    }
     const tokenActionRef = tokenStepPattern.exec(step.uses);
     if (tokenActionRef) {
       // A token step is legal only in one of the two named jobs. Widening "any

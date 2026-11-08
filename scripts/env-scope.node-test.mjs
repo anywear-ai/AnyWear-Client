@@ -46,6 +46,22 @@ const REPOSITORY_SCOPED = {
   secrets: [
     // Repository-scoped: App private key used only by the API-spec token step; resolvable before any environment exists.
     'APP_PRIVATE_KEY',
+    // Repository-scoped: the Windows OV code-signing PFX (base64) and its export
+    // password; read only by `package-windows` in `client-release.yml`.
+    'WINDOWS_CERTIFICATE',
+    'WINDOWS_CERTIFICATE_PASSWORD',
+    // Repository-scoped: the macOS Developer ID Application `.p12` (base64), its
+    // password and the App Store Connect API `.p8` (base64); read only by
+    // `package-macos` in `client-release.yml`.
+    'APPLE_CERTIFICATE',
+    'APPLE_CERTIFICATE_PASSWORD',
+    'APPLE_API_KEY_P8',
+    // Repository-scoped: the Android upload keystore (base64), its password, key
+    // alias and key password; read only by `package-android` in `client-release.yml`.
+    'ANDROID_KEY_BASE64',
+    'ANDROID_KEYSTORE_PASSWORD',
+    'ANDROID_KEY_ALIAS',
+    'ANDROID_KEY_PASSWORD',
   ],
 };
 
@@ -233,4 +249,44 @@ test('the automatic entry stays automatic and the publication entry stays the on
   const push = on.slice(pushStart + '  push:\n'.length, dispatchAt);
   assert.match(push, /^ {4}branches: \[main\]$/m);
   assert.match(push, /^ {4}paths-ignore:\n {6}- '\*\*\/\*\.md'$/m);
+});
+
+// #278: the nine signing secrets are repository-scoped, and each is read by one
+// platform job only. GitHub does not scope a repository secret to a job at runtime,
+// so this source allowlist is the review-time boundary: an unreviewed reference in
+// another job fails `pnpm run test:run` instead of silently widening the blast
+// radius at the next tag.
+const SIGNING_SECRET_SITES = {
+  WINDOWS_CERTIFICATE: 'package-windows',
+  WINDOWS_CERTIFICATE_PASSWORD: 'package-windows',
+  APPLE_CERTIFICATE: 'package-macos',
+  APPLE_CERTIFICATE_PASSWORD: 'package-macos',
+  APPLE_API_KEY_P8: 'package-macos',
+  ANDROID_KEY_BASE64: 'package-android',
+  ANDROID_KEYSTORE_PASSWORD: 'package-android',
+  ANDROID_KEY_ALIAS: 'package-android',
+  ANDROID_KEY_PASSWORD: 'package-android',
+};
+
+test('#278: each signing secret is read only by its designated platform job', () => {
+  const jobs = jobEntries(read('client-release.yml'));
+  const designatedJobs = new Set(Object.values(SIGNING_SECRET_SITES));
+  for (const [secret, site] of Object.entries(SIGNING_SECRET_SITES)) {
+    assert.ok(REPOSITORY_SCOPED.secrets.includes(secret), `${secret} must be allowlisted as repository-scoped`);
+    const reference = new RegExp(`\\$\\{\\{\\s*secrets\\.${secret}\\s*\\}\\}`);
+    const holders = jobs.filter((job) => reference.test(job.section)).map((job) => job.name);
+    assert.deepEqual(holders, [site], `${secret} may be read only by ${site}`);
+  }
+
+  // The other four jobs are denied every signing name in source; `preflight` in
+  // particular never reads a secret, so missing credentials cannot fail it.
+  const denied = jobs.filter((job) => !designatedJobs.has(job.name));
+  assert.deepEqual(denied.map((job) => job.name), ['preflight', 'verify', 'assemble', 'publish']);
+  for (const job of denied) {
+    assert.doesNotMatch(job.section, /secrets\./, `${job.name} must not reference any secret`);
+  }
+
+  // The environment posture is unchanged: no signing secret needs an environment.
+  assert.deepEqual(ENVIRONMENT_SCOPED, []);
+  assert.deepEqual(REPOSITORY_SCOPED.secrets.length, 10, 'the app key plus the nine signing secrets');
 });

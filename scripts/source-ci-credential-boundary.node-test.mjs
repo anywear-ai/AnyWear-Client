@@ -11,10 +11,14 @@ import { resolve, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
+  jobPermissionSites,
   parseGitmodules,
   parseIndexGitlink,
   parseWorkflow,
   readSubmoduleRevision,
+  signingSecretSites,
+  signingSites,
+  signingWorkflow,
   sourceCiCredentialBoundary,
   sourceCiCredentialBoundaryWith,
   specificationRepositorySlug,
@@ -26,7 +30,7 @@ import {
 const repositoryRoot = new URL('../', import.meta.url);
 const workflowsDirectory = new URL('.github/workflows/', repositoryRoot);
 const gitmodulesPath = new URL('.gitmodules', repositoryRoot);
-const workflowFiles = ['build.yml', 'test.yml', 'browser.yml', 'check.yml', 'release.yml', 'tauri-smoke.yml'];
+const workflowFiles = ['build.yml', 'test.yml', 'browser.yml', 'check.yml', 'client-release.yml', 'release.yml', 'tauri-smoke.yml'];
 const tokenActionOf = (site) => `${sourceCiCredentialBoundary.tokenAction.repository}@${site.ref}`;
 
 // The revision the specification checkout must pin, read from the `api` submodule's
@@ -84,6 +88,87 @@ function clientCheckoutOf(documents, file) {
 
 test('checked-in Client source workflows stay inside the credential boundary', async () => {
   assertWithinBoundary(await repositoryWorkflows());
+});
+
+// #278: the nine signing secrets are closed to their platform jobs in both
+// `with:` and `env:`. Tauri reads its signing material through the environment,
+// which was a blind spot before this change.
+test('#278: the signing secrets are closed to their platform jobs and scanned in env', async () => {
+  const { documents } = await repositoryWorkflows();
+  const clientRelease = documentOf(documents, signingWorkflow);
+
+  for (const [job, names] of Object.entries(signingSites)) {
+    for (const name of names) {
+      const reference = new RegExp(`\\$\\{\\{\\s*secrets\\.${name}\\s*\\}\\}`);
+      const holders = [...new Set(clientRelease.steps
+        .filter((step) => [...(step.env ?? new Map()).values()].some((value) => reference.test(value)))
+        .map((step) => step.job))];
+      assert.deepEqual(holders, [job], `${name} may be read only by ${job}`);
+      assert.equal(signingSecretSites.get(name), job);
+    }
+  }
+
+  // A step-level env read in the wrong job names the only allowed site.
+  for (const [job, secret, expected] of [
+    ['package-macos', 'WINDOWS_CERTIFICATE', /step `Setup Node` env `EXTRA` reads `secrets\.WINDOWS_CERTIFICATE`, which only `client-release\.yml:package-windows` may reference/],
+    ['preflight', 'APPLE_CERTIFICATE', /step `Setup Node` env `EXTRA` reads `secrets\.APPLE_CERTIFICATE`, which only `client-release\.yml:package-macos` may reference/],
+  ]) {
+    const workflows = await repositoryWorkflows();
+    const step = documentOf(workflows.documents, signingWorkflow).steps
+      .find((candidate) => candidate.job === job && candidate.uses === 'actions/setup-node@v4');
+    assert.ok(step, `expected a Setup Node step in ${job}`);
+    step.env = new Map([['EXTRA', `\${{ secrets.${secret} }}`]]);
+    assert.throws(() => assertWithinBoundary(workflows), expected, `expected ${secret} in ${job} to be rejected`);
+  }
+
+  // A job-level env read is inherited by every step, so it is scanned too.
+  const jobEnv = await repositoryWorkflows();
+  const verify = documentOf(jobEnv.documents, signingWorkflow).workflow.jobs.find((job) => job.id === 'verify');
+  verify.env = new Map([['EXTRA', '${{ secrets.ANDROID_KEY_ALIAS }}']]);
+  assert.throws(
+    () => assertWithinBoundary(jobEnv),
+    /job `verify` env `EXTRA` reads `secrets\.ANDROID_KEY_ALIAS`, which only `client-release\.yml:package-android` may reference/,
+  );
+
+  // A reference from another workflow is refused even when the job name matches a
+  // signing site: the closed table names its workflow.
+  const otherWorkflow = await repositoryWorkflows();
+  documentOf(otherWorkflow.documents, 'release.yml').steps
+    .find((step) => step.job === 'record' && step.uses === 'actions/setup-node@v4')
+    .env = new Map([['EXTRA', '${{ secrets.WINDOWS_CERTIFICATE }}']]);
+  assert.throws(
+    () => assertWithinBoundary(otherWorkflow),
+    /step `Setup Node` env `EXTRA` reads `secrets\.WINDOWS_CERTIFICATE`, which only `client-release\.yml:package-windows` may reference/,
+  );
+});
+
+// #278: a job-level write permission is confined to the job that holds it. The
+// pipeline has one release writer and one attestation site; a new write grant in
+// any other job fails here instead of widening what a tag run can do.
+test('#278: job-level write permissions are confined to their named jobs', async () => {
+  for (const [file, job, permission, expected] of [
+    ['client-release.yml', 'publish', ['id-token', 'write'], /job `publish` grants `id-token: write`, which only `client-release\.yml:assemble` and `release\.yml:deploy` may hold/],
+    ['client-release.yml', 'assemble', ['contents', 'write'], /job `assemble` grants `contents: write`, which only `client-release\.yml:publish` may hold/],
+    ['client-release.yml', 'assemble', ['artifact-metadata', 'write'], /job `assemble` grants `artifact-metadata: write`, which is not a reviewed job permission/],
+    ['client-release.yml', 'verify', ['contents', 'write'], /job `verify` grants `contents: write`, which only `client-release\.yml:publish` may hold/],
+    ['build.yml', 'rust-check', ['id-token', 'write'], /job `rust-check` grants `id-token: write`, which only `client-release\.yml:assemble` and `release\.yml:deploy` may hold/],
+  ]) {
+    const workflows = await repositoryWorkflows();
+    const target = documentOf(workflows.documents, file).workflow.jobs.find((candidate) => candidate.id === job);
+    assert.ok(target, `expected the ${job} job in ${file}`);
+    target.permissions = new Map([...(target.permissions ?? []), permission]);
+    assert.throws(
+      () => assertWithinBoundary(workflows),
+      expected,
+      `expected ${permission.join(': ')} in ${file}:${job} to be rejected`,
+    );
+  }
+
+  assert.deepEqual(Object.keys(jobPermissionSites).sort(), [
+    'client-release.yml:assemble',
+    'client-release.yml:publish',
+    'release.yml:deploy',
+  ]);
 });
 
 test('exactly two App-token steps reach exactly one repository and one permission each', async () => {

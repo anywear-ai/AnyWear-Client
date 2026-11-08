@@ -1,0 +1,649 @@
+name: Publish Client Release
+
+# #278: the Client binary publication entry. A lightweight `client-vX.Y.Z` tag
+# starts it and nothing else does; there is no manual dispatch surface. The seven
+# jobs separate identity, verification, per-platform signing, assembly and the
+# one release write, so no job holds both a signing key and a release write:
+#
+#   preflight        tag identity and the four-state release check; reads no secret
+#   verify           `test:run` and `test:browser` on the tagged revision
+#   package-windows  OV PFX signing, verified with Get-AuthenticodeSignature
+#   package-macos    Developer ID signing and notarization, codesign + spctl
+#   package-android  keystore signing when src-tauri/gen/android exists (#279)
+#   assemble         canonical names, SHA256SUMS, one Sigstore attestation
+#   publish          the repository's only release write: draft, verify, flip
+#
+# The workflow holds no AWS principal, declares no `environment:`, runs no cloud
+# CLI and mints no external GitHub App token. Signing is isolated per platform:
+# each platform job is the only job that may reference its own secrets, and
+# `scripts/source-ci-credential-boundary.mjs` fails `pnpm run test:run` for any
+# reference outside that job.
+on:
+  push:
+    tags: ['client-v[0-9]*']
+
+# A new tag queues behind an in-flight publication; it never cancels the upload
+# another run is performing.
+concurrency:
+  group: client-release-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# The reviewed Beta interface constants, byte-identical to release.yml: the web
+# publication and the binary publication compile the same interface. The names
+# below them are reviewed workflow constants, not secrets; the nine signing
+# secrets live only in the platform jobs that read them.
+env:
+  BETA_API_BASE_URL: 'https://d1pfqujqt29n11.cloudfront.net'
+  BETA_COGNITO_USER_POOL_ID: 'ap-east-1_XqXt4Kw1L'
+  BETA_COGNITO_CLIENT_ID: '4jp37atfitq59hmjo404342int'
+  # Replace these placeholders when the signing certificates are procured; the
+  # owner step that buys them is deliberately not part of this delivery.
+  APPLE_SIGNING_IDENTITY: 'Developer ID Application: AnyWear (TEAMID)'
+  APPLE_TEAM_ID: 'TEAMID'
+  APPLE_API_ISSUER: '00000000-0000-0000-0000-000000000000'
+  APPLE_API_KEY: 'KEYID00000'
+  WINDOWS_TIMESTAMP_URL: 'http://timestamp.digicert.com'
+
+jobs:
+  preflight:
+    name: Preflight the release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Everything this step reads is local: the tag name, its Git object, the
+      # commit's place in `main`, the other `client-v*` tags and the committed
+      # release notes. It reads no secret and does not fail when signing
+      # credentials are absent.
+      - name: Validate the tag and resolve the declared platforms
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node scripts/assert-client-release.mjs preflight --tag "$TAG" > preflight.txt
+          cat preflight.txt
+          cat preflight.txt >> "$GITHUB_OUTPUT"
+
+      # One bounded read of the existing release decides the four-state machine:
+      # absent, draft, published with a complete asset set (idempotent green), or
+      # published with a gap (hard refusal). The token is the run's own
+      # GITHUB_TOKEN, not a signing secret.
+      - name: Classify the existing release state
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          DECLARED_PLATFORMS: ${{ steps.tag.outputs.platforms }}
+        run: |
+          node scripts/assert-client-release.mjs state --tag "$TAG" --platforms "$DECLARED_PLATFORMS" --repo anywear-ai/AnyWear-Client > state.txt
+          cat state.txt
+          cat state.txt >> "$GITHUB_OUTPUT"
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      platforms: ${{ steps.tag.outputs.platforms }}
+      android: ${{ steps.tag.outputs.android }}
+      state: ${{ steps.state.outputs.state }}
+
+  verify:
+    name: Verify the tagged revision
+    needs: [preflight]
+    # A published release with a complete asset set ends green without rebuilding.
+    if: needs.preflight.outputs.state != 'published'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.18.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run unit tests
+        run: pnpm run test:run
+
+      - name: Install Chromium
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Run browser integration tests
+        run: pnpm run test:browser
+
+  package-windows:
+    name: Package Windows x64
+    needs: [preflight]
+    if: needs.preflight.outputs.state != 'published'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      # Fail closed before any compilation. The platform job is the only reader of
+      # its own signing secrets, and it names the missing one.
+      - name: Require the Windows signing credentials
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $missing = 0
+          foreach ($name in @('WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              Write-Host "::error::$name is not configured; a windows release artifact cannot be produced"
+              $missing = 1
+            }
+          }
+          exit $missing
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.18.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and sign the installer
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ env.WINDOWS_TIMESTAMP_URL }}
+          VITE_API_BASE_URL: ${{ env.BETA_API_BASE_URL }}
+          VITE_COGNITO_USER_POOL_ID: ${{ env.BETA_COGNITO_USER_POOL_ID }}
+          VITE_COGNITO_CLIENT_ID: ${{ env.BETA_COGNITO_CLIENT_ID }}
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'anywear-ov.pfx'
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $secure = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $secure
+          $config = @{
+            version = $env:RELEASE_VERSION
+            bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint; timestampUrl = $env:WINDOWS_TIMESTAMP_URL } }
+          } | ConvertTo-Json -Depth 5 -Compress
+          pnpm exec tauri build --config $config
+
+      - name: Verify the Windows signature
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' -Recurse | Select-Object -First 1
+          if ($null -eq $installer) {
+            Write-Host '::error::the Windows build produced no NSIS installer'
+            exit 1
+          }
+          $signature = Get-AuthenticodeSignature -FilePath $installer.FullName
+          Write-Host "Authenticode status: $($signature.Status)"
+          if ($signature.Status -ne 'Valid') {
+            Write-Host "::error::Get-AuthenticodeSignature returned $($signature.Status) for $($installer.Name)"
+            exit 1
+          }
+
+      - name: Stage the Windows assets
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' -Recurse | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          Copy-Item $installer.FullName 'release-assets/windows-setup.exe'
+          Copy-Item 'dist/build-metadata.json' 'release-assets/build-metadata.json'
+
+      - name: Upload the Windows assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-windows
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  package-macos:
+    name: Package macOS universal
+    needs: [preflight]
+    if: needs.preflight.outputs.state != 'published'
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      # Fail closed before any compilation; this job is the only reader of these
+      # three secrets and it names the missing one.
+      - name: Require the macOS signing credentials
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_KEY_P8; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is not configured; a macos release artifact cannot be produced"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.18.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Add the universal Rust targets
+        shell: bash
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build, sign and notarize the image
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ env.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ env.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ env.APPLE_API_KEY }}
+          VITE_API_BASE_URL: ${{ env.BETA_API_BASE_URL }}
+          VITE_COGNITO_USER_POOL_ID: ${{ env.BETA_COGNITO_USER_POOL_ID }}
+          VITE_COGNITO_CLIENT_ID: ${{ env.BETA_COGNITO_CLIENT_ID }}
+        run: |
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          keychain_path="$RUNNER_TEMP/anywear-signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          existing_keychains="$(security list-keychains -d user | tr -d '"')"
+          security list-keychains -d user -s "$keychain_path" $existing_keychains
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/anywear.p12"
+          security import "$RUNNER_TEMP/anywear.p12" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          pnpm exec tauri build --target universal-apple-darwin --config "{\"version\":\"${RELEASE_VERSION}\"}"
+
+      - name: Verify the macOS signature
+        shell: bash
+        run: |
+          app_path="src-tauri/target/universal-apple-darwin/release/bundle/macos/AnyWear.app"
+          dmg_path="$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -type f | head -n 1)"
+          codesign -vvv --strict --deep "$app_path"
+          spctl -a -vvv -t exec "$app_path"
+          codesign -vvv --strict "$dmg_path"
+          xcrun stapler validate "$dmg_path"
+
+      - name: Stage the macOS assets
+        shell: bash
+        run: |
+          dmg_path="$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -type f | head -n 1)"
+          mkdir -p release-assets
+          cp "$dmg_path" release-assets/macos-image.dmg
+          cp dist/build-metadata.json release-assets/build-metadata.json
+
+      - name: Upload the macOS assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-macos
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  package-android:
+    name: Package Android
+    needs: [preflight]
+    # The Android project arrives with #279. Until then `preflight` omits android
+    # from the declared platform list and this job is skipped, not failed.
+    if: needs.preflight.outputs.state != 'published' && needs.preflight.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Fail closed before any compilation; this job is the only reader of these
+      # four secrets and it names the missing one.
+      - name: Require the Android signing credentials
+        shell: bash
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for name in ANDROID_KEY_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is not configured; a android release artifact cannot be produced"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.18.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Never initialize the Android project in CI: it is committed by #279, and CI
+      # only materializes the uncommitted signing material next to it.
+      - name: Materialize the Android keystore
+        shell: bash
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          printf '%s' "$ANDROID_KEY_BASE64" | base64 --decode > src-tauri/gen/android/anywear-release.jks
+          {
+            echo "storeFile=anywear-release.jks"
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "keyPassword=$ANDROID_KEY_PASSWORD"
+          } > src-tauri/gen/android/keystore.properties
+
+      # The Android versionCode is derived from the monotonic protocol version, so
+      # an installed package always increases; `X.Y.Z` names the tag, not the code.
+      - name: Derive the Android versionCode from client_version
+        id: version-code
+        shell: bash
+        run: |
+          version_code="$(node -p "require('./client-version.json').client_version")"
+          if ! [[ "$version_code" =~ ^[0-9]+$ ]]; then
+            echo "::error::client-version.json does not carry an integer client_version; no Android versionCode can be derived"
+            exit 1
+          fi
+          echo "versionCode=$version_code" >> "$GITHUB_OUTPUT"
+
+      - name: Build the signed Android packages
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          VERSION_CODE: ${{ steps.version-code.outputs.versionCode }}
+          VITE_API_BASE_URL: ${{ env.BETA_API_BASE_URL }}
+          VITE_COGNITO_USER_POOL_ID: ${{ env.BETA_COGNITO_USER_POOL_ID }}
+          VITE_COGNITO_CLIENT_ID: ${{ env.BETA_COGNITO_CLIENT_ID }}
+        run: |
+          android_config="$(node -e "process.stdout.write(JSON.stringify({ version: process.env.RELEASE_VERSION, bundle: { android: { versionCode: Number(process.env.VERSION_CODE) } } }))")"
+          pnpm exec tauri android build --apk --aab --config "$android_config"
+
+      - name: Verify the Android signatures
+        shell: bash
+        run: |
+          mapfile -t apks < <(find src-tauri/gen/android/app/build/outputs -name '*.apk' -type f)
+          mapfile -t aabs < <(find src-tauri/gen/android/app/build/outputs -name '*.aab' -type f)
+          if [ "${#apks[@]}" -eq 0 ] || [ "${#aabs[@]}" -eq 0 ]; then
+            echo "::error::the Android build produced no APK or no AAB"
+            exit 1
+          fi
+          for artifact in "${apks[@]}" "${aabs[@]}"; do
+            apksigner verify --print-certs "$artifact"
+          done
+
+      - name: Stage the Android assets
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          apk="$(find src-tauri/gen/android/app/build/outputs -name '*.apk' -type f | head -n 1)"
+          aab="$(find src-tauri/gen/android/app/build/outputs -name '*.aab' -type f | head -n 1)"
+          cp "$apk" release-assets/android.apk
+          cp "$aab" release-assets/android.aab
+
+      - name: Upload the Android assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-android
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: Assemble the release assets
+    needs: [preflight, verify, package-windows, package-macos, package-android]
+    # A skipped Android leg is legitimate while #279 has not produced the Android
+    # project; a failed one is not. A failed verify or desktop leg blocks assembly
+    # too, so a partial download is never published. `!cancelled()` keeps the
+    # diagnostic path open when a sibling leg was cancelled.
+    if: ${{ !cancelled()
+      && needs.verify.result == 'success'
+      && needs.package-windows.result == 'success'
+      && needs.package-macos.result == 'success'
+      && (needs.package-android.result == 'success' || needs.package-android.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    # The only job that holds the OIDC token and the attestation write; it holds no
+    # release write and declares no container-image storage permission.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download the Windows assets
+        uses: actions/download-artifact@v4
+        with:
+          name: client-windows
+          path: artifacts/windows
+
+      - name: Download the macOS assets
+        uses: actions/download-artifact@v4
+        with:
+          name: client-macos
+          path: artifacts/macos
+
+      - name: Download the Android assets
+        if: needs.package-android.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: client-android
+          path: artifacts/android
+
+      # Canonical names carry the tag's `X.Y.Z`; the declared platform list from
+      # preflight decides which of them must exist. A declared platform with no
+      # file fails here, before the checksum and the attestation.
+      - name: Assemble the canonical assets
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          DECLARED_PLATFORMS: ${{ needs.preflight.outputs.platforms }}
+        run: |
+          mkdir -p release-assets
+          cp artifacts/windows/windows-setup.exe "release-assets/AnyWear-${RELEASE_VERSION}-windows-x64-setup.exe"
+          cp artifacts/macos/macos-image.dmg "release-assets/AnyWear-${RELEASE_VERSION}-macos-universal.dmg"
+          if [ -d artifacts/android ]; then
+            cp artifacts/android/android.apk "release-assets/AnyWear-${RELEASE_VERSION}-android.apk"
+            cp artifacts/android/android.aab "release-assets/AnyWear-${RELEASE_VERSION}-android.aab"
+          fi
+          cp artifacts/windows/build-metadata.json release-assets/build-metadata.json
+          cp "docs/client-release-notes/client-v${RELEASE_VERSION}.md" release-assets/RELEASE-NOTES.md
+          node scripts/assert-client-release.mjs assets --version "$RELEASE_VERSION" --platforms "$DECLARED_PLATFORMS" --directory release-assets
+
+      # GNU coreutils text mode: `<64 lowercase hex><two spaces><basename>`, LF,
+      # `LC_ALL=C sort`, no header, no comment, no directory prefix, and no line
+      # for SHA256SUMS or its bundle. The verifier below re-checks all of it.
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          cd release-assets
+          sha256sum AnyWear-* build-metadata.json RELEASE-NOTES.md | LC_ALL=C sort > ../SHA256SUMS
+          cd ..
+          cat SHA256SUMS
+          node scripts/assert-client-release.mjs checksums --verify SHA256SUMS
+
+      # One attestation, whose subjects are every artifact listed in SHA256SUMS. The
+      # deprecated build-provenance wrapper action is deliberately not used.
+      - name: Attest the release assets
+        id: attest
+        uses: actions/attest@v4
+        with:
+          subject-checksums: SHA256SUMS
+
+      - name: Export the attestation bundle
+        run: cp "${{ steps.attest.outputs.bundle-path }}" SHA256SUMS.sigstore.json
+
+      - name: Upload the assembled release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-release-bundle
+          path: |
+            release-assets/
+            SHA256SUMS
+            SHA256SUMS.sigstore.json
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: Publish the client release
+    needs: [preflight, assemble]
+    runs-on: ubuntu-latest
+    # The repository's only release write. It runs after assembly proved the asset
+    # set, and the release is created as a draft before anything is published.
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+      DECLARED_PLATFORMS: ${{ needs.preflight.outputs.platforms }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download the assembled release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: client-release-bundle
+          path: release
+
+      # A rerun that finds its own draft adopts it: a draft's assets are still
+      # replaceable before publication. Published releases never reach this job —
+      # preflight classifies them and the remaining jobs are skipped — so nothing
+      # here can mutate a published release.
+      - name: Adopt the existing draft
+        if: needs.preflight.outputs.state == 'draft'
+        shell: bash
+        run: |
+          released_assets="$(gh api "repos/anywear-ai/AnyWear-Client/releases/tags/$TAG" --jq '.assets[].id')"
+          for asset_id in $released_assets; do
+            gh api -X DELETE "repos/anywear-ai/AnyWear-Client/releases/assets/$asset_id"
+          done
+
+      - name: Create the draft release
+        if: needs.preflight.outputs.state == 'absent'
+        shell: bash
+        run: |
+          short_sha="$(git rev-parse --short=8 HEAD)"
+          client_version="$(node -p "require('./client-version.json').client_version")"
+          title="AnyWear Client ${RELEASE_VERSION} (client_version ${client_version}, ${short_sha})"
+          gh release create "$TAG" --repo anywear-ai/AnyWear-Client --verify-tag --draft --prerelease --latest=false --title "$title" --notes-file release/release-assets/RELEASE-NOTES.md
+
+      # Never overwrite an existing asset: a name collision is a signal, not
+      # something to paper over.
+      - name: Upload the release assets
+        shell: bash
+        run: |
+          gh release upload "$TAG" \
+            release/release-assets/AnyWear-* \
+            release/release-assets/build-metadata.json \
+            release/release-assets/RELEASE-NOTES.md \
+            release/SHA256SUMS \
+            release/SHA256SUMS.sigstore.json \
+            --repo anywear-ai/AnyWear-Client
+
+      # Read the draft back, compare it with the declared platform list, then
+      # download the uploaded bytes and verify them against SHA256SUMS.
+      - name: Verify the uploaded draft
+        shell: bash
+        run: |
+          gh release view "$TAG" --repo anywear-ai/AnyWear-Client --json isDraft,isPrerelease,tagName,assets > uploaded-release.json
+          node scripts/assert-client-release.mjs inventory --tag "$TAG" --view uploaded-release.json --expect draft --platforms "$DECLARED_PLATFORMS" --checksums release/SHA256SUMS
+          mkdir -p downloaded
+          gh release download "$TAG" --repo anywear-ai/AnyWear-Client --dir downloaded
+          ( cd downloaded && sha256sum -c SHA256SUMS )
+
+      # The one flip of the draft; no release edit runs before this step.
+      - name: Publish the prerelease
+        shell: bash
+        run: gh release edit "$TAG" --repo anywear-ai/AnyWear-Client --draft=false --prerelease --latest=false
+
+      # `isImmutable` is not asserted: reading it needs administrator permission,
+      # and immutability is an administrative prerequisite recorded in the
+      # runbook, not something this job can prove.
+      - name: Verify the published release
+        shell: bash
+        run: |
+          gh release view "$TAG" --repo anywear-ai/AnyWear-Client --json isDraft,isPrerelease,tagName,assets > published-release.json
+          node scripts/assert-client-release.mjs inventory --tag "$TAG" --view published-release.json --expect published --platforms "$DECLARED_PLATFORMS" --checksums release/SHA256SUMS

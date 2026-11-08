@@ -281,24 +281,29 @@ test('a declared platform with no artifact stops assembly', () => {
 });
 
 test('every release asset is below the 2 GiB single-file limit and the total is reported', () => {
-  const nearLimit = [
+  const underLimit = [
     { name: 'AnyWear-0.1.0-windows-x64-setup.exe', size: 80 * 1024 * 1024 },
-    { name: 'AnyWear-0.1.0-macos-universal.dmg', size: MAX_RELEASE_ASSET_BYTES },
+    { name: 'AnyWear-0.1.0-macos-universal.dmg', size: MAX_RELEASE_ASSET_BYTES - 1 },
   ];
   assert.equal(MAX_RELEASE_ASSET_BYTES, 2 * 1024 * 1024 * 1024);
-  assert.deepEqual(assertAssetSizes({ assets: nearLimit }), {
+  assert.deepEqual(assertAssetSizes({ assets: underLimit }), {
     count: 2,
-    total: 80 * 1024 * 1024 + MAX_RELEASE_ASSET_BYTES,
+    total: 80 * 1024 * 1024 + MAX_RELEASE_ASSET_BYTES - 1,
   });
-  assert.deepEqual(assertAssetSizes({ assets: [{ name: 'exact.bin', size: 100 }], limit: 100 }), { count: 1, total: 100 });
+  assert.deepEqual(assertAssetSizes({ assets: [{ name: 'small.bin', size: 99 }], limit: 100 }), { count: 1, total: 99 });
 
+  // GitHub requires every file to be *under* 2 GiB: the boundary itself refuses.
   assert.throws(
-    () => assertAssetSizes({ assets: [...nearLimit, { name: 'huge.exe', size: MAX_RELEASE_ASSET_BYTES + 1 }] }),
+    () => assertAssetSizes({ assets: [{ name: 'exact.bin', size: MAX_RELEASE_ASSET_BYTES }] }),
+    /`exact\.bin` is 2147483648 bytes/,
+  );
+  assert.throws(
+    () => assertAssetSizes({ assets: [...underLimit, { name: 'huge.exe', size: MAX_RELEASE_ASSET_BYTES + 1 }] }),
     /`huge\.exe` is 2147483649 bytes/,
   );
   assert.throws(
-    () => assertAssetSizes({ assets: [{ name: 'over.bin', size: 101 }], limit: 100 }),
-    /is above the 100-byte single-file limit: `over\.bin` is 101 bytes/,
+    () => assertAssetSizes({ assets: [{ name: 'over.bin', size: 100 }], limit: 100 }),
+    /is not below the 100-byte single-file limit: `over\.bin` is 100 bytes/,
   );
 
   const directory = mkdtempSync(join(tmpdir(), 'client-sizes-'));

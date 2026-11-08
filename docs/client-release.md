@@ -261,9 +261,9 @@ Rollback means:
   the uploaded bytes with `sha256sum -c`, and only then flips the draft. The
   readback asserts draft state, prerelease flag, tag name and the asset inventory
   against the declared platform list.
-- `assemble` refuses an asset above GitHub's 2 GiB single-file limit and reports the
-  set's total before upload, so an oversized installer stops the run with no
-  Release.
+- `assemble` refuses an asset of 2 GiB or more (GitHub requires every release file
+  to be under that limit) and reports the set's total before upload, so an
+  oversized installer stops the run with no Release.
 - The pipeline never asserts `isImmutable`; that setting is an administrative
   precondition recorded above, not a `contents: write` read.
 - No workflow creates or moves a tag, deletes a release, or edits a release before

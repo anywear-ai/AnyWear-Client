@@ -211,16 +211,17 @@ export function assetSizes(directory) {
 }
 
 /**
- * Refuses an asset above the single-file limit and reports the set's total.
- * `assets` is fixed input (`[{ name, size }]`), so the rule is testable without
- * writing a 2 GiB file; `assemble` runs it over the directory it is about to
- * upload.
+ * Refuses an asset at or above the single-file limit and reports the set's total.
+ * GitHub requires every release file to be *under* 2 GiB, so the boundary itself
+ * fails rather than passing and failing in the upload. `assets` is fixed input
+ * (`[{ name, size }]`), so the rule is testable without writing a 2 GiB file;
+ * `assemble` runs it over the directory it is about to upload.
  */
 export function assertAssetSizes({ assets, limit = MAX_RELEASE_ASSET_BYTES }) {
-  const oversized = assets.filter((asset) => asset.size > limit);
+  const oversized = assets.filter((asset) => asset.size >= limit);
   if (oversized.length > 0) {
     const detail = oversized.map((asset) => `\`${asset.name}\` is ${asset.size} bytes`).join('; ');
-    throw new ClientReleaseError(`a release asset is above the ${limit}-byte single-file limit: ${detail}`);
+    throw new ClientReleaseError(`a release asset is not below the ${limit}-byte single-file limit: ${detail}`);
   }
   return {
     count: assets.length,
@@ -655,7 +656,7 @@ export async function main({
           throw new ClientReleaseError(`\`--limit\` must be a positive integer, found \`${options.limit}\``);
         }
         const result = assertAssetSizes({ assets: assetSizes(directory), limit });
-        log(`${result.count} release asset(s), ${result.total} byte(s) total, each at or below ${limit} bytes`);
+        log(`${result.count} release asset(s), ${result.total} byte(s) total, each below ${limit} bytes`);
         return 0;
       }
       case 'checksums': {

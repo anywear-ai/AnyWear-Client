@@ -24,9 +24,14 @@ vi.mock('../../lib/imageUpload', async (importOriginal) => {
   return { ...actual, uploadImageWithSignedPost: vi.fn() };
 });
 
+vi.mock('../../lib/imagePreparation', () => ({
+  prepareImageForUpload: vi.fn(),
+}));
+
 import ItemDetailsModal from './ItemDetailsModal';
 import { AXIOS_INSTANCE } from '../../api/custom-instance';
 import { HEIC_UNSUPPORTED_MESSAGE, uploadImageWithSignedPost } from '../../lib/imageUpload';
+import { prepareImageForUpload } from '../../lib/imagePreparation';
 import {
   useDeleteWardrobeItemsId,
   usePatchWardrobeItemsId,
@@ -107,6 +112,9 @@ describe('ItemDetailsModal', () => {
     vi.mocked(useDeleteWardrobeItemsId).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as any);
     vi.mocked(usePostWardrobeItemsItemIdRetag).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as any);
     vi.mocked(uploadImageWithSignedPost).mockResolvedValue(undefined);
+    vi.mocked(prepareImageForUpload).mockImplementation(
+      async (file: File) => new File([file], file.name, { type: 'image/jpeg' }),
+    );
     vi.spyOn(window, 'alert').mockImplementation(() => {});
   });
 
@@ -116,7 +124,7 @@ describe('ItemDetailsModal', () => {
     vi.restoreAllMocks();
   });
 
-  it('narrows the add-image picker and alerts the HEIC guidance before any network call', async () => {
+  it('narrows the add-image picker and shows the HEIC guidance inline before any network call', async () => {
     const { container } = renderModal(makeItem());
     const input = container.querySelector<HTMLInputElement>('input[type="file"]');
 
@@ -125,10 +133,49 @@ describe('ItemDetailsModal', () => {
 
     fireEvent.change(input!, { target: { files: [new File(['x'], 'photo.heic')] } });
 
-    await waitFor(() => {
-      expect(window.alert).toHaveBeenCalledWith(expect.stringContaining(HEIC_UNSUPPORTED_MESSAGE));
-    });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(HEIC_UNSUPPORTED_MESSAGE);
     expect(postMock).not.toHaveBeenCalled();
+    expect(window.alert).not.toHaveBeenCalled();
+  });
+
+  it('renders both capture entries and prepares the file before reserving as JPEG', async () => {
+    postMock
+      .mockResolvedValueOnce({
+        data: {
+          reservationId: 'reservation-1',
+          expiresAt: '2026-10-30T19:00:00.000Z',
+          upload: { url: 'https://upload.example.com', fields: { key: 's3-post-field' } },
+        },
+      })
+      .mockResolvedValueOnce({
+        data: { itemId: 'item-1', imageId: 'image-new', downloadUrl: 'https://signed.example.com/new.jpg' },
+      });
+
+    const { container } = renderModal(makeItem());
+    const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+    expect(inputs).toHaveLength(2);
+
+    const library = screen.getByRole('button', { name: 'Choose from library' });
+    const camera = screen.getByRole('button', { name: 'Take photo' });
+    expect(library).toBeInTheDocument();
+    expect(camera).toBeInTheDocument();
+    // The camera input is the `image/*` + capture one, single file.
+    const cameraInput = inputs.find((input) => input.getAttribute('accept') === 'image/*')!;
+    expect(cameraInput).toHaveAttribute('capture', 'environment');
+    expect(cameraInput).not.toHaveAttribute('multiple');
+    const libraryInput = inputs.find((input) => input.getAttribute('accept') === 'image/jpeg,image/png,image/webp')!;
+    expect(libraryInput).not.toHaveAttribute('capture');
+
+    fireEvent.change(libraryInput, {
+      target: { files: [new File(['bytes'], 'photo.png', { type: 'image/png' })] },
+    });
+
+    await waitFor(() => expect(prepareImageForUpload).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(postMock).toHaveBeenCalledTimes(2));
+    expect(postMock).toHaveBeenNthCalledWith(1, '/wardrobe/items/item-1/upload-url', {
+      contentType: 'image/jpeg',
+    });
   });
 
   it('paints the confirmation download URL and submits image ids instead of keys', async () => {
@@ -216,7 +263,8 @@ describe('ItemDetailsModal', () => {
     expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Show image 1' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Remove image 1' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Add image' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument();
   });
 
   it('paints the 2px indigo ring tokens on every focus stop in the dialog', () => {
@@ -239,9 +287,31 @@ describe('ItemDetailsModal', () => {
     renderModal(makeItem({ images: [] }));
 
     expect(screen.queryByRole('button', { name: /Show image/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Add image' })).toBeNull();
     expect(screen.queryByRole('combobox', { name: 'View' })).toBeNull();
+    // Both capture entries stay on screen even with an empty gallery.
+    expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument();
     expectEveryStopRings(screen.getByRole('dialog', { name: 'Item Details' }));
+  });
+
+  it('shows a decode failure inline and says nothing when a chooser is cancelled', async () => {
+    vi.mocked(prepareImageForUpload).mockRejectedValueOnce(new Error('Could not process this image'));
+    const { container } = renderModal(makeItem());
+    const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+    const libraryInput = inputs.find((input) => input.getAttribute('accept') !== 'image/*')!;
+
+    fireEvent.change(libraryInput, { target: { files: [] } });
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    fireEvent.change(libraryInput, {
+      target: { files: [new File(['bytes'], 'photo.jpg', { type: 'image/jpeg' })] },
+    });
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Could not process this image');
+    expect(postMock).not.toHaveBeenCalled();
+    // The library entry remains the one-click retry.
+    expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
   });
 
   it('locks the body while open and restores it on unmount', () => {

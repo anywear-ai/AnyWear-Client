@@ -24,7 +24,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
-    "@tauri-apps/api": "~2.10.1",
+    "@tauri-apps/api": "~2.12.4",
     "@tauri-apps/plugin-fs": "~2.5.1",
     "@tauri-apps/plugin-log": "~2.8.0",
     "aws-amplify": "^6.19.0",
@@ -38,7 +38,7 @@
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.0",
     "@tailwindcss/vite": "^4.3.3",
-    "@tauri-apps/cli": "^2.11.4",
+    "@tauri-apps/cli": "^2.12.4",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "6.9.1",
     "@testing-library/react": "^16.3.2",

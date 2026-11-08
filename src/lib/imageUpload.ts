@@ -1,4 +1,13 @@
-const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
+/**
+ * The largest picked file the Client will try to decode.
+ *
+ * This is not the upload bound: the prepared JPEG is at most 4 MiB
+ * (`imagePreparation.ts`) and the Service's signed POST policy caps the object at
+ * 10 MiB. The guard only has to admit the camera and gallery originals the
+ * pipeline can still shrink, so a 10–30 MiB phone photo is not refused before
+ * preparation ever runs.
+ */
+export const MAX_IMAGE_SIZE_BYTES = 30 * 1024 * 1024;
 /** Extensions accepted when the browser omits the MIME type. */
 const ACCEPTED_IMAGE_EXTENSIONS = /\.(?:jpe?g|png|webp)$/i;
 const HEIC_FILE_EXTENSION = /\.(?:heic|heif)$/i;
@@ -37,7 +46,7 @@ export function validateImageFile(file: File): void {
     throw new Error('Select an image file');
   }
   if (file.size > MAX_IMAGE_SIZE_BYTES) {
-    throw new Error('Image must be 10MB or smaller');
+    throw new Error('Image must be 30MB or smaller');
   }
 }
 

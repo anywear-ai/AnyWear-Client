@@ -8,9 +8,14 @@ vi.mock('../../api/endpoints/wardrobe/wardrobe', () => ({
   usePostWardrobeUpload: vi.fn(),
 }));
 
+vi.mock('../../lib/imagePreparation', () => ({
+  prepareImageForUpload: vi.fn(),
+}));
+
 import AddItemModal from './AddItemModal';
 import { CONFIRM_CHECK_WARDROBE_HINT } from '../../lib/batchUpload';
 import { HEIC_UNSUPPORTED_MESSAGE } from '../../lib/imageUpload';
+import { prepareImageForUpload } from '../../lib/imagePreparation';
 import { usePostWardrobeUpload, usePostWardrobeUploadUrl } from '../../api/endpoints/wardrobe/wardrobe';
 
 const FOCUSABLE = 'a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])';
@@ -56,6 +61,11 @@ describe('AddItemModal', () => {
     document.body.style.overflow = '';
     vi.mocked(usePostWardrobeUploadUrl).mockReturnValue({ mutateAsync: getUploadUrl } as any);
     vi.mocked(usePostWardrobeUpload).mockReturnValue({ mutateAsync: confirmUpload } as any);
+    // Preparation is exercised by imagePreparation.test.ts; the dialog only has
+    // to prove it hands the prepared file to the batch and surfaces its failure.
+    vi.mocked(prepareImageForUpload).mockImplementation(
+      async (file: File) => new File([file], file.name, { type: 'image/jpeg' }),
+    );
     vi.spyOn(window, 'alert').mockImplementation(() => {});
   });
 
@@ -87,7 +97,7 @@ describe('AddItemModal', () => {
   it('announces both visible upload texts and names the close, submit, and cancel controls', () => {
     render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
 
-    const input = screen.getByLabelText('Image Upload a file or take a photo');
+    const input = screen.getByLabelText('Image Choose from library');
     expect(input).toHaveAttribute('type', 'file');
     expect(input).toHaveAttribute('id', 'add-item-image');
 
@@ -208,7 +218,15 @@ describe('AddItemModal', () => {
     expect(firstInput).toHaveAttribute('id', 'add-item-image');
     expect(firstInput).toHaveAttribute('accept', 'image/jpeg,image/png,image/webp');
     expect(firstInput).not.toHaveAttribute('capture');
-    expect(screen.getByLabelText('Image Upload a file or take a photo')).toBe(firstInput);
+    expect(screen.getByLabelText('Image Choose from library')).toBe(firstInput);
+    // The camera is the other entry: one file, and `image/*` so wry takes the
+    // ACTION_IMAGE_CAPTURE branch instead of the picker.
+    const cameraInput = camera(container);
+    expect(cameraInput).not.toBe(firstInput);
+    expect(cameraInput).toHaveAttribute('accept', 'image/*');
+    expect(cameraInput).toHaveAttribute('capture', 'environment');
+    expect(cameraInput).not.toHaveAttribute('multiple');
+    expect(screen.getByLabelText('Take photo')).toBe(cameraInput);
   });
 
   it('appends one row per camera activation inside one open dialog', async () => {
@@ -218,7 +236,7 @@ describe('AddItemModal', () => {
     const cameraInput = camera(container);
     expect(cameraInput).toHaveAttribute('capture', 'environment');
     expect(cameraInput.id).not.toBe('add-item-image');
-    expect(screen.getByLabelText('Take a photo')).toBe(cameraInput);
+    expect(screen.getByLabelText('Take photo')).toBe(cameraInput);
 
     fireEvent.change(cameraInput, { target: { files: [photo('shot-one.png')] } });
     fireEvent.change(cameraInput, { target: { files: [photo('shot-two.png')] } });
@@ -373,7 +391,8 @@ describe('AddItemModal', () => {
     });
     fireEvent.submit(container.querySelector('form')!);
     // Three slots started; the fourth photo is queued and holds no reservation.
-    expect(getUploadUrl).toHaveBeenCalledTimes(3);
+    // Preparation is asynchronous, so the reservations are awaited.
+    await waitFor(() => expect(getUploadUrl).toHaveBeenCalledTimes(3));
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -597,5 +616,34 @@ describe('AddItemModal', () => {
     expect(screen.queryByText('1 duplicate photo was skipped')).toBeNull();
     expect(rows()).toHaveLength(1);
     expect(within(rows()[0]).getByText('denim.png')).toBeInTheDocument();
+  });
+
+  it('keeps both capture entries visible and says nothing when a chooser is cancelled', () => {
+    const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+
+    // A cancelled system camera or picker supplies no files: no row, no hint,
+    // and both entries still on screen for the next attempt.
+    fireEvent.change(picker(container), { target: { files: [] } });
+    fireEvent.change(camera(container), { target: { files: [] } });
+
+    expect(screen.queryByRole('list', { name: 'Added photos' })).toBeNull();
+    expect(screen.queryByText(/Could not process this image/)).toBeNull();
+    expect(screen.getByLabelText('Image Choose from library')).toBeInTheDocument();
+    expect(screen.getByLabelText('Take photo')).toBeInTheDocument();
+  });
+
+  it('shows a decode failure inline and sends no request for that photo', async () => {
+    vi.mocked(prepareImageForUpload).mockRejectedValueOnce(new Error('Could not process this image'));
+    const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+
+    fireEvent.change(picker(container), { target: { files: [photo('shot.jpg')] } });
+    fireEvent.submit(container.querySelector('form')!);
+
+    await waitFor(() => expect(screen.getByText('Could not process this image')).toBeInTheDocument());
+    expect(getUploadUrl).not.toHaveBeenCalled();
+    expect(confirmUpload).not.toHaveBeenCalled();
+    // The library entry is still one click away, so the failure is not a dead end.
+    expect(screen.getByLabelText('Image Choose from library')).toBeInTheDocument();
+    expect(screen.getByLabelText('Take photo')).toBeInTheDocument();
   });
 });

@@ -1,4 +1,5 @@
 import { getErrorMessage, getHttpStatus } from './errors';
+import { prepareImageForUpload } from './imagePreparation';
 import { validateImageFile, type SignedUploadPost } from './imageUpload';
 
 /**
@@ -33,6 +34,7 @@ export const CONFIRM_CHECK_WARDROBE_HINT = 'Could not confirm — check the ward
 
 export type BatchPhotoStatus =
   | 'queued'
+  | 'preparing'
   | 'reserving'
   | 'uploading'
   | 'confirming'
@@ -43,14 +45,16 @@ export type BatchPhotoStatus =
  * What a failed photo's Retry should do with its reservation.
  *
  * `precheck` never made a request, so Retry re-runs the local rules and sends
- * nothing. `confirm` failed on a 5xx or on the network, so the reservation may
- * have committed and Retry re-confirms the same one, which replays the committed
- * item instead of writing a second. Everything else (`reserve`, `upload`,
- * `expired`, `terminal`) holds no usable reservation, so Retry starts a fresh
- * one and uploads the photo again.
+ * nothing. `prepare` failed before any request, so Retry re-runs the local rules
+ * and the image preparation, then reserves. `confirm` failed on a 5xx or on the
+ * network, so the reservation may have committed and Retry re-confirms the same
+ * one, which replays the committed item instead of writing a second. Everything
+ * else (`reserve`, `upload`, `expired`, `terminal`) holds no usable reservation,
+ * so Retry starts a fresh one and uploads the photo again.
  */
 export type BatchFailureKind =
   | 'precheck'
+  | 'prepare'
   | 'reserve'
   | 'upload'
   | 'expired'
@@ -98,6 +102,12 @@ export interface BatchConfirmation {
 
 /** Injected so the runner can be driven without the generated hooks. */
 export interface BatchUploadDeps {
+  /**
+   * Decodes, orients and compresses one photo before it reserves, returning the
+   * JPEG that is reserved and posted. Defaults to the real preparation module so
+   * a caller cannot skip it by omission; tests inject a stub.
+   */
+  prepare?: (file: File) => Promise<File>;
   reserve: (file: File) => Promise<BatchReservation>;
   postBytes: (upload: SignedUploadPost, file: File) => Promise<void>;
   confirm: (reservationId: string) => Promise<BatchConfirmation>;
@@ -172,7 +182,7 @@ export function createBatchPhotos(files: File[]): BatchPhoto[] {
       validateImageFile(file);
       return { id, file, status: 'queued' };
     } catch (error) {
-      // HEIC/HEIF, a non-image and a file over 10 MiB never reach a request: the
+      // HEIC/HEIF, a non-image and a file over 30 MiB never reach a request: the
       // existing single-photo rule fails the row with its own message.
       return {
         id,
@@ -271,7 +281,7 @@ async function uploadPhoto(
 ): Promise<void> {
   let current: BatchPhoto = {
     ...photo,
-    status: 'reserving',
+    status: 'preparing',
     itemId: undefined,
     taggingStatus: undefined,
     error: undefined,
@@ -280,12 +290,26 @@ async function uploadPhoto(
   };
   publish(current);
 
+  // Preparation runs once per attempt, before the reservation: the declared
+  // content type and the posted bytes must be the prepared JPEG's, and a Retry
+  // re-prepares the original rather than re-sending a stale encode.
+  const prepare = deps.prepare ?? prepareImageForUpload;
+  let prepared: File;
+  try {
+    prepared = await prepare(current.file);
+  } catch (error) {
+    return publishFailed(current, 'prepare', error, publish);
+  }
+
+  current = { ...current, status: 'reserving' };
+  publish(current);
+
   // The second round exists only for a 410: the first confirmation never
   // committed, so re-reserving and confirming once more still creates one item.
   for (let round = 0; round < 2; round += 1) {
     let reservation: BatchReservation;
     try {
-      reservation = await withTransientRetry(() => deps.reserve(current.file));
+      reservation = await withTransientRetry(() => deps.reserve(prepared));
     } catch (error) {
       return publishFailed(current, 'reserve', error, publish);
     }
@@ -297,7 +321,7 @@ async function uploadPhoto(
     publish(current);
 
     try {
-      await withTransientRetry(() => deps.postBytes(reservation.upload, current.file));
+      await withTransientRetry(() => deps.postBytes(reservation.upload, prepared));
     } catch (error) {
       return publishFailed(current, 'upload', error, publish);
     }

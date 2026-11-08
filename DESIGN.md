@@ -169,8 +169,9 @@ decoration that competes with the clothing.
 - **Text and inline SVG carry the identity.** "AnyWear" renders as text in
   [AuthLayout](src/layouts/AuthLayout.tsx) and [MainLayout](src/layouts/MainLayout.tsx).
   There is no logo component and no icon library: icons are inline SVG, emoji, or text.
-- **Tailwind utilities only.** [index.css](src/index.css) imports Tailwind and sets the body
-  defaults; there are no CSS modules and no component stylesheet.
+- **Tailwind utilities only.** [index.css](src/index.css) imports Tailwind, sets the body
+  defaults and carries the global mobile touch layer described under
+  [Components](#components); there are no CSS modules and no component stylesheet.
 
 ## Colors
 
@@ -243,7 +244,7 @@ Mirror mode switch and the try-on action.
 | Area | Layout |
 | --- | --- |
 | Auth shell | `min-h-screen`, centered column, `py-12 sm:px-6 lg:px-8`; form `sm:max-w-md` (28rem); white card `py-8 px-4 sm:px-10` |
-| App shell | `min-h-screen bg-gray-100`; top bar `h-16`; nav `max-w-7xl mx-auto px-4 sm:px-6 lg:px-8`; main `flex-1 px-4 py-6` |
+| App shell | `min-h-screen bg-gray-100`; top bar `h-16`; nav `max-w-7xl mx-auto px-4 sm:px-6 lg:px-8`; main `flex-1 px-4 pt-6 pb-24 sm:px-6 sm:pb-6 lg:px-8` |
 | Mirror | `space-y-8`; input sections `grid grid-cols-1 md:grid-cols-2 gap-6`; white `rounded-lg p-6 shadow` cards |
 | Wardrobe | grids `grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5` |
 | Settings and dashboard | Settings `max-w-lg` (32rem) centered with `space-y-8` and `p-6` cards; dashboard `space-y-6`, details `sm:grid-cols-3` |
@@ -252,6 +253,13 @@ Mirror mode switch and the try-on action.
 Main content runs full width to its maximum. Image proportions are fixed by role: garment
 and base-photo frames use `aspect-[4/5]` with `object-cover`; history thumbnails keep 3:4;
 generated results use a `max-h-[70vh] object-contain` area.
+
+Below `sm` the main column reserves `pb-24` so the last card can scroll clear of the fixed
+bottom navigation; the `sm` breakpoint returns `pb-6` for the desktop layout, which has no
+bottom bar. `index.html` declares `viewport-fit=cover`, and the Android shell's
+`MainActivity` pads its content view once for `systemBars | displayCutout | ime` — the CSS
+therefore adds no `env(safe-area-inset-*)` of its own. One owner for the inset, no double
+padding, and the keyboard covered by the same code path.
 
 ## Elevation & Depth
 
@@ -296,7 +304,9 @@ composes the utilities below.
 | History card actions | `bg-black/50` scrim over the card's image area only: an `absolute inset-0` child of the `relative aspect-[3/4]` media wrapper, revealed by pointer hover anywhere in the card or by focus within the overlay itself; the actions stay in the tab order and the accessibility tree while hidden, and Delete keeps the overlay visible while it swaps the action set in place for a confirmation (`Yes, Delete` / `Cancel`) rather than opening a dialog. The card body — timestamp, status badge, item count, rating and any rating-failure sentence — is outside the overlay and stays visible and pressable while the actions are revealed |
 | Dialog panel | White surface, `rounded-xl shadow-xl`, `z-10` for Add/Details and `z-50` for outfit dialogs and the history image viewer, whose panel is the image itself; dismissed by backdrop click and Escape, with focus moved into the panel on open and restored to the control that opened it on close. While any panel is open the page behind it does not scroll: the shared dialog hook hides body overflow on the first open panel and restores the previous inline value when the last one closes. |
 | Text input | White surface with `border-gray-300` and `rounded-md`; focus moves the border to indigo and, in the dialogs, paints the 2px indigo ring inset where a scrolling form would clip an offset. |
-| Status badge | `rounded-full` pill with `text-xs`, one of the pending, processing, or failed pairs from [Colors](#colors), always paired with text. The Add dialog's photo rows use the same pill for their step: the pending pair for `queued`, the processing pair for `reserving`, `uploading` and `confirming`, the failed pair for `failed`, and the app surface and body text colors (`bg-gray-100 text-gray-700`) for `created`. |
+| Status badge | `rounded-full` pill with `text-xs`, one of the pending, processing, or failed pairs from [Colors](#colors), always paired with text. The Add dialog's photo rows use the same pill for their step: the pending pair for `queued`, the processing pair for `preparing`, `reserving`, `uploading` and `confirming`, the failed pair for `failed`, and the app surface and body text colors (`bg-gray-100 text-gray-700`) for `created`. |
+| Capture entry | Every photo surface renders two entries beside each other: `Choose from library` (`accept="image/jpeg,image/png,image/webp"`; multi-select in the Add dialog, one file elsewhere) and `Take photo` (`accept="image/*"`, `capture="environment"`, one file). The `image/*` token is what makes wry open the system camera through `ACTION_IMAGE_CAPTURE`; the narrower library list only ever opens the picker. Both entries stay visible while the other path is disabled or has just failed, so a cancelled or undecodable shot leaves the library one click away. A cancelled chooser (no file) shows no hint; a decode or format failure shows an inline message beside the entries. |
+| Touch behaviour | [index.css](src/index.css) sets `touch-action: manipulation` on controls, `user-select: none` with `-webkit-touch-callout: none` on interactive shells and imagery, and restores `user-select: text` on inputs, textareas and `contenteditable` nodes; `overscroll-behavior-y: contain` stops the whole-page rubber band. Inside the Tauri shell [touch.ts](src/lib/touch.ts) additionally cancels `contextmenu` outside editable fields, covering the Android WebView long-press menu that CSS cannot close. |
 | Selection card | `aspect-[4/5]` image with `rounded-lg`; unselected uses a gray border, selected uses an indigo border with `ring` and a text label |
 | Credit pill | `rounded-full px-3 py-1.5 text-sm font-medium`, colored by remaining balance: green above 2, amber at 1–2, red at 0 |
 | Error message | `text-red-500` for field and inline errors; `role="alert"` for a failure the user must notice. A failed photo row states its cause in `text-xs text-red-500`. A failed rating save states its sentence in `text-xs text-red-700` directly under the stars that sent it — inside the result area's `Complete` card or the history card — in a `role="alert"` paragraph that takes no focus and adds no control; choosing a star again is the retry. |

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 import type { GetWardrobe200Item } from '../src/api/model/getWardrobe200Item';
 import type { TaggingStatusResponse } from '../src/api/model/taggingStatusResponse';
 import { mockClientBoundaries, expectOnlyMockedCalls } from './mock-boundaries';
@@ -88,8 +89,8 @@ async function setupMock(page: Page, state: MockState) {
       // confirmation has verified the stored object.
       return json({ reservationId: RESERVATION_ID,
         expiresAt: new Date(Date.now() + 900_000).toISOString(),
-        upload: { url: 'https://s3.example.com/upload', fields: { key: `wearable-items/test-user-id/${RESERVATION_ID}.png`,
-          'Content-Type': 'image/png', policy: 'signed-policy', 'x-amz-signature': 'signature' } } });
+        upload: { url: 'https://s3.example.com/upload', fields: { key: `wearable-items/test-user-id/${RESERVATION_ID}.jpg`,
+          'Content-Type': 'image/jpeg', policy: 'signed-policy', 'x-amz-signature': 'signature' } } });
     }
     if (method === 'POST' && path === '/wardrobe/upload') {
       state.mutations.push({ method, path, body: request.postDataJSON() });
@@ -136,7 +137,9 @@ test.describe('Wardrobe Auto-Tagging (mocked Client integration)', () => {
     await expect(page.getByText('My T-Shirt', { exact: true })).toBeVisible();
     await expect(page.getByText('Analyzing...', { exact: true })).toBeVisible();
     expect(state.mutations).toEqual([
-      { method: 'POST', path: '/wardrobe/upload-url', body: { contentType: 'image/png' } },
+      // The reservation and the posted bytes are the prepared JPEG, not the
+      // picked PNG: preparation runs before any request.
+      { method: 'POST', path: '/wardrobe/upload-url', body: { contentType: 'image/jpeg' } },
       { method: 'POST', path: '/upload', body: { contentType: 'multipart/form-data' } },
       { method: 'POST', path: '/wardrobe/upload', body: { reservationId: RESERVATION_ID } },
     ]);
@@ -145,7 +148,7 @@ test.describe('Wardrobe Auto-Tagging (mocked Client integration)', () => {
     // S3 rejects the form otherwise, and the browser cannot relax a condition.
     expect(uploadedForm).toContain('signed-policy');
     expect(uploadedForm).toContain('x-amz-signature');
-    expect(uploadedForm).toContain('name="file"; filename="dummy.png"');
+    expect(uploadedForm).toContain('name="file"; filename="dummy.jpg"');
     expect(uploadedForm?.trimEnd().endsWith('--')).toBe(true);
 
     // The page holds one aggregate stream while the item is in flight. The frame
@@ -185,8 +188,8 @@ test.describe('Wardrobe Auto-Tagging (mocked Client integration)', () => {
           upload: {
             url: 'https://s3.example.com/upload',
             fields: {
-              key: `wearable-items/test-user-id/${reservationId}.png`,
-              'Content-Type': 'image/png',
+              key: `wearable-items/test-user-id/${reservationId}.jpg`,
+              'Content-Type': 'image/jpeg',
               policy: 'signed-policy',
               'x-amz-signature': 'signature',
             },
@@ -203,7 +206,7 @@ test.describe('Wardrobe Auto-Tagging (mocked Client integration)', () => {
       fileByReservation.set(reservationId, fileName);
       postedFiles.push(fileName);
       // The signed policy authorizes one object; S3 refuses the body it is told to.
-      if (fileName === 'batch-two.png' && !rejectedBatchTwo) {
+      if (fileName === 'batch-two.jpg' && !rejectedBatchTwo) {
         rejectedBatchTwo = true;
         return route.fulfill({ status: 403 });
       }
@@ -240,8 +243,12 @@ test.describe('Wardrobe Auto-Tagging (mocked Client integration)', () => {
     await page.getByRole('button', { name: 'Add Item', exact: true }).click();
 
     const dialog = page.getByRole('dialog', { name: 'Add Wardrobe Item' });
+    // Real PNG bytes: the Client now decodes and re-encodes every picked file
+    // before it reserves, so a fixture that is only named `.png` would fail at
+    // preparation instead of reaching the S3 policy this test exercises.
+    const pngBytes = readFileSync('browser/fixtures/dummy.png');
     await page.locator('#add-item-image').setInputFiles(
-      fileNames.map((name) => ({ name, mimeType: 'image/png', buffer: Buffer.from('png') })),
+      fileNames.map((name) => ({ name, mimeType: 'image/png', buffer: pngBytes })),
     );
     await expect(dialog.getByRole('listitem')).toHaveCount(3);
     await page.getByRole('button', { name: 'Add 3 items', exact: true }).click();
@@ -268,10 +275,10 @@ test.describe('Wardrobe Auto-Tagging (mocked Client integration)', () => {
     // Retry ran the one failed row: a fresh reservation, one post, one confirmation,
     // and the same item, so the wardrobe ends with three items and no fourth.
     expect(reservationIds).toHaveLength(4);
-    expect(postedFiles.slice(3)).toEqual(['batch-two.png']);
+    expect(postedFiles.slice(3)).toEqual(['batch-two.jpg']);
     expect(confirmedReservations).toHaveLength(3);
     expect(state.items).toHaveLength(3);
-    await expect(page.getByText('Item batch-one.png', { exact: true })).toBeVisible();
+    await expect(page.getByText('Item batch-one.jpg', { exact: true })).toBeVisible();
   });
 
   test('populates auto-tagged values, saves edits and refreshes the item', async ({ page }) => {

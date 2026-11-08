@@ -5,11 +5,14 @@ name: Publish Client Release
 # jobs separate identity, verification, per-platform signing, assembly and the
 # one release write, so no job holds both a signing key and a release write:
 #
-#   preflight        tag identity and the four-state release check; reads no secret
+#   preflight        tag identity and the four-state release check; reads no secret.
+#                    It is the only reader of `client-release-platforms.json`, the
+#                    single source of the declared platform set.
 #   verify           `test:run` and `test:browser` on the tagged revision
-#   package-windows  OV PFX signing, verified with Get-AuthenticodeSignature
-#   package-macos    Developer ID signing and notarization, codesign + spctl
-#   package-android  keystore signing when src-tauri/gen/android exists (#279)
+#   package-windows  desktop signing leg, deferred for the Beta and skipped when
+#                    the configuration does not declare `windows`
+#   package-macos    Developer ID signing leg, skipped when `macos` is undeclared
+#   package-android  keystore signing, skipped when `android` is undeclared
 #   assemble         canonical names, SHA256SUMS, one Sigstore attestation
 #   publish          the repository's only release write: draft, verify, flip
 #
@@ -67,9 +70,9 @@ jobs:
           node-version: 24
 
       # Everything this step reads is local: the tag name, its Git object, the
-      # commit's place in `main`, the other `client-v*` tags and the committed
-      # release notes. It reads no secret and does not fail when signing
-      # credentials are absent.
+      # commit's place in `main`, the other `client-v*` tags, the committed
+      # `client-release-platforms.json` and the release notes checked against it.
+      # It reads no secret and does not fail when signing credentials are absent.
       - name: Validate the tag and resolve the declared platforms
         id: tag
         env:
@@ -97,6 +100,8 @@ jobs:
     outputs:
       version: ${{ steps.tag.outputs.version }}
       platforms: ${{ steps.tag.outputs.platforms }}
+      windows: ${{ steps.tag.outputs.windows }}
+      macos: ${{ steps.tag.outputs.macos }}
       android: ${{ steps.tag.outputs.android }}
       state: ${{ steps.state.outputs.state }}
 
@@ -142,7 +147,11 @@ jobs:
   package-windows:
     name: Package Windows x64
     needs: [preflight]
-    if: needs.preflight.outputs.state != 'published'
+    # The configuration decides this leg: a platform it does not declare is
+    # skipped, not failed, so its credentials are never required. Windows is
+    # undeclared for the Beta (the signing mechanism is deferred, ADR-0036 §5) and
+    # the leg stays here for a later release to declare.
+    if: needs.preflight.outputs.state != 'published' && needs.preflight.outputs.windows == 'true'
     runs-on: windows-latest
     permissions:
       contents: read
@@ -240,7 +249,9 @@ jobs:
   package-macos:
     name: Package macOS universal
     needs: [preflight]
-    if: needs.preflight.outputs.state != 'published'
+    # Same gate as every platform leg: only a declared `macos` runs, and an
+    # undeclared macOS costs nothing.
+    if: needs.preflight.outputs.state != 'published' && needs.preflight.outputs.macos == 'true'
     runs-on: macos-latest
     permissions:
       contents: read
@@ -345,8 +356,9 @@ jobs:
   package-android:
     name: Package Android
     needs: [preflight]
-    # The Android project arrives with #279. Until then `preflight` omits android
-    # from the declared platform list and this job is skipped, not failed.
+    # `android` is a declaration in `client-release-platforms.json`; `preflight`
+    # refuses that declaration when the tagged commit has no `src-tauri/gen/android`
+    # project. An undeclared android is skipped, not failed.
     if: needs.preflight.outputs.state != 'published' && needs.preflight.outputs.android == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -463,6 +475,7 @@ jobs:
           aab="$(find src-tauri/gen/android/app/build/outputs -name '*.aab' -type f | head -n 1)"
           cp "$apk" release-assets/android.apk
           cp "$aab" release-assets/android.aab
+          cp dist/build-metadata.json release-assets/build-metadata.json
 
       - name: Upload the Android assets
         uses: actions/upload-artifact@v4
@@ -475,15 +488,16 @@ jobs:
   assemble:
     name: Assemble the release assets
     needs: [preflight, verify, package-windows, package-macos, package-android]
-    # A skipped Android leg is legitimate while #279 has not produced the Android
-    # project; a failed one is not. A failed verify or desktop leg blocks assembly
-    # too, so a partial download is never published. `!cancelled()` keeps the
-    # diagnostic path open when a sibling leg was cancelled.
+    # A leg may be skipped only when `preflight` said its platform is undeclared.
+    # A declared leg that skipped or failed blocks assembly, and so does a missing
+    # platform output, because the test is `== 'false'` rather than `!= 'true'`.
+    # `!cancelled()` keeps the diagnostic path open when a sibling leg was
+    # cancelled.
     if: ${{ !cancelled()
       && needs.verify.result == 'success'
-      && needs.package-windows.result == 'success'
-      && needs.package-macos.result == 'success'
-      && (needs.package-android.result == 'success' || needs.package-android.result == 'skipped') }}
+      && (needs.package-windows.result == 'success' || (needs.preflight.outputs.windows == 'false' && needs.package-windows.result == 'skipped'))
+      && (needs.package-macos.result == 'success' || (needs.preflight.outputs.macos == 'false' && needs.package-macos.result == 'skipped'))
+      && (needs.package-android.result == 'success' || (needs.preflight.outputs.android == 'false' && needs.package-android.result == 'skipped')) }}
     runs-on: ubuntu-latest
     # The only job that holds the OIDC token and the attestation write; it holds no
     # release write and declares no container-image storage permission.
@@ -499,42 +513,83 @@ jobs:
           persist-credentials: false
 
       - name: Download the Windows assets
+        if: needs.preflight.outputs.windows == 'true'
         uses: actions/download-artifact@v4
         with:
           name: client-windows
           path: artifacts/windows
 
       - name: Download the macOS assets
+        if: needs.preflight.outputs.macos == 'true'
         uses: actions/download-artifact@v4
         with:
           name: client-macos
           path: artifacts/macos
 
       - name: Download the Android assets
-        if: needs.package-android.result == 'success'
+        if: needs.preflight.outputs.android == 'true'
         uses: actions/download-artifact@v4
         with:
           name: client-android
           path: artifacts/android
 
-      # Canonical names carry the tag's `X.Y.Z`; the declared platform list from
-      # preflight decides which of them must exist. A declared platform with no
-      # file fails here, before the checksum and the attestation.
+      # Canonical names carry the tag's `X.Y.Z`; each copy is guarded by the
+      # preflight boolean of its own platform, so an undeclared platform never
+      # produces an asset name.
       - name: Assemble the canonical assets
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          WINDOWS: ${{ needs.preflight.outputs.windows }}
+          MACOS: ${{ needs.preflight.outputs.macos }}
+          ANDROID: ${{ needs.preflight.outputs.android }}
+        run: |
+          mkdir -p release-assets
+          if [ "$WINDOWS" = 'true' ]; then
+            cp artifacts/windows/windows-setup.exe "release-assets/AnyWear-${RELEASE_VERSION}-windows-x64-setup.exe"
+          fi
+          if [ "$MACOS" = 'true' ]; then
+            cp artifacts/macos/macos-image.dmg "release-assets/AnyWear-${RELEASE_VERSION}-macos-universal.dmg"
+          fi
+          if [ "$ANDROID" = 'true' ]; then
+            cp artifacts/android/android.apk "release-assets/AnyWear-${RELEASE_VERSION}-android.apk"
+            cp artifacts/android/android.aab "release-assets/AnyWear-${RELEASE_VERSION}-android.aab"
+          fi
+          cp "docs/client-release-notes/client-v${RELEASE_VERSION}.md" release-assets/RELEASE-NOTES.md
+
+      # `build-metadata.json` is the one fixed asset a build leg supplies. The
+      # first declared platform in canonical order whose artifact carries one
+      # provides it; assemble copies that file and never mints one, so the release
+      # carries the same bytes the app packed (`frontendDist: ../dist`).
+      - name: Select build-metadata.json
+        shell: bash
+        env:
+          WINDOWS: ${{ needs.preflight.outputs.windows }}
+          MACOS: ${{ needs.preflight.outputs.macos }}
+          ANDROID: ${{ needs.preflight.outputs.android }}
+        run: |
+          if [ "$WINDOWS" = 'true' ] && [ -f artifacts/windows/build-metadata.json ]; then
+            source_path='artifacts/windows/build-metadata.json'
+          elif [ "$MACOS" = 'true' ] && [ -f artifacts/macos/build-metadata.json ]; then
+            source_path='artifacts/macos/build-metadata.json'
+          elif [ "$ANDROID" = 'true' ] && [ -f artifacts/android/build-metadata.json ]; then
+            source_path='artifacts/android/build-metadata.json'
+          else
+            echo "::error::no declared platform staged build-metadata.json; the release requires the fixed asset and assemble never mints one"
+            exit 1
+          fi
+          cp "$source_path" release-assets/build-metadata.json
+
+      # The declared platform list from preflight decides which assets must exist;
+      # a declared platform with no file fails here, as does an `AnyWear-*` asset
+      # for a platform the configuration does not declare. Both checks run before
+      # the checksum and the attestation.
+      - name: Assert the assembled asset set
         shell: bash
         env:
           RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
           DECLARED_PLATFORMS: ${{ needs.preflight.outputs.platforms }}
         run: |
-          mkdir -p release-assets
-          cp artifacts/windows/windows-setup.exe "release-assets/AnyWear-${RELEASE_VERSION}-windows-x64-setup.exe"
-          cp artifacts/macos/macos-image.dmg "release-assets/AnyWear-${RELEASE_VERSION}-macos-universal.dmg"
-          if [ -d artifacts/android ]; then
-            cp artifacts/android/android.apk "release-assets/AnyWear-${RELEASE_VERSION}-android.apk"
-            cp artifacts/android/android.aab "release-assets/AnyWear-${RELEASE_VERSION}-android.aab"
-          fi
-          cp artifacts/windows/build-metadata.json release-assets/build-metadata.json
-          cp "docs/client-release-notes/client-v${RELEASE_VERSION}.md" release-assets/RELEASE-NOTES.md
           node scripts/assert-client-release.mjs assets --version "$RELEASE_VERSION" --platforms "$DECLARED_PLATFORMS" --directory release-assets
           node scripts/assert-client-release.mjs sizes --directory release-assets
 

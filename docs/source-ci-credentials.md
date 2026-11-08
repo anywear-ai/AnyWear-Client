@@ -112,7 +112,7 @@ exactly one job:
 
 | Secret | Platform | Form | Only referencing job |
 | --- | --- | --- | --- |
-| `WINDOWS_CERTIFICATE` | Windows | base64-encoded OV code-signing `.pfx` | `package-windows` |
+| `WINDOWS_CERTIFICATE` | Windows | base64-encoded OV code-signing `.pfx` (not an admitted mechanism; see below) | `package-windows` |
 | `WINDOWS_CERTIFICATE_PASSWORD` | Windows | `.pfx` export password | `package-windows` |
 | `APPLE_CERTIFICATE` | macOS | base64-encoded Developer ID Application `.p12` | `package-macos` |
 | `APPLE_CERTIFICATE_PASSWORD` | macOS | `.p12` password | `package-macos` |
@@ -121,6 +121,15 @@ exactly one job:
 | `ANDROID_KEYSTORE_PASSWORD` | Android | keystore password | `package-android` |
 | `ANDROID_KEY_ALIAS` | Android | key alias | `package-android` |
 | `ANDROID_KEY_PASSWORD` | Android | key password | `package-android` |
+
+The Windows `.pfx` is the name the job reads, not a mechanism this pipeline may
+publish from. Since 2023-06-01 the CA/Browser Forum *Code Signing Baseline
+Requirements* require a code-signing subscriber's private key to be generated,
+stored and used in a hardware module, a cloud key-protection service or a signing
+service, and `Import-PfxCertificate` imports a key exported out of exactly that
+boundary, so `WINDOWS_CERTIFICATE` cannot satisfy the requirement. Windows is
+`not_published (platform_not_enabled)` for the Beta; the leg, its signature check
+and its fail-closed probe stay in the workflow for a later release to declare.
 
 Nothing else is a secret. `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
 `APPLE_API_ISSUER`, `APPLE_API_KEY`, the Windows timestamp URL and the three
@@ -148,7 +157,10 @@ token, dispatches nothing and runs no cloud CLI. `preflight` references no secre
 all, so a missing signing credential cannot fail it; each platform job checks its
 own names as its first step and fails closed with
 `::error::<SECRET_NAME> is not configured; a <platform> release artifact cannot be produced`
-before compiling. An unsigned installer is never uploaded to a released page.
+before compiling. The declared set is not a secret either: `client-release-platforms.json`
+at the tagged revision is its single source, `preflight` reads it once, and a
+platform it does not declare has its job skipped, so that platform's secrets are
+never required. An unsigned installer is never uploaded to a released page.
 
 ## Caller secret mapping
 

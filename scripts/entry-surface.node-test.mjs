@@ -746,17 +746,106 @@ test('#278: client-release.yml proves the asset set with one checksum-derived at
   assert.doesNotMatch(assemble, /sha256sum -b/);
 });
 
-test('#278: client-release.yml declares the assemble condition with the Android branch', () => {
+test('#278: client-release.yml declares the assemble condition over the declared set', () => {
   const assemble = jobSection(read(tagEntry), 'assemble');
   const condition = /^ {4}if: \$\{\{ ([\s\S]*?) \}\}$/m.exec(assemble)?.[1];
   assert.ok(condition, 'assemble must declare its condition');
   assert.equal(
     condition.replace(/\s+/g, ' ').trim(),
     "!cancelled() && needs.verify.result == 'success' "
-    + "&& needs.package-windows.result == 'success' "
-    + "&& needs.package-macos.result == 'success' "
-    + "&& (needs.package-android.result == 'success' || needs.package-android.result == 'skipped')",
-    'a declared platform that did not succeed must stop assembly',
+    + "&& (needs.package-windows.result == 'success' || (needs.preflight.outputs.windows == 'false' && needs.package-windows.result == 'skipped')) "
+    + "&& (needs.package-macos.result == 'success' || (needs.preflight.outputs.macos == 'false' && needs.package-macos.result == 'skipped')) "
+    + "&& (needs.package-android.result == 'success' || (needs.preflight.outputs.android == 'false' && needs.package-android.result == 'skipped'))",
+    'a declared platform that did not succeed must stop assembly, and only an undeclared one may be skipped',
+  );
+});
+
+test('#278: client-release.yml wires every declared-set consumer to its own preflight output', () => {
+  const workflow = read(tagEntry);
+  const preflight = jobSection(workflow, 'preflight');
+  const outputs = /^ {4}outputs:\n((?: {6}[a-z0-9-]+: .*\n)+)/m.exec(preflight)?.[1] ?? '';
+  for (const output of ['version', 'platforms', 'windows', 'macos', 'android', 'state']) {
+    assert.match(outputs, new RegExp(`^ {6}${output}: `, 'm'), `preflight must republish its ${output} output`);
+  }
+
+  // Each platform leg is gated on its own boolean, and never runs once preflight
+  // classified a published release.
+  for (const [job, platform] of [['package-windows', 'windows'], ['package-macos', 'macos'], ['package-android', 'android']]) {
+    assert.match(
+      jobSection(workflow, job),
+      new RegExp(`^ {4}if: needs\\.preflight\\.outputs\\.state != 'published' && needs\\.preflight\\.outputs\\.${platform} == 'true'$`, 'm'),
+      `${job} must run only when the configuration declares ${platform}`,
+    );
+  }
+
+  const assemble = jobSection(workflow, 'assemble');
+  // The three artifact downloads: only a declared leg's artifact exists.
+  for (const [step, platform] of [['Download the Windows assets', 'windows'], ['Download the macOS assets', 'macos'], ['Download the Android assets', 'android']]) {
+    assert.match(
+      stepSection(assemble, step),
+      new RegExp(`^ {8}if: needs\\.preflight\\.outputs\\.${platform} == 'true'$`, 'm'),
+      `${step} must download only when ${platform} is declared`,
+    );
+  }
+
+  // The four canonical copies: each is guarded by its own preflight boolean, and
+  // Android's two share the Android boolean.
+  const canonical = stepSection(assemble, 'Assemble the canonical assets');
+  const guardedCopy = (flag) => {
+    const start = canonical.indexOf(`if [ "$${flag}" = 'true' ]; then`);
+    assert.ok(start >= 0, `the canonical copies must be guarded by the ${flag} boolean`);
+    const end = canonical.indexOf('\n          fi', start);
+    assert.ok(end > start, `the ${flag} guard must be closed`);
+    return canonical.slice(start, end);
+  };
+  assert.match(
+    guardedCopy('WINDOWS'),
+    /cp artifacts\/windows\/windows-setup\.exe "release-assets\/AnyWear-\$\{RELEASE_VERSION\}-windows-x64-setup\.exe"/,
+  );
+  assert.match(
+    guardedCopy('MACOS'),
+    /cp artifacts\/macos\/macos-image\.dmg "release-assets\/AnyWear-\$\{RELEASE_VERSION\}-macos-universal\.dmg"/,
+  );
+  const androidCopies = guardedCopy('ANDROID');
+  assert.match(androidCopies, /cp artifacts\/android\/android\.apk "release-assets\/AnyWear-\$\{RELEASE_VERSION\}-android\.apk"/);
+  assert.match(androidCopies, /cp artifacts\/android\/android\.aab "release-assets\/AnyWear-\$\{RELEASE_VERSION\}-android\.aab"/);
+
+  // The Android leg stages the fixed asset it now supplies for an Android-only set.
+  assert.match(
+    stepSection(jobSection(workflow, 'package-android'), 'Stage the Android assets'),
+    /^ {10}cp dist\/build-metadata\.json release-assets\/build-metadata\.json$/m,
+    'package-android must stage build-metadata.json',
+  );
+
+  // `build-metadata.json` comes from the first declared platform in canonical
+  // order whose artifact carries one, is checked for existence, and is copied,
+  // never minted.
+  const select = stepSection(assemble, 'Select build-metadata.json');
+  const windowsSource = select.indexOf('artifacts/windows/build-metadata.json');
+  const macosSource = select.indexOf('artifacts/macos/build-metadata.json');
+  const androidSource = select.indexOf('artifacts/android/build-metadata.json');
+  assert.ok(
+    windowsSource >= 0 && windowsSource < macosSource && macosSource < androidSource,
+    'the build-metadata source must be chosen in canonical order: windows, then macos, then android',
+  );
+  for (const source of ['artifacts/windows', 'artifacts/macos', 'artifacts/android']) {
+    assert.match(
+      select,
+      new RegExp(`\\[ -f ${source.replace(/\//g, '\\/')}\\/build-metadata\\.json \\]`),
+      `the ${source} file must be checked for existence before it is chosen`,
+    );
+  }
+  assert.match(select, /cp "\$source_path" release-assets\/build-metadata\.json/);
+  assert.match(select, /::error::no declared platform staged build-metadata\.json/);
+  assert.doesNotMatch(
+    select,
+    /> release-assets\/build-metadata\.json/,
+    'assemble must never mint the fixed asset it publishes',
+  );
+  assert.doesNotMatch(
+    assemble,
+    /^\s+cp artifacts\/windows\/build-metadata\.json release-assets\/build-metadata\.json$/m,
+    'build-metadata.json is no longer taken unconditionally from the Windows artifact',
   );
 });
 

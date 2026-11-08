@@ -2,13 +2,15 @@
 //
 // The pipeline is tag-triggered, so the rules it applies must be provable without
 // a tag, a certificate or a network. Every case here is fixed input: the tag
-// grammar, the lightweight-tag rule, release-level monotonicity, the four-state
-// release classification, the declared-platform/asset comparison, the six
+// grammar, the lightweight-tag rule, release-level monotonicity, the declared
+// platform set read from `client-release-platforms.json`, the four-state release
+// classification, the declared-platform/asset comparison, the release-notes
+// contract including its `## Platform availability` section, the six
 // `SHA256SUMS` format rules, and the per-platform fail-closed message. The one
 // CLI case spawns the real script against the real checkout, which is exactly the
 // Development gate:
 //
-//   node scripts/assert-client-release.mjs verify --tag client-v0.1.0
+//   node scripts/assert-client-release.mjs verify --tag client-v0.2.0
 //
 // Run with `pnpm run test:run`, which includes this file in its `node --test` list.
 
@@ -55,11 +57,60 @@ import {
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const hashA = 'a'.repeat(64);
 const hashB = 'b'.repeat(64);
+const allPlatforms = ['windows', 'macos', 'android'];
+const platformLabels = {
+  windows: '- **Windows:**',
+  macos: '- **macOS:**',
+  android: '- **Android:**',
+};
 
-/** A temporary repository root, with the release notes the caller writes. */
-function temporaryRoot(files = {}) {
+/** One `## Platform availability` line; free reason text may follow the value. */
+function availabilityLine(platform, value) {
+  return `${platformLabels[platform]} ${value}`;
+}
+
+/** The release-notes fixture in the house shape, with an availability block. */
+function releaseNotes({ platforms = allPlatforms, availability, knownIssues = true } = {}) {
+  const lines = availability ?? allPlatforms.map((platform) => (
+    platforms.includes(platform)
+      ? availabilityLine(platform, 'published: fixture artifact')
+      : availabilityLine(platform, 'not_published (platform_not_enabled, fixture)')
+  ));
+  return [
+    '# 0.2.0',
+    '',
+    '## Platform availability',
+    '',
+    ...lines,
+    '',
+    ...(knownIssues ? ['## Known issues', '', '- none'] : []),
+    '',
+  ].join('\n');
+}
+
+/** Matches a `ClientReleaseError` whose message contains every fragment. */
+function messageIncludes(...fragments) {
+  return (failure) => (
+    failure instanceof ClientReleaseError && fragments.every((fragment) => failure.message.includes(fragment))
+  );
+}
+
+/**
+ * A temporary repository root: the release notes the caller writes and the
+ * committed platform configuration. Every fixture therefore carries the
+ * configuration the guard reads, and a configuration that declares `android`
+ * carries the project that declaration requires.
+ */
+function temporaryRoot(files = {}, config = { schema_version: 1, declared_platforms: ['android'] }) {
   const root = mkdtempSync(join(tmpdir(), 'client-release-'));
   mkdirSync(join(root, 'docs', 'client-release-notes'), { recursive: true });
+  if (config !== null) {
+    writeFileSync(join(root, 'client-release-platforms.json'), `${JSON.stringify(config, null, 2)}\n`);
+    const declared = Array.isArray(config.declared_platforms) ? config.declared_platforms : [];
+    if (declared.includes('android')) {
+      mkdirSync(join(root, 'src-tauri', 'gen', 'android'), { recursive: true });
+    }
+  }
   for (const [name, content] of Object.entries(files)) {
     writeFileSync(join(root, 'docs', 'client-release-notes', name), content);
   }
@@ -121,28 +172,133 @@ test('the release version must be strictly above the highest other client-v* tag
 });
 
 test('a release note must exist, be non-empty and carry the Known issues heading', () => {
-  const good = temporaryRoot({
-    'client-v0.1.0.md': '# 0.1.0\n\n## Known issues\n\n- none\n',
-  });
-  assert.equal(assertReleaseNotes(good, 'client-v0.1.0'), join(good, releaseNotesPath('client-v0.1.0')));
+  const platforms = allPlatforms;
+  const config = { schema_version: 1, declared_platforms: platforms };
+  const good = temporaryRoot({ 'client-v0.1.0.md': releaseNotes() }, config);
+  assert.equal(assertReleaseNotes(good, 'client-v0.1.0', platforms), join(good, releaseNotesPath('client-v0.1.0')));
 
-  const missing = temporaryRoot();
+  const missing = temporaryRoot({}, config);
   assert.throws(
-    () => assertReleaseNotes(missing, 'client-v0.1.0'),
+    () => assertReleaseNotes(missing, 'client-v0.1.0', platforms),
     /the release notes file `docs\/client-release-notes\/client-v0\.1\.0\.md` is missing/,
   );
 
-  const empty = temporaryRoot({ 'client-v0.1.0.md': '  \n' });
-  assert.throws(() => assertReleaseNotes(empty, 'client-v0.1.0'), /is empty/);
+  const empty = temporaryRoot({ 'client-v0.1.0.md': '  \n' }, config);
+  assert.throws(() => assertReleaseNotes(empty, 'client-v0.1.0', platforms), /is empty/);
 
-  const headingless = temporaryRoot({ 'client-v0.1.0.md': '# 0.1.0\n\nNo issues were recorded.\n' });
+  const headingless = temporaryRoot({
+    'client-v0.1.0.md': '# 0.1.0\n\n## Platform availability\n\n- **Windows:** published\n- **macOS:** published\n- **Android:** published\n',
+  }, config);
   assert.throws(
-    () => assertReleaseNotes(headingless, 'client-v0.1.0'),
+    () => assertReleaseNotes(headingless, 'client-v0.1.0', platforms),
     /must contain a `## Known issues` section/,
   );
 
-  // The landed revision must satisfy the gate the issue names.
-  assert.ok(assertReleaseNotes(repositoryRoot, 'client-v0.1.0'));
+  // v0.2.0 is a published historical set: check the landed notes against the set
+  // that release was written for, not against whatever the configuration declares
+  // today. The current configuration has its own validity case below.
+  assert.ok(assertReleaseNotes(repositoryRoot, 'client-v0.2.0', ['android']));
+});
+
+test('the Platform availability section must state each platform consistently with the configuration', () => {
+  const platforms = ['android'];
+  const config = { schema_version: 1, declared_platforms: platforms };
+
+  const good = temporaryRoot({ 'client-v0.2.0.md': releaseNotes({ platforms }) }, config);
+  assert.equal(assertReleaseNotes(good, 'client-v0.2.0', platforms), join(good, releaseNotesPath('client-v0.2.0')));
+
+  // A CRLF file is refused by name, like the checksum file, rather than failing as
+  // a missing platform line.
+  const crlf = temporaryRoot({
+    'client-v0.2.0.md': releaseNotes({ platforms }).replace(/\n/g, '\r\n'),
+  }, config);
+  assert.throws(
+    () => assertReleaseNotes(crlf, 'client-v0.2.0', platforms),
+    messageIncludes('carriage return', 'LF line endings'),
+  );
+
+  const sectionless = temporaryRoot({ 'client-v0.2.0.md': '# 0.2.0\n\n## Known issues\n\n- none\n' }, config);
+  assert.throws(
+    () => assertReleaseNotes(sectionless, 'client-v0.2.0', platforms),
+    messageIncludes('`## Platform availability`', 'must contain'),
+  );
+
+  const missingLine = temporaryRoot({
+    'client-v0.2.0.md': releaseNotes({
+      platforms,
+      availability: [
+        availabilityLine('windows', 'not_published (platform_not_enabled, deferred)'),
+        availabilityLine('android', 'published: fixture artifact'),
+      ],
+    }),
+  }, config);
+  assert.throws(
+    () => assertReleaseNotes(missingLine, 'client-v0.2.0', platforms),
+    messageIncludes('`## Platform availability`', '`- **macOS:**`', 'no'),
+  );
+
+  const duplicateLine = temporaryRoot({
+    'client-v0.2.0.md': releaseNotes({
+      platforms,
+      availability: [
+        availabilityLine('windows', 'not_published (platform_not_enabled, deferred)'),
+        availabilityLine('macos', 'not_published (platform_not_enabled, deferred)'),
+        availabilityLine('android', 'published: fixture artifact'),
+        availabilityLine('android', 'published: fixture artifact again'),
+      ],
+    }),
+  }, config);
+  assert.throws(
+    () => assertReleaseNotes(duplicateLine, 'client-v0.2.0', platforms),
+    messageIncludes('repeats', '`- **Android:**`'),
+  );
+
+  const unknownLabel = temporaryRoot({
+    'client-v0.2.0.md': releaseNotes({
+      platforms,
+      availability: [
+        availabilityLine('windows', 'not_published (platform_not_enabled, deferred)'),
+        availabilityLine('macos', 'not_published (platform_not_enabled, deferred)'),
+        availabilityLine('android', 'published: fixture artifact'),
+        '- **Linux:** published: not a release platform',
+      ],
+    }),
+  }, config);
+  assert.throws(
+    () => assertReleaseNotes(unknownLabel, 'client-v0.2.0', platforms),
+    messageIncludes('`- **Linux:**`', 'accepts only'),
+  );
+
+  // Android is declared, so its line may not say it was not published.
+  const declaredNotPublished = temporaryRoot({
+    'client-v0.2.0.md': releaseNotes({ platforms: [] }),
+  }, config);
+  assert.throws(
+    () => assertReleaseNotes(declaredNotPublished, 'client-v0.2.0', platforms),
+    messageIncludes('`- **Android:**`', 'is declared by', 'must begin `published`'),
+  );
+
+  // Windows is not declared, so its line may not claim it was published.
+  const undeclaredPublished = temporaryRoot({
+    'client-v0.2.0.md': releaseNotes({ platforms: allPlatforms }),
+  }, config);
+  assert.throws(
+    () => assertReleaseNotes(undeclaredPublished, 'client-v0.2.0', platforms),
+    messageIncludes('`- **Windows:**`', 'is not declared by', 'not_published (platform_not_enabled'),
+  );
+
+  // Every accepted line may carry free reason text after the required prefix.
+  const withReason = temporaryRoot({
+    'client-v0.2.0.md': releaseNotes({
+      platforms,
+      availability: [
+        availabilityLine('windows', 'not_published (platform_not_enabled, Windows signing is deferred for this Beta)'),
+        availabilityLine('macos', 'not_published (platform_not_enabled, macOS credentials are not provisioned)'),
+        availabilityLine('android', 'published: a signed APK for direct installation'),
+      ],
+    }),
+  }, config);
+  assert.equal(assertReleaseNotes(withReason, 'client-v0.2.0', platforms), join(withReason, releaseNotesPath('client-v0.2.0')));
 });
 
 test('the four preflight states classify absent, draft, complete and gapped releases', () => {
@@ -278,6 +434,40 @@ test('a declared platform with no artifact stops assembly', () => {
 
   assert.deepEqual(platformAssetNames('0.1.0').android, ['AnyWear-0.1.0-android.apk', 'AnyWear-0.1.0-android.aab']);
   assert.deepEqual(FIXED_ASSET_NAMES, ['build-metadata.json', 'RELEASE-NOTES.md', 'SHA256SUMS', 'SHA256SUMS.sigstore.json']);
+});
+
+test('an AnyWear asset for an undeclared platform is refused', () => {
+  const platforms = ['android'];
+  const androidOnly = [
+    'AnyWear-0.2.0-android.apk',
+    'AnyWear-0.2.0-android.aab',
+    'build-metadata.json',
+    'RELEASE-NOTES.md',
+  ];
+  assert.deepEqual(assertDeclaredAssets({ version: '0.2.0', declaredPlatforms: platforms, assetNames: androidOnly }), []);
+
+  // A copied desktop asset names both the platform and the file in the refusal.
+  for (const [name, platform] of [
+    ['AnyWear-0.2.0-windows-x64-setup.exe', 'windows'],
+    ['AnyWear-0.2.0-macos-universal.dmg', 'macos'],
+  ]) {
+    assert.throws(
+      () => assertDeclaredAssets({ version: '0.2.0', declaredPlatforms: platforms, assetNames: [...androidOnly, name] }),
+      messageIncludes(platform, name, 'does not declare'),
+      `an undeclared ${platform} asset must fail`,
+    );
+  }
+
+  // An unknown `AnyWear-*` name is still this check's business; a plain extra file is not.
+  assert.throws(
+    () => assertDeclaredAssets({ version: '0.2.0', declaredPlatforms: platforms, assetNames: [...androidOnly, 'AnyWear-0.2.0-linux.AppImage'] }),
+    messageIncludes('AnyWear-0.2.0-linux.AppImage', 'names no release platform'),
+  );
+  assert.deepEqual(
+    assertDeclaredAssets({ version: '0.2.0', declaredPlatforms: platforms, assetNames: [...androidOnly, 'stray.txt'] }),
+    [],
+    'an unrelated non-AnyWear file is left to publish’s inventory readback',
+  );
 });
 
 test('every release asset is below the 2 GiB single-file limit and the total is reported', () => {
@@ -449,19 +639,81 @@ test('the commit must be in the main history', () => {
   );
 });
 
-test('the Android platform is declared only when the Android project is present', () => {
-  // Behaviour over the `root` parameter only: this holds on any revision, so a
-  // sibling issue that commits `src-tauri/gen/android` cannot turn it red.
-  const bare = mkdtempSync(join(tmpdir(), 'client-android-bare-'));
-  assert.deepEqual(declaredPlatforms(bare), ['windows', 'macos'], 'a root with no src-tauri/gen declares only the desktop platforms');
+test('the declared platform set is read from the committed configuration and validated', () => {
+  // Behaviour over the `root` parameter only: these cases hold on any revision, so
+  // a sibling issue that touches the Android project cannot turn them red.
+  const configuredRoot = (config) => {
+    const directory = mkdtempSync(join(tmpdir(), 'client-platforms-'));
+    if (config !== undefined) {
+      writeFileSync(
+        join(directory, 'client-release-platforms.json'),
+        typeof config === 'string' ? config : `${JSON.stringify(config, null, 2)}\n`,
+      );
+    }
+    return directory;
+  };
 
-  const generated = mkdtempSync(join(tmpdir(), 'client-android-gen-'));
-  mkdirSync(join(generated, 'src-tauri', 'gen'), { recursive: true });
-  assert.deepEqual(declaredPlatforms(generated), ['windows', 'macos'], 'src-tauri/gen without android/ is not the Android project');
+  // A missing configuration file.
+  assert.throws(
+    () => declaredPlatforms(configuredRoot()),
+    messageIncludes('`client-release-platforms.json`', 'is missing'),
+  );
+  // Invalid JSON.
+  assert.throws(() => declaredPlatforms(configuredRoot('{')), messageIncludes('`client-release-platforms.json`', 'not valid JSON'));
+  // A schema version this pipeline does not read.
+  for (const config of [{ schema_version: 2, declared_platforms: ['windows'] }, { declared_platforms: ['windows'] }]) {
+    assert.throws(() => declaredPlatforms(configuredRoot(config)), messageIncludes('`schema_version`', 'schema 1'));
+  }
+  // `declared_platforms` missing, not an array, or empty.
+  for (const config of [
+    { schema_version: 1 },
+    { schema_version: 1, declared_platforms: 'android' },
+    { schema_version: 1, declared_platforms: [] },
+  ]) {
+    assert.throws(() => declaredPlatforms(configuredRoot(config)), ClientReleaseError);
+  }
+  assert.throws(
+    () => declaredPlatforms(configuredRoot({ schema_version: 1 })),
+    messageIncludes('`declared_platforms`', 'array'),
+  );
+  assert.throws(
+    () => declaredPlatforms(configuredRoot({ schema_version: 1, declared_platforms: [] })),
+    messageIncludes('`declared_platforms`', 'at least one'),
+  );
+  // An entry outside windows/macos/android.
+  assert.throws(
+    () => declaredPlatforms(configuredRoot({ schema_version: 1, declared_platforms: ['linux'] })),
+    messageIncludes('`linux`', 'not a release platform'),
+  );
+  // A duplicate entry.
+  assert.throws(
+    () => declaredPlatforms(configuredRoot({ schema_version: 1, declared_platforms: ['windows', 'windows'] })),
+    messageIncludes('`windows`', 'more than once'),
+  );
+  // `android` declared without the project that declaration requires.
+  assert.throws(
+    () => declaredPlatforms(configuredRoot({ schema_version: 1, declared_platforms: ['android'] })),
+    messageIncludes('`android`', '`src-tauri/gen/android`'),
+  );
 
-  const android = mkdtempSync(join(tmpdir(), 'client-android-project-'));
-  mkdirSync(join(android, 'src-tauri', 'gen', 'android'), { recursive: true });
-  assert.deepEqual(declaredPlatforms(android), ['windows', 'macos', 'android'], 'the committed Android project adds the platform');
+  // Parsing returns the declared set in canonical order, whatever the file order.
+  const unordered = configuredRoot({ schema_version: 1, declared_platforms: ['android', 'windows'] });
+  mkdirSync(join(unordered, 'src-tauri', 'gen', 'android'), { recursive: true });
+  assert.deepEqual(declaredPlatforms(unordered), ['windows', 'android']);
+  assert.deepEqual(
+    declaredPlatforms(configuredRoot({ schema_version: 1, declared_platforms: ['macos', 'windows'] })),
+    ['windows', 'macos'],
+  );
+  assert.throws(
+    () => declaredPlatforms(configuredRoot({ schema_version: 1, declared_platforms: ['android', 'macos', 'windows'] })),
+    messageIncludes('`android`', '`src-tauri/gen/android`'),
+    'android is still refused without the project, not silently dropped',
+  );
+
+  // The committed configuration must be readable and valid. Its value is a
+  // reviewed data line, not a unit-test pin: pinning it would make every future
+  // declaration a two-file edit, which #290's design rejects.
+  assert.doesNotThrow(() => declaredPlatforms(repositoryRoot));
 });
 
 test('a second release for the same commit is refused', () => {
@@ -544,23 +796,37 @@ test('the release readback must match the declared inventory before and after th
 });
 
 test('the CLI verify command is green on the landed revision and red without the release notes', () => {
-  const landed = runCli(['verify', '--tag', 'client-v0.1.0']);
+  const landed = runCli(['verify', '--tag', 'client-v0.2.0']);
   assert.equal(landed.status, 0, landed.output);
-  assert.match(landed.output, /client release tag client-v0\.1\.0 is well formed \(0\.1\.0\)/);
-  assert.match(landed.output, /release notes docs\/client-release-notes\/client-v0\.1\.0\.md carry the `## Known issues` section/);
+  assert.match(landed.output, /client release tag client-v0\.2\.0 is well formed \(0\.2\.0\)/);
+  assert.match(
+    landed.output,
+    /release notes docs\/client-release-notes\/client-v0\.2\.0\.md carry the `## Known issues` and `## Platform availability` sections for android/,
+  );
 
   const missing = temporaryRoot();
-  const missingResult = runCli(['verify', '--tag', 'client-v0.1.0'], missing);
+  const missingResult = runCli(['verify', '--tag', 'client-v0.2.0'], missing);
   assert.equal(missingResult.status, 1, missingResult.output);
-  assert.match(missingResult.output, /::error::the release notes file `docs\/client-release-notes\/client-v0\.1\.0\.md` is missing/);
+  assert.match(missingResult.output, /::error::the release notes file `docs\/client-release-notes\/client-v0\.2\.0\.md` is missing/);
 
-  const headingless = temporaryRoot({ 'client-v0.1.0.md': '# 0.1.0\n' });
-  const headinglessResult = runCli(['verify', '--tag', 'client-v0.1.0'], headingless);
+  const headingless = temporaryRoot({ 'client-v0.2.0.md': '# 0.2.0\n' });
+  const headinglessResult = runCli(['verify', '--tag', 'client-v0.2.0'], headingless);
   assert.equal(headinglessResult.status, 1, headinglessResult.output);
   assert.match(headinglessResult.output, /::error::the release notes file .* must contain a `## Known issues` section/);
 
-  const good = temporaryRoot({ 'client-v0.1.0.md': '# 0.1.0\n\n## Known issues\n\n- none\n' });
-  assert.equal(runCli(['verify', '--tag', 'client-v0.1.0'], good).status, 0);
+  // The configuration is read first: a set that contradicts the notes fails verify.
+  const contradictory = temporaryRoot({
+    'client-v0.2.0.md': releaseNotes({ platforms: [] }),
+  }, { schema_version: 1, declared_platforms: ['android'] });
+  const contradictoryResult = runCli(['verify', '--tag', 'client-v0.2.0'], contradictory);
+  assert.equal(contradictoryResult.status, 1, contradictoryResult.output);
+  assert.match(contradictoryResult.output, /::error::the release notes file .* `- \*\*Android:\*\*`/);
+  assert.match(contradictoryResult.output, /is declared by `client-release-platforms\.json`/);
+
+  const good = temporaryRoot({
+    'client-v0.2.0.md': releaseNotes({ platforms: ['android'] }),
+  }, { schema_version: 1, declared_platforms: ['android'] });
+  assert.equal(runCli(['verify', '--tag', 'client-v0.2.0'], good).status, 0);
 
   const illegal = runCli(['verify', '--tag', 'client-v1.2']);
   assert.equal(illegal.status, 1, illegal.output);

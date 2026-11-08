@@ -14,11 +14,11 @@ runner with its own secrets.
 
 ```mermaid
 flowchart LR
-    T["git push origin client-vX.Y.Z"] --> PF["preflight<br/>tag, main, monotonic, state"]
+    T["git push origin client-vX.Y.Z"] --> PF["preflight<br/>tag, main, monotonic, state, declared platforms"]
     PF --> V["verify<br/>test:run + test:browser"]
-    PF --> W["package-windows"]
-    PF --> M["package-macos"]
-    PF --> A["package-android<br/>only when src-tauri/gen/android exists"]
+    PF --> W["package-windows<br/>only when declared"]
+    PF --> M["package-macos<br/>only when declared"]
+    PF --> A["package-android<br/>only when the configuration declares android"]
     V --> AS["assemble<br/>names + SHA256SUMS + attestation"]
     W --> AS
     M --> AS
@@ -29,29 +29,44 @@ flowchart LR
 
 ## Before the first release (owner preconditions, not pipeline steps)
 
-These are repository settings and purchases, not commands the pipeline runs. They
-are prerequisites for a signed, immutable release:
+These are repository settings and operator decisions, not commands the pipeline
+runs. They are prerequisites for a signed, immutable release:
 
 1. **Immutable releases enabled** in the repository settings. Published tags and
    assets then cannot be moved, replaced or deleted, and GitHub records its own
    release attestation. The pipeline cannot read this setting (it needs repository
    administration), so enabling it is checked here, out of band, once.
-2. **Nine repository-scoped secrets configured**: `WINDOWS_CERTIFICATE`,
-   `WINDOWS_CERTIFICATE_PASSWORD`, `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
-   `APPLE_API_KEY_P8`, `ANDROID_KEY_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
-   `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. Each is read by one platform job;
-   see [CI credentials](source-ci-credentials.md#signing-secrets).
-3. **Certificates procured**: a Windows OV code-signing `.pfx`, an Apple Developer
-   ID Application certificate and an App Store Connect API key. The reviewed
-   workflow constants `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
+2. **Repository-scoped secrets for the declared platforms.** The workflow holds
+   nine signing secrets: `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`,
+   `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY_P8`,
+   `ANDROID_KEY_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
+   `ANDROID_KEY_PASSWORD`. The declared set decides which are configured: this
+   Beta's `android` set needs the four `ANDROID_*`, and only a release that
+   declares `windows` or `macos` requires the rest. Each is read by one platform
+   job; see [CI credentials](source-ci-credentials.md#signing-secrets).
+3. **Credentials for the declared platforms.** This Beta declares `android`: its
+   upload keystore is generated once with `keytool` and stored base64-encoded in the
+   four `ANDROID_*` secrets. A release that declares `macos` also needs an Apple
+   Developer ID Application certificate and an App Store Connect API key. The
+   reviewed workflow constants `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
    `APPLE_API_ISSUER`, `APPLE_API_KEY` and `WINDOWS_TIMESTAMP_URL` carry the public
-   values; replace the placeholders in `client-release.yml` when the certificates
-   are bought. Changing them is a reviewed workflow change.
-4. **Platform list**: `windows` and `macos` are always declared. `android` joins the
-   declared list only when the tag's commit contains `src-tauri/gen/android`, which
-   #279 produces. A platform staying out of the list is an operator decision made
-   by not having the project or by reviewing the list out, and the release notes
-   record `not_published (platform_not_enabled)`.
+   values; changing them is a reviewed workflow change.
+
+   The Windows OV `.pfx` is **not** an admitted mechanism. Since 2023-06-01 the
+   CA/Browser Forum *Code Signing Baseline Requirements* require a subscriber's
+   private key to be generated, stored and used in a hardware module, a cloud
+   key-protection service or a signing service, and `Import-PfxCertificate` needs
+   the private key exported out of exactly that hardware boundary. The Windows leg
+   is therefore deferred for the Beta; choosing a replacement signer is a separate
+   decision. The job, its asset name and its signature check stay in the workflow,
+   skipped because the configuration does not declare `windows`.
+4. **Platform list**: `client-release-platforms.json` at the repository root is the
+   single source of the declared set. `preflight` reads it once and prints
+   `platforms=` plus one boolean per platform, and every later job reads those
+   outputs. A platform it names is built; a platform it does not name is skipped and
+   recorded `not_published (platform_not_enabled)`. Declaring `android` also requires
+   the committed `src-tauri/gen/android` project — `preflight` refuses the
+   declaration without it. The committed set for this Beta is `["android"]`.
 
 ## Releasing
 
@@ -61,14 +76,19 @@ are prerequisites for a signed, immutable release:
    `github.event.before`; it permits equality). The release-level rule below is a
    different rule.
 2. Add or update `docs/client-release-notes/client-v<X.Y.Z>.md` and merge it. The
-   file must be non-empty Markdown and contain a `## Known issues` heading;
-   `preflight` refuses the tag without it.
+   file must be non-empty Markdown, contain a `## Known issues` heading, and carry a
+   `## Platform availability` section with exactly one labelled line per platform:
+   `- **Windows:**`, `- **macOS:**` and `- **Android:**`. A platform the
+   configuration declares must read `published`; one it does not declare must read
+   `not_published (platform_not_enabled`, with the reason after it. `preflight` and
+   `node scripts/assert-client-release.mjs verify --tag client-v<X.Y.Z>` both refuse
+   notes that miss, repeat or contradict a platform.
 3. Create and push a **lightweight** tag. An annotated tag is refused by
    `preflight`; this repository does not dereference tags in CI.
 
    ```bash
-   git tag client-v0.1.0
-   git push origin client-v0.1.0
+   git tag client-v0.2.0
+   git push origin client-v0.2.0
    ```
 
 4. Watch the run:
@@ -78,12 +98,12 @@ are prerequisites for a signed, immutable release:
    gh run watch <run-id> --repo anywear-ai/AnyWear-Client
    ```
 
-5. The pipeline takes over: `preflight` validates identity and state, `verify`
-   runs the tests on the tagged revision, the three platform jobs check their own
-   secrets and sign and verify their own binaries, `assemble` asserts the declared
-   platforms and the 2 GiB single-file limit, writes `SHA256SUMS` and one
-   attestation, and `publish` creates a draft, uploads, checks the checksums back,
-   flips it to a prerelease and reads it back.
+5. The pipeline takes over: `preflight` validates identity, state and the declared
+   platform set, `verify` runs the tests on the tagged revision, each declared
+   platform job checks its own secrets and signs and verifies its own binary,
+   `assemble` asserts the declared platforms and the 2 GiB single-file limit,
+   writes `SHA256SUMS` and one attestation, and `publish` creates a draft, uploads,
+   checks the checksums back, flips it to a prerelease and reads it back.
 6. Hand the Release link to testers.
 
 There is no manual dispatch, so the only recovery is a re-run:
@@ -119,10 +139,10 @@ after its Release is delisted, because the Git tag remains.
 Download the assets — the repository is public, so no login is needed:
 
 ```bash
-gh release download client-v0.1.0 --repo anywear-ai/AnyWear-Client --dir anywear-client-0.1.0
+gh release download client-v0.2.0 --repo anywear-ai/AnyWear-Client --dir anywear-client-0.2.0
 ```
 
-or open `https://github.com/anywear-ai/AnyWear-Client/releases/tag/client-v0.1.0`.
+or open `https://github.com/anywear-ai/AnyWear-Client/releases/tag/client-v0.2.0`.
 
 ### 1. Checksums
 
@@ -133,14 +153,14 @@ for the file itself.
 Linux:
 
 ```bash
-cd anywear-client-0.1.0
+cd anywear-client-0.2.0
 sha256sum -c SHA256SUMS
 ```
 
 macOS:
 
 ```bash
-cd anywear-client-0.1.0
+cd anywear-client-0.2.0
 shasum -a 256 -c SHA256SUMS
 ```
 
@@ -165,7 +185,7 @@ you are checking:
 ```bash
 gh attestation verify --bundle SHA256SUMS.sigstore.json --repo anywear-ai/AnyWear-Client \
   --signer-workflow anywear-ai/AnyWear-Client/.github/workflows/client-release.yml \
-  --source-ref refs/tags/client-v0.1.0 \
+  --source-ref refs/tags/client-v0.2.0 \
   --source-digest <the tag commit sha> \
   --custom-trusted-root trusted_root.jsonl
 ```
@@ -181,10 +201,13 @@ live Release page (§ Withdrawal).
 
 ### 3. Native signatures
 
+The Beta publishes Android only. The desktop examples apply to a release whose
+configuration declares that platform.
+
 Windows (PowerShell). `Status` must be `Valid`:
 
 ```powershell
-Get-AuthenticodeSignature -FilePath .\AnyWear-0.1.0-windows-x64-setup.exe | Format-List Status, StatusMessage, SignerCertificate
+Get-AuthenticodeSignature -FilePath .\AnyWear-0.2.0-windows-x64-setup.exe | Format-List Status, StatusMessage, SignerCertificate
 ```
 
 macOS. Both commands must pass:
@@ -194,10 +217,10 @@ codesign -vvv --strict --deep AnyWear.app
 spctl -a -vvv -t exec AnyWear.app
 ```
 
-Android (after #279 produces the project and the first APK):
+Android (this Beta's published platform):
 
 ```bash
-apksigner verify --print-certs AnyWear-0.1.0-android.apk
+apksigner verify --print-certs AnyWear-0.2.0-android.apk
 ```
 
 `build-metadata.json` is packed inside the application (`frontendDist: ../dist`),
@@ -213,9 +236,10 @@ which `preflight` requires before the tag can publish. The same file is attached
 the immutable asset `RELEASE-NOTES.md`, so the limitations recorded at publication
 time cannot be quietly rewritten afterwards.
 
-- **Before tagging**: edit the file, include at least a `## Known issues` heading,
-  merge it, then tag. `node scripts/assert-client-release.mjs verify --tag
-  client-v<X.Y.Z>` checks the file locally without a tag or a network.
+- **Before tagging**: edit the file, include the `## Known issues` heading and the
+  `## Platform availability` block described under § Releasing, merge it, then tag.
+  `node scripts/assert-client-release.mjs verify --tag client-v<X.Y.Z>` checks both
+  sections and the declared set locally, without a tag or a network.
 - **After publication**: treat `RELEASE-NOTES.md` as a snapshot. Current operational
   advice, withdrawal banners and pointers to a replacement version go on the
   mutable GitHub Release body, which is the part testers read first.

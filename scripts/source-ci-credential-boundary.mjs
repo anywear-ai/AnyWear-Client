@@ -274,7 +274,6 @@ const commandRunnerTokens = new Set([
   'sudo', 'env', 'exec', 'nohup', 'time', 'bash', 'sh', 'zsh', 'pwsh', 'powershell',
   'cmd', 'npx', 'pnpm', 'npm', 'yarn', 'bunx', 'corepack', 'x', 'run', 'dlx',
 ]);
-const commandSegmentPattern = /\s*(?:&&|\|\||\||;)\s*/;
 
 function violation(file, line, message) {
   return `${file}:${line} ${message}`;
@@ -426,11 +425,13 @@ function stepFields(step) {
 
 /**
  * Reads the parts of a workflow file the credential boundary governs: the
- * workflow-level `permissions` block, each job and its steps, the secrets a caller
- * job maps into the workflow it calls, and the secrets a `workflow_call` workflow
- * declares. Only the flow-style subset this repository's workflows use is
- * supported; anything else raises, so an unreadable contract fails the check
- * rather than passing silently.
+ * workflow-level `permissions` block and `env:` values, each job's `environment:`
+ * declaration and `env:` values, each step's `uses`/`with`/`env`/`run:` body, the
+ * secrets a caller job maps into the workflow it calls, and the secrets a
+ * `workflow_call` workflow declares. A job that declares neither `steps:` nor a
+ * job-level `uses:` raises, because its steps cannot be read. Only the flow-style
+ * subset this repository's workflows use is supported; anything else raises, so an
+ * unreadable contract fails the check rather than passing silently.
  */
 export function parseWorkflow(text, file) {
   const lines = text
@@ -600,31 +601,167 @@ function packagingEntryValues(workflow, steps) {
 }
 
 /**
- * The cloud CLI a shell body line invokes in command position, or `undefined`.
+ * The index of the `)` that closes the `(` at `open`, or `-1` when it is
+ * unclosed. Parentheses inside single or double quotes and escaped characters are
+ * skipped, so a quoted parenthesis does not end the substitution early.
+ */
+function matchingParenthesis(text, open) {
+  let depth = 0;
+  let quote = null;
+  for (let index = open; index < text.length; index += 1) {
+    const character = text[index];
+    if (quote === "'") {
+      if (character === "'") quote = null;
+      continue;
+    }
+    if (character === '\\') {
+      index += 1;
+      continue;
+    }
+    if (quote === '"') {
+      if (character === '"') quote = null;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === '(') depth += 1;
+    if (character === ')') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+/** The cloud CLI one command segment starts with, or `undefined`. */
+function cloudCommandInSegment(segment) {
+  // `$(`, `(`, `&`, `!` and quotes may prefix a command, and may stack.
+  const tokens = segment
+    .replace(/^(?:\$\(|\(|&|!|['"`])+/, '')
+    .trimStart()
+    .split(/\s+/)
+    .filter((token) => token !== '');
+  while (tokens.length > 0 && commandRunnerTokens.has(tokens[0])) tokens.shift();
+  if (tokens.length === 0) return undefined;
+  const command = tokens[0]
+    .replace(/^.*[\\/]/, '')
+    .replace(/\.(?:exe|cmd|bat|ps1)$/i, '')
+    .toLowerCase();
+  return cloudCommands.has(command) ? command : undefined;
+}
+
+/**
+ * The cloud CLI a shell body line invokes, or `undefined`.
  *
- * The body is split into command segments, the wrappers that still run the next
- * word are stripped, and only the first remaining word is compared. A bare `aws`
- * search would also match `aws-sdk`, a URL or prose; this does not, and it
- * deliberately does not descend into an assignment such as `x="$(aws ...)"`,
- * whose `aws` is not in command position.
+ * The line is scanned character by character, so a separator inside a quoted
+ * string is literal and a command substitution is followed where it runs: `$(...)`
+ * and backticks are scanned recursively in command position, including inside
+ * double quotes (they execute there) and not inside single quotes (they do not).
+ * A single `&` splits a command like `;` does, except in a redirection (`2>&1`,
+ * `&>`). Only the first word of each segment is compared, so `aws-sdk`, a quoted
+ * URL and prose stay silent.
  */
 function cloudCommandOf(line) {
-  for (const segment of line.split(commandSegmentPattern)) {
-    // `$(`, `(`, `&`, `!` and quotes may prefix a command, and may stack.
-    const tokens = segment
-      .replace(/^(?:\$\(|\(|&|!|['"`])+/, '')
-      .trimStart()
-      .split(/\s+/)
-      .filter((token) => token !== '');
-    while (tokens.length > 0 && commandRunnerTokens.has(tokens[0])) tokens.shift();
-    if (tokens.length === 0) continue;
-    const command = tokens[0]
-      .replace(/^.*[\\/]/, '')
-      .replace(/\.(?:exe|cmd|bat|ps1)$/i, '')
-      .toLowerCase();
-    if (cloudCommands.has(command)) return command;
+  let segment = '';
+  let quote = null;
+
+  /** Analyse the segment built so far and start a new one. */
+  const flush = () => {
+    const command = cloudCommandInSegment(segment);
+    segment = '';
+    return command;
+  };
+
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+
+    if (quote === "'") {
+      if (character === "'") quote = null;
+      segment += character;
+      continue;
+    }
+
+    if (character === '\\') {
+      // A backslash escapes the next character; single quotes were handled above.
+      segment += line.slice(index, index + 2);
+      index += 1;
+      continue;
+    }
+
+    if (quote === '"') {
+      if (character === '"') {
+        quote = null;
+        segment += character;
+        continue;
+      }
+      if (character === '$' && line[index + 1] === '(') {
+        const close = matchingParenthesis(line, index + 1);
+        if (close >= 0) {
+          const command = cloudCommandOf(line.slice(index + 2, close));
+          if (command !== undefined) return command;
+          index = close;
+          continue;
+        }
+      }
+      if (character === '`') {
+        const close = line.indexOf('`', index + 1);
+        if (close >= 0) {
+          const command = cloudCommandOf(line.slice(index + 1, close));
+          if (command !== undefined) return command;
+          index = close;
+          continue;
+        }
+      }
+      segment += character;
+      continue;
+    }
+
+    if (character === "'" || character === '"') {
+      quote = character;
+      segment += character;
+      continue;
+    }
+
+    if (character === '$' && line[index + 1] === '(') {
+      const close = matchingParenthesis(line, index + 1);
+      if (close >= 0) {
+        const command = cloudCommandOf(line.slice(index + 2, close));
+        if (command !== undefined) return command;
+        // The substitution runs, but it is not a word of this segment.
+        index = close;
+        continue;
+      }
+    }
+
+    if (character === '`') {
+      const close = line.indexOf('`', index + 1);
+      if (close >= 0) {
+        const command = cloudCommandOf(line.slice(index + 1, close));
+        if (command !== undefined) return command;
+        index = close;
+        continue;
+      }
+    }
+
+    if (character === ';' || character === '|' || character === '&') {
+      const doubled = line[index + 1] === character;
+      // `2>&1`, `>&2`, `&>` and `&>>` redirect rather than start a command.
+      const redirection = character === '&' && !doubled
+        && (line[index - 1] === '>' || line[index + 1] === '>');
+      if (!redirection) {
+        const command = flush();
+        if (command !== undefined) return command;
+        if (doubled) index += 1;
+        continue;
+      }
+    }
+
+    segment += character;
   }
-  return undefined;
+
+  return cloudCommandInSegment(segment);
 }
 
 /**

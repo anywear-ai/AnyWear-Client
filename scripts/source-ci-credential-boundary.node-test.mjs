@@ -982,6 +982,43 @@ test('#294: a cloud CLI in a run: body of the packaging entry is rejected', asyn
   }
 });
 
+test('#294: command substitutions and background separators are scanned in run: bodies', async () => {
+  for (const body of [
+    'FOO=$(aws sts get-caller-identity)',
+    'echo $(aws s3 ls)',
+    '`aws s3 ls`',
+    'true & aws s3 ls',
+  ]) {
+    const { workflows, text } = await splicedSigningWorkflow(withPreflightStep([
+      '      - name: Cloud probe',
+      '        run: |',
+      `          ${body}`,
+    ].join('\n')));
+    assert.deepEqual(validateSourceCiCredentialBoundary(workflows), [
+      `client-release.yml:${lineOf(text, `          ${body}`)} step \`Cloud probe\` runs \`aws\` in its \`run:\` body; the packaging entry runs no cloud CLI`,
+    ]);
+  }
+
+  // The negatives prove the single-`&` split and the `$()`/backtick descent are not
+  // a false-positive generator: redirections, a quoted URL, `aws-sdk` and prose stay
+  // silent.
+  for (const body of [
+    'cmd 2>&1',
+    'cmd &> /dev/null',
+    '>&2 echo done',
+    'curl "https://example.test/?a=1&b=2"',
+    'echo aws-sdk',
+    "echo 'prose mentions aws but runs no cloud CLI'",
+  ]) {
+    const { workflows } = await splicedSigningWorkflow(withPreflightStep([
+      '      - name: Cloud probe',
+      '        run: |',
+      `          ${body}`,
+    ].join('\n')));
+    assert.deepEqual(validateSourceCiCredentialBoundary(workflows), []);
+  }
+});
+
 test('#294: a job-level uses in the packaging entry is rejected, stricter than requirement 13', async () => {
   // A job-level `uses:` is a reusable-workflow reference, never a cloud-credential
   // action, so requirement 13's literal clause does not name it. It is refused
@@ -1052,12 +1089,14 @@ test('#294: the packaging-entry assertions are keyed to client-release.yml, not 
     assert.ok(publisherText.includes(needle), `the scoping proof needs release.yml to still contain ${needle}`);
   }
 
-  // Parsed under the packaging entry's file name, `release.yml` is exactly nine
+  // Parsed under the packaging entry's file name, `release.yml` is exactly eleven
   // packaging-entry violations: one environment, one cloud-credential action, four
-  // role-shaped references, one ARN and two cloud CLI invocations. Other validator
-  // rules also fire on this renamed document, so the packaging-entry messages are
-  // filtered out by family first; the total pins the else-if rule too, because a
-  // `with:` finding on the known AWS action would make it ten.
+  // role-shaped references, one ARN and four cloud CLI invocations. Two of the four
+  // are single-line `$(aws …)` substitutions the command-substitution scan reaches;
+  // the publisher's substitutions opened across physical lines cannot be closed by a
+  // per-line scan. Other validator rules also fire on this renamed document, so the
+  // packaging-entry messages are filtered out by family first; the total pins the
+  // else-if rule too, because a `with:` finding on the known AWS action would add one.
   const renamed = parseWorkflow(publisherText, signingWorkflow);
   const violations = validateSourceCiCredentialBoundary({
     documents: [renamed],
@@ -1065,7 +1104,7 @@ test('#294: the packaging-entry assertions are keyed to client-release.yml, not 
     specificationRevision: await specificationGitlink(),
   });
   const packaging = violations.filter((message) => /declares `environment: |a cloud-credential action \(|passes `with: .*, a cloud-credential input|a role-shaped variable|whose name cannot be resolved|names `arn:aws|runs `[a-z]+` in its `run:` body/.test(message));
-  assert.equal(packaging.length, 9);
+  assert.equal(packaging.length, 11);
   const families = (needle) => packaging.filter((message) => message.includes(needle));
   assert.equal(families('declares `environment: beta`').length, 1);
   assert.match(families('declares `environment: beta`')[0], /job `deploy` declares `environment: beta`/);
@@ -1073,7 +1112,7 @@ test('#294: the packaging-entry assertions are keyed to client-release.yml, not 
   assert.match(families('a cloud-credential action (AWS)')[0], /uses `aws-actions\/configure-aws-credentials@v4`, a cloud-credential action \(AWS\)/);
   assert.equal(families('reads `vars.CLIENT_PUBLISH_ROLE_ARN`, a role-shaped variable').length, 4);
   assert.equal(families('names `arn:aws:sts::').length, 1);
-  assert.equal(families('runs `aws` in its `run:` body').length, 2);
+  assert.equal(families('runs `aws` in its `run:` body').length, 4);
 });
 
 test('#294: the guard signing names match the env-scope allowlist', async () => {

@@ -36,13 +36,14 @@ runs. They are prerequisites for a signed, immutable release:
    assets then cannot be moved, replaced or deleted, and GitHub records its own
    release attestation. The pipeline cannot read this setting (it needs repository
    administration), so enabling it is checked here, out of band, once.
-2. **Repository-scoped secrets configured for the platforms the release declares**:
-   `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`, `APPLE_CERTIFICATE`,
-   `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY_P8`, `ANDROID_KEY_BASE64`,
-   `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. Each is
-   read by one platform job; see [CI credentials](source-ci-credentials.md#signing-secrets).
-   A platform the configuration does not declare never starts its job, so its
-   secrets are never required.
+2. **Repository-scoped secrets for the declared platforms.** The workflow holds
+   nine signing secrets: `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`,
+   `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY_P8`,
+   `ANDROID_KEY_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
+   `ANDROID_KEY_PASSWORD`. The declared set decides which are configured: this
+   Beta's `android` set needs the four `ANDROID_*`, and only a release that
+   declares `windows` or `macos` requires the rest. Each is read by one platform
+   job; see [CI credentials](source-ci-credentials.md#signing-secrets).
 3. **Credentials for the declared platforms.** This Beta declares `android`: its
    upload keystore is generated once with `keytool` and stored base64-encoded in the
    four `ANDROID_*` secrets. A release that declares `macos` also needs an Apple

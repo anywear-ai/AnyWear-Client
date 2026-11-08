@@ -194,9 +194,10 @@ test('a release note must exist, be non-empty and carry the Known issues heading
     /must contain a `## Known issues` section/,
   );
 
-  // The landed revision must satisfy the gate the issue names.
-  const landedPlatforms = declaredPlatforms(repositoryRoot);
-  assert.ok(assertReleaseNotes(repositoryRoot, 'client-v0.2.0', landedPlatforms));
+  // v0.2.0 is a published historical set: check the landed notes against the set
+  // that release was written for, not against whatever the configuration declares
+  // today. The current configuration has its own validity case below.
+  assert.ok(assertReleaseNotes(repositoryRoot, 'client-v0.2.0', ['android']));
 });
 
 test('the Platform availability section must state each platform consistently with the configuration', () => {
@@ -205,6 +206,16 @@ test('the Platform availability section must state each platform consistently wi
 
   const good = temporaryRoot({ 'client-v0.2.0.md': releaseNotes({ platforms }) }, config);
   assert.equal(assertReleaseNotes(good, 'client-v0.2.0', platforms), join(good, releaseNotesPath('client-v0.2.0')));
+
+  // A CRLF file is refused by name, like the checksum file, rather than failing as
+  // a missing platform line.
+  const crlf = temporaryRoot({
+    'client-v0.2.0.md': releaseNotes({ platforms }).replace(/\n/g, '\r\n'),
+  }, config);
+  assert.throws(
+    () => assertReleaseNotes(crlf, 'client-v0.2.0', platforms),
+    messageIncludes('carriage return', 'LF line endings'),
+  );
 
   const sectionless = temporaryRoot({ 'client-v0.2.0.md': '# 0.2.0\n\n## Known issues\n\n- none\n' }, config);
   assert.throws(
@@ -699,8 +710,10 @@ test('the declared platform set is read from the committed configuration and val
     'android is still refused without the project, not silently dropped',
   );
 
-  // The committed configuration is valid and resolves to the Beta's set.
-  assert.deepEqual(declaredPlatforms(repositoryRoot), ['android']);
+  // The committed configuration must be readable and valid. Its value is a
+  // reviewed data line, not a unit-test pin: pinning it would make every future
+  // declaration a two-file edit, which #290's design rejects.
+  assert.doesNotThrow(() => declaredPlatforms(repositoryRoot));
 });
 
 test('a second release for the same commit is refused', () => {

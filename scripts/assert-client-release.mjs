@@ -251,6 +251,11 @@ export function assertReleaseNotes(root, tag, platforms) {
   if (text.trim() === '') {
     throw new ClientReleaseError(`the release notes file \`${relativePath}\` is empty; it must be non-empty Markdown`);
   }
+  if (text.includes('\r')) {
+    throw new ClientReleaseError(
+      `the release notes file \`${relativePath}\` contains a carriage return; the file must use LF line endings`,
+    );
+  }
   if (!new RegExp(`^${KNOWN_ISSUES_HEADING}$`, 'm').test(text)) {
     throw new ClientReleaseError(`the release notes file \`${relativePath}\` must contain a \`${KNOWN_ISSUES_HEADING}\` section`);
   }

@@ -45,12 +45,13 @@ export type BatchPhotoStatus =
  * What a failed photo's Retry should do with its reservation.
  *
  * `precheck` never made a request, so Retry re-runs the local rules and sends
- * nothing. `prepare` failed before any request, so Retry re-runs the local rules
- * and the image preparation, then reserves. `confirm` failed on a 5xx or on the
- * network, so the reservation may have committed and Retry re-confirms the same
- * one, which replays the committed item instead of writing a second. Everything
- * else (`reserve`, `upload`, `expired`, `terminal`) holds no usable reservation,
- * so Retry starts a fresh one and uploads the photo again.
+ * nothing. `prepare` failed before any request, so Retry re-runs the image
+ * preparation only and then reserves; the local rules do not run again.
+ * `confirm` failed on a 5xx or on the network, so the reservation may have
+ * committed and Retry re-confirms the same one, which replays the committed
+ * item instead of writing a second. Everything else (`reserve`, `upload`,
+ * `expired`, `terminal`) holds no usable reservation, so Retry starts a fresh
+ * one and uploads the photo again.
  */
 export type BatchFailureKind =
   | 'precheck'

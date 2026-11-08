@@ -9,7 +9,13 @@
 //     monotonicity rule (strictly above the highest other `client-v*` tag);
 //   - the four-state preflight machine (`absent`, `draft`, `published` with a
 //     complete asset set, `published` with a gap);
-//   - the declared-platform list and the asset set it requires;
+//   - the declared platform set, read from the committed
+//     `client-release-platforms.json` and validated there, and the asset set it
+//     requires — including the refusal of an `AnyWear-*` asset for a platform the
+//     configuration does not declare;
+//   - the release-notes contract: the file exists, is non-empty, carries
+//     `## Known issues`, and its `## Platform availability` section states one
+//     labelled line per platform that agrees with the declared set;
 //   - the 2 GiB single-file asset limit and the total the assembled set weighs;
 //   - the GNU coreutils text-mode `SHA256SUMS` format, and the digest match that
 //     the idempotent `published` rerun verifies against the release's own file;
@@ -20,8 +26,10 @@
 // (`node scripts/assert-client-release.mjs ...`) is the same rules wired to this
 // checkout:
 //
-//   verify      offline: tag syntax + the committed release notes (the local gate)
-//   preflight   offline: verify + lightweight tag + on main + monotonic + platforms
+//   verify      offline: tag syntax + the committed configuration + the release notes
+//               (the local gate)
+//   preflight   offline: verify + lightweight tag + on main + monotonic; prints the
+//               declared platform set and one boolean per platform
 //   state       one bounded `gh` read: the four-state classification (+ duplicate),
 //               and the checksum match when a published release is complete
 //   assets      offline: the assembled directory has one asset per declared platform
@@ -46,10 +54,36 @@ export const RELEASE_NOTES_DIRECTORY = 'docs/client-release-notes';
 export const KNOWN_ISSUES_HEADING = '## Known issues';
 
 /**
- * The platforms this pipeline has reviewed. `android` joins the list only when
- * the tagged commit carries `src-tauri/gen/android`, which #279 produces.
+ * The section that states the released set. It carries exactly one labelled line
+ * per platform, and each value must agree with the declared platform set.
  */
-export const STATIC_PLATFORMS = ['windows', 'macos'];
+export const PLATFORM_AVAILABILITY_HEADING = '## Platform availability';
+
+/** The platforms this pipeline can build, in the canonical order every consumer reads. */
+export const RELEASE_PLATFORMS = ['windows', 'macos', 'android'];
+
+/**
+ * The committed configuration that is the only source of the declared platform
+ * set. `preflight` is its only reader, and it resolves the set once for every
+ * later job.
+ */
+export const PLATFORMS_CONFIG_PATH = 'client-release-platforms.json';
+
+/** The only configuration schema this pipeline understands. */
+export const PLATFORMS_SCHEMA_VERSION = 1;
+
+/** The label each platform's `## Platform availability` line must carry. */
+export const PLATFORM_AVAILABILITY_LABELS = {
+  windows: '- **Windows:**',
+  macos: '- **macOS:**',
+  android: '- **Android:**',
+};
+
+/** The value prefix of a platform the configuration declares. */
+export const PUBLISHED_PLATFORM_PREFIX = 'published';
+
+/** The value prefix of a platform the configuration does not declare. */
+export const NOT_PUBLISHED_PLATFORM_PREFIX = 'not_published (platform_not_enabled';
 
 /** The asset each declared platform must contribute, by release version. */
 export function platformAssetNames(version) {
@@ -139,8 +173,75 @@ export function releaseNotesPath(tag) {
   return `${RELEASE_NOTES_DIRECTORY}/${tag}.md`;
 }
 
-/** Refuses a missing, empty or heading-less release-notes file. */
-export function assertReleaseNotes(root, tag) {
+/**
+ * The `## Platform availability` rule. The section must exist, carry exactly one
+ * labelled line per platform (`- **Windows:**`, `- **macOS:**`, `- **Android:**`),
+ * use no other bold label, and agree with the declared set: a declared platform's
+ * value begins `published`, an undeclared platform's value begins
+ * `not_published (platform_not_enabled`. Free reason text may follow either.
+ */
+function assertPlatformAvailability({ text, relativePath, platforms }) {
+  const lines = text.split('\n');
+  const headingIndex = lines.findIndex((line) => line.trimEnd() === PLATFORM_AVAILABILITY_HEADING);
+  if (headingIndex < 0) {
+    throw new ClientReleaseError(
+      `the release notes file \`${relativePath}\` must contain a \`${PLATFORM_AVAILABILITY_HEADING}\` section with one labelled line per platform`,
+    );
+  }
+  const sectionLines = [];
+  for (const line of lines.slice(headingIndex + 1)) {
+    if (/^ {0,3}#{1,2} /.test(line)) break;
+    sectionLines.push(line);
+  }
+  const values = new Map();
+  for (const line of sectionLines) {
+    const match = /^\s*[-*]\s+\*\*([^*]+?):\*\*\s*(.*)$/.exec(line);
+    if (!match) continue;
+    const [, label, value] = match;
+    const platform = RELEASE_PLATFORMS.find(
+      (candidate) => PLATFORM_AVAILABILITY_LABELS[candidate] === `- **${label}:**`,
+    );
+    if (platform === undefined) {
+      const accepted = RELEASE_PLATFORMS.map((candidate) => `\`${PLATFORM_AVAILABILITY_LABELS[candidate]}\``).join(', ');
+      throw new ClientReleaseError(
+        `the release notes file \`${relativePath}\` carries the label \`- **${label}:**\` in its \`${PLATFORM_AVAILABILITY_HEADING}\` section; that section accepts only ${accepted}`,
+      );
+    }
+    if (values.has(platform)) {
+      throw new ClientReleaseError(
+        `the release notes file \`${relativePath}\` repeats \`${PLATFORM_AVAILABILITY_LABELS[platform]}\` in its \`${PLATFORM_AVAILABILITY_HEADING}\` section; each platform appears exactly once`,
+      );
+    }
+    values.set(platform, value.trim());
+  }
+  for (const platform of RELEASE_PLATFORMS) {
+    const label = PLATFORM_AVAILABILITY_LABELS[platform];
+    const value = values.get(platform);
+    if (value === undefined) {
+      throw new ClientReleaseError(
+        `the release notes file \`${relativePath}\` has no \`${label}\` line in its \`${PLATFORM_AVAILABILITY_HEADING}\` section; every release states all three platforms`,
+      );
+    }
+    const shown = value === '' ? '(empty)' : value;
+    const declared = platforms.includes(platform);
+    if (declared && !value.startsWith(PUBLISHED_PLATFORM_PREFIX)) {
+      throw new ClientReleaseError(
+        `the release notes file \`${relativePath}\` marks \`${label}\` as \`${shown}\`; \`${platform}\` is declared by \`${PLATFORMS_CONFIG_PATH}\`, so the value must begin \`${PUBLISHED_PLATFORM_PREFIX}\``,
+      );
+    }
+    if (!declared && !value.startsWith(NOT_PUBLISHED_PLATFORM_PREFIX)) {
+      throw new ClientReleaseError(
+        `the release notes file \`${relativePath}\` marks \`${label}\` as \`${shown}\`; \`${platform}\` is not declared by \`${PLATFORMS_CONFIG_PATH}\`, so the value must begin \`${NOT_PUBLISHED_PLATFORM_PREFIX}\``,
+      );
+    }
+  }
+}
+
+/**
+ * Refuses a missing, empty or heading-less release-notes file, and one whose
+ * `## Platform availability` section disagrees with the declared platform set.
+ */
+export function assertReleaseNotes(root, tag, platforms) {
   const relativePath = releaseNotesPath(tag);
   const absolutePath = join(root, RELEASE_NOTES_DIRECTORY, `${tag}.md`);
   if (!existsSync(absolutePath)) {
@@ -153,13 +254,88 @@ export function assertReleaseNotes(root, tag) {
   if (!new RegExp(`^${KNOWN_ISSUES_HEADING}$`, 'm').test(text)) {
     throw new ClientReleaseError(`the release notes file \`${relativePath}\` must contain a \`${KNOWN_ISSUES_HEADING}\` section`);
   }
+  assertPlatformAvailability({ text, relativePath, platforms });
   return absolutePath;
 }
 
-/** The reviewed platform list for this checkout; `android` needs #279's project. */
+/**
+ * Refuses a declaration the tagged revision cannot build: `android` needs the
+ * committed `src-tauri/gen/android` project. This is a validation rule, not the
+ * old directory probe: the directory never adds a platform to the set; it only
+ * makes a declared one buildable.
+ */
+function assertDeclaredPlatformsBuildable(root, platforms) {
+  if (platforms.includes('android') && !existsSync(join(root, 'src-tauri', 'gen', 'android'))) {
+    throw new ClientReleaseError(
+      `the release configuration \`${PLATFORMS_CONFIG_PATH}\` declares \`android\`, but this revision has no \`src-tauri/gen/android\` project to build; commit the project or remove the declaration`,
+    );
+  }
+}
+
+/**
+ * Reads and validates `client-release-platforms.json`, returning the declared
+ * platforms in canonical order whatever order the file lists them in.
+ *
+ * A data file rather than a workflow constant, because the guard has to be able
+ * to refuse a bad value: a missing file, invalid JSON, an unsupported
+ * `schema_version`, a `declared_platforms` list that is absent, not an array or
+ * empty, an entry outside `windows`/`macos`/`android`, a duplicate entry, and
+ * `android` without the committed `src-tauri/gen/android` project each throw
+ * with a message naming the file, field or entry.
+ */
 export function declaredPlatforms(root = process.cwd()) {
-  const platforms = [...STATIC_PLATFORMS];
-  if (existsSync(join(root, 'src-tauri', 'gen', 'android'))) platforms.push('android');
+  const relativePath = PLATFORMS_CONFIG_PATH;
+  const absolutePath = join(root, relativePath);
+  if (!existsSync(absolutePath)) {
+    throw new ClientReleaseError(
+      `the release configuration \`${relativePath}\` is missing; it is the only source of the declared platform set`,
+    );
+  }
+  let config;
+  try {
+    config = JSON.parse(readFileSync(absolutePath, 'utf8'));
+  } catch (failure) {
+    throw new ClientReleaseError(
+      `the release configuration \`${relativePath}\` is not valid JSON: ${failure.message}`,
+    );
+  }
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+    throw new ClientReleaseError(
+      `the release configuration \`${relativePath}\` must be a JSON object carrying \`schema_version\` and \`declared_platforms\``,
+    );
+  }
+  if (config.schema_version !== PLATFORMS_SCHEMA_VERSION) {
+    throw new ClientReleaseError(
+      `the release configuration \`${relativePath}\` declares \`schema_version\` ${JSON.stringify(config.schema_version)}; this pipeline reads schema ${PLATFORMS_SCHEMA_VERSION} only`,
+    );
+  }
+  const declared = config.declared_platforms;
+  if (!Array.isArray(declared)) {
+    throw new ClientReleaseError(
+      `the release configuration \`${relativePath}\` must carry \`declared_platforms\` as an array of platform names`,
+    );
+  }
+  if (declared.length === 0) {
+    throw new ClientReleaseError(
+      `the release configuration \`${relativePath}\` declares no platforms; \`declared_platforms\` must name at least one of ${RELEASE_PLATFORMS.join(', ')}`,
+    );
+  }
+  const seen = new Set();
+  for (const platform of declared) {
+    if (!RELEASE_PLATFORMS.includes(platform)) {
+      throw new ClientReleaseError(
+        `the release configuration \`${relativePath}\` declares \`${String(platform)}\`, which is not a release platform (${RELEASE_PLATFORMS.join(', ')})`,
+      );
+    }
+    if (seen.has(platform)) {
+      throw new ClientReleaseError(
+        `the release configuration \`${relativePath}\` declares \`${platform}\` more than once; \`declared_platforms\` must not repeat an entry`,
+      );
+    }
+    seen.add(platform);
+  }
+  const platforms = RELEASE_PLATFORMS.filter((platform) => seen.has(platform));
+  assertDeclaredPlatformsBuildable(root, platforms);
   return platforms;
 }
 
@@ -184,20 +360,45 @@ export function platformOfAssetName(name) {
   return 'fixed';
 }
 
-/** Refuses an assembled asset set that is missing a declared platform's file. */
+/**
+ * Refuses an assembled asset set that is missing a declared platform's file, and
+ * one that carries an `AnyWear-*` file for a platform the configuration does not
+ * declare. The second refusal is what keeps an undeclared platform out of
+ * `SHA256SUMS` and the attestation even if a copy step ran for it. An unrelated
+ * non-`AnyWear-*` file is not this check's business: the exact published set is
+ * proved later by `publish`'s inventory readbacks.
+ */
 export function assertDeclaredAssets({ version, declaredPlatforms: platforms, assetNames }) {
   const present = new Set(assetNames);
   const missing = expectedAssetNames(version, platforms)
     .filter((name) => !present.has(name) && platformOfAssetName(name) !== 'fixed');
-  if (missing.length === 0) return [];
-  const byPlatform = new Map();
-  for (const name of missing) {
-    const platform = platformOfAssetName(name);
-    if (!byPlatform.has(platform)) byPlatform.set(platform, []);
-    byPlatform.get(platform).push(name);
+  if (missing.length > 0) {
+    const byPlatform = new Map();
+    for (const name of missing) {
+      const platform = platformOfAssetName(name);
+      if (!byPlatform.has(platform)) byPlatform.set(platform, []);
+      byPlatform.get(platform).push(name);
+    }
+    const detail = [...byPlatform].map(([platform, names]) => `\`${platform}\`: ${names.join(', ')}`).join('; ');
+    throw new ClientReleaseError(`the assembled asset set is missing a declared platform artifact (${detail})`);
   }
-  const detail = [...byPlatform].map(([platform, names]) => `\`${platform}\`: ${names.join(', ')}`).join('; ');
-  throw new ClientReleaseError(`the assembled asset set is missing a declared platform artifact (${detail})`);
+  const undeclared = assetNames.filter(
+    (name) => name.startsWith('AnyWear-') && !platforms.includes(platformOfAssetName(name)),
+  );
+  if (undeclared.length > 0) {
+    const detail = undeclared
+      .map((name) => {
+        const platform = platformOfAssetName(name);
+        return platform === 'fixed'
+          ? `\`${name}\` names no release platform`
+          : `\`${name}\` is a \`${platform}\` asset`;
+      })
+      .join('; ');
+    throw new ClientReleaseError(
+      `the assembled asset set carries a platform the release configuration does not declare (${detail}); declaring a platform is a release decision, not an assembly side effect`,
+    );
+  }
+  return [];
 }
 
 /** GitHub Releases' single-file upload limit for one release asset: 2 GiB. */
@@ -485,7 +686,10 @@ function gitSucceeds(root, args) {
  */
 export function preflightFromCheckout({ tag, root = process.cwd() }) {
   const parsed = parseReleaseTag(tag);
-  assertReleaseNotes(root, tag);
+  // The declared set is resolved first: the release notes are checked against it,
+  // and a bad configuration stops the run before any credential or build.
+  const platforms = declaredPlatforms(root);
+  assertReleaseNotes(root, tag, platforms);
   const objectType = gitText(root, ['cat-file', '-t', `refs/tags/${tag}`]);
   assertLightweightTag({ tag, objectType });
   const otherTags = gitText(root, ['tag', '--list', 'client-v*'])
@@ -499,8 +703,14 @@ export function preflightFromCheckout({ tag, root = process.cwd() }) {
     : '';
   const isAncestor = mainCommit !== '' && gitSucceeds(root, ['merge-base', '--is-ancestor', commit, mainCommit]);
   assertCommitIsOnMain({ tag, commit, mainCommit, isAncestor });
-  const platforms = declaredPlatforms(root);
-  return { version: parsed.version, platforms, android: platforms.includes('android'), commit };
+  return {
+    version: parsed.version,
+    platforms,
+    windows: platforms.includes('windows'),
+    macos: platforms.includes('macos'),
+    android: platforms.includes('android'),
+    commit,
+  };
 }
 
 /** Runs one bounded `gh` command. The runner is injectable for the node test. */
@@ -617,9 +827,12 @@ export async function main({
       case 'verify': {
         const tag = requireOption(options, 'tag');
         const parsed = parseReleaseTag(tag);
-        assertReleaseNotes(commandRoot, tag);
+        const platforms = declaredPlatforms(commandRoot);
+        assertReleaseNotes(commandRoot, tag, platforms);
         log(`client release tag ${tag} is well formed (${parsed.version})`);
-        log(`release notes ${releaseNotesPath(tag)} carry the \`${KNOWN_ISSUES_HEADING}\` section`);
+        log(
+          `release notes ${releaseNotesPath(tag)} carry the \`${KNOWN_ISSUES_HEADING}\` and \`${PLATFORM_AVAILABILITY_HEADING}\` sections for ${platforms.join(', ')}`,
+        );
         return 0;
       }
       case 'preflight': {
@@ -627,6 +840,8 @@ export async function main({
         const result = preflightFromCheckout({ tag, root: commandRoot });
         log(`version=${result.version}`);
         log(`platforms=${result.platforms.join(',')}`);
+        log(`windows=${result.windows}`);
+        log(`macos=${result.macos}`);
         log(`android=${result.android}`);
         return 0;
       }

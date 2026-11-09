@@ -787,3 +787,342 @@ test('an unreadable workflow or .gitmodules is reported instead of passing silen
     /declares path 'api' without a url/,
   );
 });
+
+// #294: the four credential-boundary claims in `client-release.yml:19-23` are
+// asserted in source now: no job-level `environment:`, no cloud-credential action
+// or job-level `uses:`, no role-shaped `vars.` or `arn:aws:` value, and no cloud CLI
+// in a `run:` body.
+//
+// Every packaging-entry fixture splices text into the checked-in `client-release.yml`
+// and re-parses it. A fixture that mutates a parsed object proves the validator only;
+// a spliced fixture proves the parser too, which is where the evasions live.
+
+/** The 1-based line number of the first occurrence of `needle` in `text`. */
+function lineOf(text, needle) {
+  const index = text.indexOf(needle);
+  assert.ok(index >= 0, `expected the fixture to contain ${needle}`);
+  return text.slice(0, index).split('\n').length;
+}
+
+/** Replace the first occurrence of `needle`, keeping `$` sequences literal. */
+function spliceFirst(text, needle, replacement) {
+  const index = text.indexOf(needle);
+  assert.ok(index >= 0, `expected the fixture to contain ${needle}`);
+  return `${text.slice(0, index)}${replacement}${text.slice(index + needle.length)}`;
+}
+
+/** Insert `addition` directly after the first occurrence of `needle`. */
+function insertAfter(text, needle, addition) {
+  return spliceFirst(text, needle, `${needle}${addition}`);
+}
+
+/** The live workflows with `client-release.yml` replaced by the spliced text, re-parsed. */
+async function splicedSigningWorkflow(splice) {
+  const workflows = await repositoryWorkflows();
+  const text = await readFile(new URL(signingWorkflow, workflowsDirectory), 'utf8');
+  const spliced = splice(text);
+  assert.notEqual(spliced, text, 'the fixture must change the checked-in workflow text');
+  const index = workflows.documents.findIndex((document) => document.workflow.file === signingWorkflow);
+  assert.ok(index >= 0, `expected a parsed ${signingWorkflow}`);
+  workflows.documents[index] = parseWorkflow(spliced, signingWorkflow);
+  return { workflows, text: spliced };
+}
+
+// `client-release.yml` holds no `vars.` reference at all, so the negative fixtures
+// below and the index forms are the only discriminating cases for the matcher; do
+// not delete them as redundant.
+const roleVariable = '${{ vars.CLIENT_PUBLISH_ROLE_ARN }}';
+
+/** Splice `EXTRA: <expression>` into the workflow-level `env:` block. */
+function withWorkflowEnv(expression) {
+  return (text) => spliceFirst(
+    text,
+    'env:\n  BETA_API_BASE_URL:',
+    `env:\n  EXTRA: ${expression}\n  BETA_API_BASE_URL:`,
+  );
+}
+
+/** Splice one step before the first `- name: Checkout` of `preflight`. */
+function withPreflightStep(step) {
+  return (text) => spliceFirst(
+    text,
+    '    steps:\n      - name: Checkout\n',
+    `    steps:\n${step}\n\n      - name: Checkout\n`,
+  );
+}
+
+test('#294: a job-level environment in the packaging entry is rejected', async () => {
+  const inline = await splicedSigningWorkflow((text) => insertAfter(
+    text,
+    '    name: Preflight the release tag\n',
+    '    environment: beta\n',
+  ));
+  assert.deepEqual(validateSourceCiCredentialBoundary(inline.workflows), [
+    `client-release.yml:${lineOf(inline.text, '    environment: beta')} job \`preflight\` declares \`environment: beta\`; the packaging entry holds no GitHub Environment, so no job may declare one — the Client workflow census is authoritative in pipeline_stages.md § Protected entry points`,
+  ]);
+
+  const block = await splicedSigningWorkflow((text) => insertAfter(
+    text,
+    '    name: Preflight the release tag\n',
+    '    environment:\n      name: beta\n',
+  ));
+  assert.deepEqual(validateSourceCiCredentialBoundary(block.workflows), [
+    `client-release.yml:${lineOf(block.text, '    environment:')} job \`preflight\` declares \`environment:\`; the packaging entry holds no GitHub Environment, so no job may declare one — the Client workflow census is authoritative in pipeline_stages.md § Protected entry points`,
+  ]);
+});
+
+test('#294: a cloud-credential action or input in the packaging entry is rejected', async () => {
+  for (const [step, expectedUse, vendor] of [
+    [
+      '      - name: Cloud credentials\n        uses: aws-actions/configure-aws-credentials@v4',
+      'aws-actions/configure-aws-credentials@v4',
+      'AWS',
+    ],
+    [
+      '      - name: Cloud credentials\n        uses: AWS-Actions/Configure-AWS-Credentials@v4',
+      'AWS-Actions/Configure-AWS-Credentials@v4',
+      'AWS',
+    ],
+    [
+      '      - name: Cloud credentials\n        uses: azure/trusted-signing-action@v1',
+      'azure/trusted-signing-action@v1',
+      'Azure',
+    ],
+  ]) {
+    const { workflows, text } = await splicedSigningWorkflow(withPreflightStep(step));
+    assert.deepEqual(validateSourceCiCredentialBoundary(workflows), [
+      `client-release.yml:${lineOf(text, '      - name: Cloud credentials')} step \`Cloud credentials\` uses \`${expectedUse}\`, a cloud-credential action (${vendor}); the packaging entry holds no cloud principal — adopting a cloud signing mechanism amends ADR-0036 §5 and the guard's signing table in the same delivery`,
+    ]);
+  }
+
+  // An unknown vendor is caught by the input it passes, because the guard cannot
+  // attribute the action name.
+  const unknownVendor = await splicedSigningWorkflow(withPreflightStep([
+    '      - name: Unknown vendor signer',
+    '        uses: example/sign@v1',
+    '        with:',
+    '          role-to-assume: placeholder',
+  ].join('\n')));
+  assert.deepEqual(validateSourceCiCredentialBoundary(unknownVendor.workflows), [
+    `client-release.yml:${lineOf(unknownVendor.text, '      - name: Unknown vendor signer')} step \`Unknown vendor signer\` passes \`with: role-to-assume\`, a cloud-credential input; the packaging entry holds no cloud credential — adopting a cloud signing mechanism amends ADR-0036 §5 and the guard's signing table in the same delivery`,
+  ]);
+});
+
+test('#294: a role-shaped vars reference or an arn:aws value in the packaging entry is rejected', async () => {
+  const workflowEnv = await splicedSigningWorkflow(withWorkflowEnv(roleVariable));
+  assert.deepEqual(validateSourceCiCredentialBoundary(workflowEnv.workflows), [
+    `client-release.yml:${lineOf(workflowEnv.text, 'env:\n  EXTRA:')} workflow env \`EXTRA\` reads \`vars.CLIENT_PUBLISH_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
+  ]);
+
+  const jobEnv = await splicedSigningWorkflow((text) => insertAfter(
+    text,
+    '    name: Preflight the release tag\n',
+    `    env:\n      EXTRA: ${roleVariable}\n`,
+  ));
+  assert.deepEqual(validateSourceCiCredentialBoundary(jobEnv.workflows), [
+    `client-release.yml:${lineOf(jobEnv.text, '    env:\n      EXTRA:')} job \`preflight\` env \`EXTRA\` reads \`vars.CLIENT_PUBLISH_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
+  ]);
+
+  const stepEnv = await splicedSigningWorkflow((text) => insertAfter(
+    text,
+    '          TAG: ${{ github.ref_name }}\n',
+    `          EXTRA: ${roleVariable}\n`,
+  ));
+  assert.deepEqual(validateSourceCiCredentialBoundary(stepEnv.workflows), [
+    `client-release.yml:${lineOf(stepEnv.text, '      - name: Validate the tag and resolve the declared platforms')} step \`Validate the tag and resolve the declared platforms\` env \`EXTRA\` reads \`vars.CLIENT_PUBLISH_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
+  ]);
+
+  for (const [expression, reference] of [
+    ["${{ vars['CLIENT_PUBLISH_ROLE_ARN'] }}", "vars['CLIENT_PUBLISH_ROLE_ARN']"],
+    ['${{ vars["CLIENT_PUBLISH_ROLE_ARN"] }}', 'vars["CLIENT_PUBLISH_ROLE_ARN"]'],
+    ['${{ vars.AWS_ROLE_ARN }}', 'vars.AWS_ROLE_ARN'],
+    ['${{ vars.SIGNING_ROLE }}', 'vars.SIGNING_ROLE'],
+  ]) {
+    const { workflows, text } = await splicedSigningWorkflow(withWorkflowEnv(expression));
+    assert.deepEqual(validateSourceCiCredentialBoundary(workflows), [
+      `client-release.yml:${lineOf(text, 'env:\n  EXTRA:')} workflow env \`EXTRA\` reads \`${reference}\`, a role-shaped variable; the packaging entry names no cloud role`,
+    ]);
+  }
+
+  const arn = await splicedSigningWorkflow((text) => spliceFirst(
+    text,
+    'env:\n  BETA_API_BASE_URL:',
+    "env:\n  ROLE_ARN: 'arn:aws:iam::123456789012:role/deploy'\n  BETA_API_BASE_URL:",
+  ));
+  assert.deepEqual(validateSourceCiCredentialBoundary(arn.workflows), [
+    `client-release.yml:${lineOf(arn.text, 'env:\n  ROLE_ARN:')} workflow env \`ROLE_ARN\` names \`arn:aws:iam::123456789012:role/deploy\`; the packaging entry names no cloud principal`,
+  ]);
+
+  const computedIndex = await splicedSigningWorkflow(withWorkflowEnv('${{ vars[matrix.secret_name] }}'));
+  assert.deepEqual(validateSourceCiCredentialBoundary(computedIndex.workflows), [
+    `client-release.yml:${lineOf(computedIndex.text, 'env:\n  EXTRA:')} workflow env \`EXTRA\` reads \`vars[matrix.secret_name]\`, whose name cannot be resolved; the packaging entry names no computed cloud reference`,
+  ]);
+
+  // `ROLE`/`ARN` only count as a whole segment, and `LEARNING_MODE` contains neither.
+  for (const negative of ['${{ vars.LEARNING_MODE }}', '${{ vars.AWS_REGION }}', '${{ vars.AWS_ACCOUNT_ID }}']) {
+    const { workflows } = await splicedSigningWorkflow(withWorkflowEnv(negative));
+    assert.deepEqual(validateSourceCiCredentialBoundary(workflows), []);
+  }
+});
+
+test('#294: a cloud CLI in a run: body of the packaging entry is rejected', async () => {
+  for (const [scalar, body] of [
+    ['|', '          aws sts get-caller-identity'],
+    ['>', '          sudo aws s3 cp dist/x s3://bucket/x'],
+    ['|', '          pnpm exec aws s3 ls'],
+  ]) {
+    const { workflows, text } = await splicedSigningWorkflow(withPreflightStep([
+      '      - name: Cloud probe',
+      `        run: ${scalar}`,
+      body,
+    ].join('\n')));
+    assert.deepEqual(validateSourceCiCredentialBoundary(workflows), [
+      `client-release.yml:${lineOf(text, body)} step \`Cloud probe\` runs \`aws\` in its \`run:\` body; the packaging entry runs no cloud CLI`,
+    ]);
+  }
+});
+
+test('#294: command substitutions and background separators are scanned in run: bodies', async () => {
+  for (const body of [
+    'FOO=$(aws sts get-caller-identity)',
+    'echo $(aws s3 ls)',
+    '`aws s3 ls`',
+    'true & aws s3 ls',
+  ]) {
+    const { workflows, text } = await splicedSigningWorkflow(withPreflightStep([
+      '      - name: Cloud probe',
+      '        run: |',
+      `          ${body}`,
+    ].join('\n')));
+    assert.deepEqual(validateSourceCiCredentialBoundary(workflows), [
+      `client-release.yml:${lineOf(text, `          ${body}`)} step \`Cloud probe\` runs \`aws\` in its \`run:\` body; the packaging entry runs no cloud CLI`,
+    ]);
+  }
+
+  // The negatives prove the single-`&` split and the `$()`/backtick descent are not
+  // a false-positive generator: redirections, a quoted URL, `aws-sdk` and prose stay
+  // silent.
+  for (const body of [
+    'cmd 2>&1',
+    'cmd &> /dev/null',
+    '>&2 echo done',
+    'curl "https://example.test/?a=1&b=2"',
+    'echo aws-sdk',
+    "echo 'prose mentions aws but runs no cloud CLI'",
+  ]) {
+    const { workflows } = await splicedSigningWorkflow(withPreflightStep([
+      '      - name: Cloud probe',
+      '        run: |',
+      `          ${body}`,
+    ].join('\n')));
+    assert.deepEqual(validateSourceCiCredentialBoundary(workflows), []);
+  }
+});
+
+test('#294: a job-level uses in the packaging entry is rejected, stricter than requirement 13', async () => {
+  // A job-level `uses:` is a reusable-workflow reference, never a cloud-credential
+  // action, so requirement 13's literal clause does not name it. It is refused
+  // anyway, and deliberately: a called workflow's steps are outside everything the
+  // four assertions can read, so the boundary cannot verify what the call runs.
+  //
+  // The fixture calls `test.yml`, a reviewed workflow file, so the existing caller
+  // rule stays silent. A call to an unreviewed file would fire that rule's "not one
+  // of the workflow files under review" message, and the test would prove the old
+  // rule instead of this one.
+  const { workflows, text } = await splicedSigningWorkflow((source) => spliceFirst(
+    source,
+    'jobs:\n',
+    'jobs:\n  called:\n    uses: ./.github/workflows/test.yml\n\n',
+  ));
+  assert.deepEqual(validateSourceCiCredentialBoundary(workflows), [
+    `client-release.yml:${lineOf(text, '    uses: ./.github/workflows/test.yml')} job \`called\` calls \`./.github/workflows/test.yml\`; the packaging entry inlines its steps so the boundary can read them`,
+  ]);
+});
+
+test('#294: the parser fails closed on a job shape it cannot read', async () => {
+  const text = await readFile(new URL(signingWorkflow, workflowsDirectory), 'utf8');
+  for (const [addition, expected] of [
+    [
+      '  cloud: &cloud\n    runs-on: ubuntu-latest\n    environment: beta',
+      /Unsupported workflow job on line \d+: `cloud` declares neither `steps:` nor `uses:`/,
+    ],
+    [
+      '  cloudflow: {runs-on: ubuntu-latest, environment: beta, steps: [{run: aws sts get-caller-identity}]}',
+      /Unsupported workflow job on line \d+: `cloudflow` declares neither `steps:` nor `uses:`/,
+    ],
+    [
+      '  <<: *cloud',
+      /Unsupported workflow syntax on line \d+: <<: \*cloud/,
+    ],
+  ]) {
+    const spliced = spliceFirst(text, 'jobs:\n', `jobs:\n${addition}\n`);
+    assert.notEqual(spliced, text, 'the fixture must change the checked-in workflow text');
+    assert.throws(() => parseWorkflow(spliced, signingWorkflow), expected);
+  }
+});
+
+test('#294: the packaging-entry boundary is silent on the live workflow and fails closed without it', async () => {
+  assert.deepEqual(validateSourceCiCredentialBoundary(await repositoryWorkflows()), []);
+
+  const workflows = await repositoryWorkflows();
+  workflows.documents = workflows.documents.filter((document) => document.workflow.file !== signingWorkflow);
+  assert.deepEqual(validateSourceCiCredentialBoundary(workflows), [
+    'client-release.yml:1 `client-release.yml` was not parsed; the packaging-entry boundary is unverified',
+  ]);
+});
+
+test('#294: the packaging-entry assertions are keyed to client-release.yml, not every workflow', async () => {
+  assert.deepEqual(validateSourceCiCredentialBoundary(await repositoryWorkflows()), []);
+
+  // The confinement is the rule: `release.yml` is the web-publication entry and
+  // legitimately assumes its own AWS role. The proof is only worth making while the
+  // publisher still holds every construct the four assertions reject.
+  const publisherText = await readFile(new URL('release.yml', workflowsDirectory), 'utf8');
+  for (const needle of [
+    'environment: beta',
+    'uses: aws-actions/configure-aws-credentials@v4',
+    'role-to-assume: ${{ vars.CLIENT_PUBLISH_ROLE_ARN }}',
+    'aws sts get-caller-identity',
+    'arn:aws:sts::',
+    'aws s3 sync',
+  ]) {
+    assert.ok(publisherText.includes(needle), `the scoping proof needs release.yml to still contain ${needle}`);
+  }
+
+  // Parsed under the packaging entry's file name, `release.yml` is exactly eleven
+  // packaging-entry violations: one environment, one cloud-credential action, four
+  // role-shaped references, one ARN and four cloud CLI invocations. Two of the four
+  // are single-line `$(aws …)` substitutions the command-substitution scan reaches;
+  // the publisher's substitutions opened across physical lines cannot be closed by a
+  // per-line scan. Other validator rules also fire on this renamed document, so the
+  // packaging-entry messages are filtered out by family first; the total pins the
+  // else-if rule too, because a `with:` finding on the known AWS action would add one.
+  const renamed = parseWorkflow(publisherText, signingWorkflow);
+  const violations = validateSourceCiCredentialBoundary({
+    documents: [renamed],
+    submoduleRepositories: parseGitmodules(await readFile(gitmodulesPath, 'utf8')),
+    specificationRevision: await specificationGitlink(),
+  });
+  const packaging = violations.filter((message) => /declares `environment: |a cloud-credential action \(|passes `with: .*, a cloud-credential input|a role-shaped variable|whose name cannot be resolved|names `arn:aws|runs `[a-z]+` in its `run:` body/.test(message));
+  assert.equal(packaging.length, 11);
+  const families = (needle) => packaging.filter((message) => message.includes(needle));
+  assert.equal(families('declares `environment: beta`').length, 1);
+  assert.match(families('declares `environment: beta`')[0], /job `deploy` declares `environment: beta`/);
+  assert.equal(families('a cloud-credential action (AWS)').length, 1);
+  assert.match(families('a cloud-credential action (AWS)')[0], /uses `aws-actions\/configure-aws-credentials@v4`, a cloud-credential action \(AWS\)/);
+  assert.equal(families('reads `vars.CLIENT_PUBLISH_ROLE_ARN`, a role-shaped variable').length, 4);
+  assert.equal(families('names `arn:aws:sts::').length, 1);
+  assert.equal(families('runs `aws` in its `run:` body').length, 4);
+});
+
+test('#294: the guard signing names match the env-scope allowlist', async () => {
+  // Read as text, not imported: a test that imports its subject verifies nothing,
+  // and the env-scope file is a test file, not a module this suite may execute.
+  const envScopeText = await readFile(new URL('env-scope.node-test.mjs', import.meta.url), 'utf8');
+  const secretsBlock = /^ {2}secrets: \[\n([\s\S]*?)^ {2}\],/m.exec(envScopeText)?.[1];
+  assert.ok(secretsBlock, 'env-scope.node-test.mjs must declare REPOSITORY_SCOPED.secrets as a list');
+  const envScopeSecrets = [...secretsBlock.matchAll(/^ {4}'([A-Z0-9_]+)',$/gm)].map((match) => match[1]);
+  assert.deepEqual([...Object.values(signingSites).flat()].sort(), envScopeSecrets.filter((name) => name !== 'APP_PRIVATE_KEY').sort());
+  assert.equal(Object.values(signingSites).flat().length, 9);
+  assert.match(envScopeText, /^const ENVIRONMENT_SCOPED = \[\];$/m);
+});

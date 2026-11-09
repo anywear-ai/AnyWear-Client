@@ -42,8 +42,12 @@ runs. They are prerequisites for a signed, immutable release:
    `ANDROID_KEY_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
    `ANDROID_KEY_PASSWORD`. The declared set decides which are configured: this
    Beta's `android` set needs the four `ANDROID_*`, and only a release that
-   declares `windows` or `macos` requires the rest. Each is read by one platform
-   job; see [CI credentials](source-ci-credentials.md#signing-secrets).
+   declares `windows` or `macos` requires the rest. Which store holds a credential
+   follows what consumes it, not how sensitive it is: a credential that publishes
+   into AWS is a publishing credential, while a credential that signs bytes is a
+   signing credential and stays in repository-scoped secrets, because a packaging
+   job inside the release run consumes it. Each is read by one platform job; see
+   [CI credentials](source-ci-credentials.md#signing-secrets).
 3. **Credentials for the declared platforms.** This Beta declares `android`: its
    upload keystore is generated once with `keytool` and stored base64-encoded in the
    four `ANDROID_*` secrets. A release that declares `macos` also needs an Apple
@@ -51,6 +55,12 @@ runs. They are prerequisites for a signed, immutable release:
    reviewed workflow constants `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
    `APPLE_API_ISSUER`, `APPLE_API_KEY` and `WINDOWS_TIMESTAMP_URL` carry the public
    values; changing them is a reviewed workflow change.
+
+   The Windows and macOS legs need a non-exportable key — in a hardware module, a
+   cloud key-protection service or a signing service. That is a different signing
+   mechanism, not a different store: what the repository holds may become a
+   signing-service credential while it is still a build credential read by the
+   packaging job.
 
    The Windows OV `.pfx` is **not** an admitted mechanism. Since 2023-06-01 the
    CA/Browser Forum *Code Signing Baseline Requirements* require a subscriber's

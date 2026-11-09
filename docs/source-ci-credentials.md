@@ -9,9 +9,10 @@ permission:
 | `build.yml` → `build` | `AnyWear-Service-API` | `contents: read` | Fetches the published OpenAPI specification the generated client comes from |
 | `release.yml` → `handoff` | `AnyWear-E2E` | `actions: write` | Dispatches the post-publication `smoke` run |
 
-The tagged binary publication adds nine repository-scoped signing secrets, all
-private key material, and no external GitHub App token. Each is read by exactly one
-platform job in `client-release.yml` (§ [Signing secrets](#signing-secrets)).
+The tagged binary publication adds nine repository-scoped signing secrets — private
+key material and the passwords and alias that accompany it — and no external GitHub
+App token. Each is read by exactly one platform job in `client-release.yml`
+(§ [Signing secrets](#signing-secrets)).
 
 This note records what each credential may reach, why, and what happens when one is
 unavailable.
@@ -107,8 +108,8 @@ generated token, the default credential everywhere else — still describe
 ## Signing secrets
 
 `.github/workflows/client-release.yml` publishes signed platform binaries. It
-holds nine repository-scoped secrets, all private key material, and each is read by
-exactly one job:
+holds nine repository-scoped secrets — private key material and the passwords and
+alias that accompany it — and each is read by exactly one job:
 
 | Secret | Platform | Form | Only referencing job |
 | --- | --- | --- | --- |
@@ -121,6 +122,14 @@ exactly one job:
 | `ANDROID_KEYSTORE_PASSWORD` | Android | keystore password | `package-android` |
 | `ANDROID_KEY_ALIAS` | Android | key alias | `package-android` |
 | `ANDROID_KEY_PASSWORD` | Android | key password | `package-android` |
+
+These nine are the signing class defined by
+[ADR-0004](https://github.com/anywear-ai/AnyWear-Meta/blob/main/architecture/ADR/0004-oidc-ssm-cross-repo-secrets.md)
+§5. Each is consumed by a packaging job inside the release run, never by a running
+service, so each is a repository-scoped GitHub secret and not an AWS Secrets Manager
+value.
+[ADR-0036](https://github.com/anywear-ai/AnyWear-Meta/blob/main/architecture/ADR/0036-client-release-pipeline.md#5-repository-scoped-signing-secrets-public-constants-and-windows-ov-signing)
+§5 is the placement decision; this note records the names, forms and jobs.
 
 The Windows `.pfx` is the name the job reads, not a mechanism this pipeline may
 publish from. Since 2023-06-01 the CA/Browser Forum *Code Signing Baseline
@@ -150,7 +159,26 @@ receives it. `scripts/source-ci-credential-boundary.mjs` therefore exports a clo
 - a job declares a write permission outside the named job that holds it: only
   `client-release.yml:publish` holds `contents: write`, only
   `client-release.yml:assemble` holds `id-token: write` and `attestations: write`,
-  and `release.yml:deploy` keeps the `id-token: write` it already had.
+  and `release.yml:deploy` keeps the `id-token: write` it already had;
+- a job declares a job-level `environment:` — the packaging entry holds no GitHub
+  Environment, so no job may declare one;
+- a step `uses:` names a cloud-credential action (`aws-actions/`, `azure/`,
+  `google-github-actions/`, or `hashicorp/vault-action`), a job-level `uses:`
+  appears at all, or a step `with:` passes a cloud-credential input — the packaging
+  entry holds no cloud principal; adopting a cloud signing mechanism amends
+  ADR-0036 §5 and the guard's signing table in the same delivery;
+- a `vars.` reference is role-shaped (a name with `ROLE` or `ARN` as a whole
+  segment), a computed `vars[...]` name cannot be resolved, or a recorded value
+  contains an `arn:aws…:` value — the packaging entry names no cloud role or
+  principal;
+- a `run:` body invokes a cloud CLI (`aws`, `gcloud`, `az`, `sam`, `cdk`,
+  `terraform`, `pulumi`, `eksctl`), directly or behind `sudo`, `pnpm exec`, `npx`,
+  `&` or `$()` where the substitution closes on the same body line — the packaging
+  entry runs no cloud CLI.
+
+These four packaging-entry rules read `client-release.yml` only. `release.yml` is
+the web-publication entry: it declares its own `environment:` and assumes its own
+AWS role, so none of the four applies to it.
 
 `tokenSites` stays at exactly two: the tagged binary publication mints no App
 token, dispatches nothing and runs no cloud CLI. `preflight` references no secret at

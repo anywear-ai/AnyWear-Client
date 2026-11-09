@@ -89,13 +89,12 @@ installation or Service call is involved, apart from each pinned action's own
 published metadata.
 
 The specification checkout pins its revision by full commit, so it fetches exactly the
-revision that commit names. The node test compares that literal against the revision
-the test names, which the maintainer updates with the submodule pointer; it does not
-read the gitlink itself, so a submodule bump that changes neither the workflow literal
-nor the test's revision passes this suite. `build.yml`'s own `Check codegen
-consistency` step is what catches a specification revision the committed generated
-client does not match: `pnpm run orval` regenerates the client and `git diff
---exit-code` fails when the result differs.
+revision that commit names. The node test reads the `api` gitlink from the index with
+`readSubmoduleRevision` and compares the workflow's `ref` literal against it, so a
+submodule bump that leaves the workflow literal behind fails this suite. `build.yml`'s
+own `Check codegen consistency` step is what catches a specification revision the
+committed generated client does not match: `pnpm run orval` regenerates the client and
+`git diff --exit-code` fails when the result differs.
 
 The Beta Client publication chain, `.github/workflows/release.yml`, holds no
 credential in `build`, `verify` or `record`: each uses a plain
@@ -172,9 +171,11 @@ receives it. `scripts/source-ci-credential-boundary.mjs` therefore exports a clo
   contains an `arn:aws…:` value — the packaging entry names no cloud role or
   principal;
 - a `run:` body invokes a cloud CLI (`aws`, `gcloud`, `az`, `sam`, `cdk`,
-  `terraform`, `pulumi`, `eksctl`), directly or behind `sudo`, `pnpm exec`, `npx`,
-  `&` or `$()` where the substitution closes on the same body line — the packaging
-  entry runs no cloud CLI.
+  `terraform`, `pulumi`, `eksctl`), directly or behind a bare `sudo`, `pnpm exec`
+  or `npx` wrapper token (not a wrapper carrying its own options, such as
+  `sudo -E aws …`, `npx --yes aws …` or `pnpm exec --silent aws …`, and not an
+  `env FOO=1 aws …` prefix), or after `&` or inside `$()` where the substitution
+  closes on the same body line — the packaging entry runs no cloud CLI.
 
 These four packaging-entry rules read `client-release.yml` only. `release.yml` is
 the web-publication entry: it declares its own `environment:` and assumes its own

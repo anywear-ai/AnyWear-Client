@@ -421,12 +421,21 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          printf '%s' "$ANDROID_KEY_BASE64" | base64 --decode > src-tauri/gen/android/anywear-release.jks
+          keystore="src-tauri/gen/android/anywear-release.jks"
+          printf '%s' "$ANDROID_KEY_BASE64" | base64 --decode > "$keystore"
+          # Both `keytool` and Gradle default to PKCS12, so the store type has to come
+          # from the file: a JKS keystore starts with the FEED FEED magic word.
+          if [ "$(od -An -tx1 -N4 "$keystore" | tr -d ' \n')" = "feedfeed" ]; then
+            store_type=JKS
+          else
+            store_type=PKCS12
+          fi
           {
             echo "storeFile=$(pwd)/src-tauri/gen/android/anywear-release.jks"
             echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
             echo "keyAlias=$ANDROID_KEY_ALIAS"
             echo "keyPassword=$ANDROID_KEY_PASSWORD"
+            echo "storeType=$store_type"
           } > src-tauri/gen/android/keystore.properties
 
       # The Android versionCode is derived from the monotonic protocol version, so
@@ -533,8 +542,16 @@ jobs:
             sed -n "s/.*$1:[[:space:]]*//p" | head -n 1 | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]'
           }
           keystore="src-tauri/gen/android/anywear-release.jks"
-          if ! keystore_certs="$(keytool -list -v -keystore "$keystore" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" 2>&1)"; then
-            echo "::error::keytool could not read the materialized keystore $keystore"
+          keystore_properties="src-tauri/gen/android/keystore.properties"
+          # The store type is the one the materialize step detected from the keystore
+          # file, so a JKS keystore is not read with the PKCS12 default.
+          store_type="$(sed -n 's/^storeType=//p' "$keystore_properties" | head -n 1)"
+          if [ -z "$store_type" ]; then
+            echo "::error::$keystore_properties does not declare storeType, so the keystore cannot be read with the right type"
+            exit 1
+          fi
+          if ! keystore_certs="$(keytool -list -v -keystore "$keystore" -storetype "$store_type" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" 2>&1)"; then
+            echo "::error::keytool could not read the materialized keystore $keystore as $store_type"
             exit 1
           fi
           keystore_sha256="$(printf '%s\n' "$keystore_certs" | sha256_of 'SHA256')"
@@ -563,7 +580,7 @@ jobs:
               exit 1
             fi
             printf '%s\n' "$aab_jar"
-            if ! grep -q 'jar verified' <<<"$aab_jar"; then
+            if ! grep -qE '^jar verified\.$' <<<"$aab_jar"; then
               echo "::error::$aab was not reported as \"jar verified\""
               exit 1
             fi

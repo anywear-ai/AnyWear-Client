@@ -705,16 +705,27 @@ test('#278: client-release.yml verifies every signature before assembly', () => 
   assert.match(android, /jarsigner -verify/, 'the AAB must be verified with the JAR verifier');
   assert.match(android, /keytool -printcert -jarfile/, "the AAB's signer certificate must be read from the bundle");
   assert.match(android, /keytool -list -v -keystore/, 'the keystore certificate must be the expected signer');
+  // #290 review: the keystore is JKS while `keytool` defaults to PKCS12, so the step
+  // must read the type the materialize step detected and pass it to the keystore read.
+  assert.match(android, /store_type=/, 'the keystore store type must be read from keystore.properties');
+  assert.match(
+    android,
+    /keytool -list -v -keystore "\$keystore" -storetype "\$store_type"/,
+    'the detected store type must be passed to keytool -list',
+  );
   assert.match(android, /"\$apk_sha256" != "\$keystore_sha256"/, "the APK's fingerprint must be compared with the keystore's");
   assert.match(android, /"\$aab_sha256" != "\$keystore_sha256"/, "the AAB's fingerprint must be compared with the keystore's");
   assert.match(android, /the Android build produced no APK or no AAB/, 'the empty-artifact refusal must stay');
+  assert.match(android, /grep -qE '\^jar verified\\\.\$'/, 'only the unqualified `jar verified.` line may pass the AAB check');
   // A bare `apksigner verify` cannot print the certificate the comparison needs, and
   // one verifier loop over both containers is the shape that fed the AAB to it.
   assert.doesNotMatch(android, /apksigner verify(?! --print-certs)/, 'apksigner must always print the signer certificate');
   assert.doesNotMatch(android, /for artifact in "\$\{apks\[@\]\}" "\$\{aabs\[@\]\}"/, 'each container must be verified by its own tool');
+  // The code token, not the word in the step's comment: the SDK search must precede
+  // the invocation it feeds.
   assert.ok(
-    android.indexOf('build-tools') < android.indexOf('apksigner verify --print-certs'),
-    'the tool must be resolved before it is invoked',
+    android.indexOf('"$root"/build-tools/') < android.indexOf('apksigner verify --print-certs'),
+    'the build-tools search must run before apksigner is invoked',
   );
 });
 
@@ -763,7 +774,7 @@ test('#290: the Android release build type is signed from the materialized keyst
     /storeFile = rootProject\.file\(keystoreProperties\.getProperty\("storeFile"\)\)/,
     'a relative storeFile must resolve beside the gen/android project, not inside app/',
   );
-  for (const property of ['storePassword', 'keyAlias', 'keyPassword']) {
+  for (const property of ['storePassword', 'keyAlias', 'keyPassword', 'storeType']) {
     assert.match(
       signingConfigs,
       new RegExp(`${property} = keystoreProperties\\.getProperty\\("${property}"\\)`),
@@ -775,10 +786,18 @@ test('#290: the Android release build type is signed from the materialized keyst
     /if \(keystorePropertiesFile\.exists\(\)\)/,
     'a developer checkout without the file must still configure',
   );
+  const release = braceBlock(gradle, 'getByName("release")');
   assert.match(
-    braceBlock(gradle, 'getByName("release")'),
+    release,
     /signingConfig = signingConfigs\.getByName\("release"\)/,
     'the release build type must use the release signing config',
+  );
+  // #290 review: the assignment must sit inside the existence guard, not merely
+  // appear somewhere in the file, or a checkout without the file fails to configure.
+  assert.match(
+    braceBlock(release, 'if (keystorePropertiesFile.exists())'),
+    /signingConfig = signingConfigs\.getByName\("release"\)/,
+    'the signing config must be assigned inside the exists() guard',
   );
 
   // The file the build script reads is the one this step writes, and its storeFile is
@@ -796,6 +815,15 @@ test('#290: the Android release build type is signed from the materialized keyst
       `the materialized properties must carry ${property}`,
     );
   }
+  // #290 review: JKS and PKCS12 are indistinguishable to both tools' defaults, so the
+  // type is detected from the file magic and written for both consumers.
+  assert.match(materialize, /od -An -tx1 -N4 "\$keystore"/, 'the store type must be detected from the keystore bytes');
+  assert.match(materialize, /"feedfeed"/, 'a JKS keystore carries the FEED FEED magic');
+  assert.match(
+    materialize,
+    /^ {12}echo "storeType=\$store_type"$/m,
+    'the materialized properties must carry the detected storeType',
+  );
 });
 
 test('#278: client-release.yml compares its assembled and uploaded inventories', () => {

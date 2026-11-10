@@ -231,7 +231,13 @@ Android (this Beta's published platform):
 
 ```bash
 apksigner verify --print-certs AnyWear-0.2.0-android.apk
+jarsigner -verify AnyWear-0.2.0-android.aab
 ```
+
+Both packages are signed by the `release` build type, which reads
+`src-tauri/gen/android/keystore.properties` — the file `package-android`
+materializes from the four `ANDROID_*` secrets — so a checkout without that file
+configures the same project unsigned for local work.
 
 `build-metadata.json` is packed inside the application (`frontendDist: ../dist`),
 so a tester holding only the app can read `source_commit`, `client_version` and the

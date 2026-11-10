@@ -423,7 +423,7 @@ jobs:
         run: |
           printf '%s' "$ANDROID_KEY_BASE64" | base64 --decode > src-tauri/gen/android/anywear-release.jks
           {
-            echo "storeFile=anywear-release.jks"
+            echo "storeFile=$(pwd)/src-tauri/gen/android/anywear-release.jks"
             echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
             echo "keyAlias=$ANDROID_KEY_ALIAS"
             echo "keyPassword=$ANDROID_KEY_PASSWORD"
@@ -454,17 +454,131 @@ jobs:
           android_config="$(node -e "process.stdout.write(JSON.stringify({ version: process.env.RELEASE_VERSION, bundle: { android: { versionCode: Number(process.env.VERSION_CODE) } } }))")"
           pnpm exec tauri android build --apk --aab --config "$android_config"
 
+      # The APK and the AAB need different verifiers: an APK's signature scheme block
+      # is not a JAR signature, and an app bundle is a JAR-signed ZIP with no root
+      # `AndroidManifest.xml` for `apksigner` to read. Both signer certificates are
+      # compared with the certificate of the keystore this job materialized, so a
+      # debug-signed or differently signed package cannot reach `assemble`.
       - name: Verify the Android signatures
         shell: bash
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          # Resolve every verifier before an artifact is touched. `apksigner` is not
+          # on the hosted runner's PATH -- the first run that reached this step died
+          # as `apksigner: command not found` -- so it comes from the SDK's
+          # build-tools, newest version first. The JDK tools come from PATH, then
+          # `JAVA_HOME`, then beside `java`. Their directories are then put first on
+          # PATH, so the documented commands below run the binaries just found.
+          sdk_roots=()
+          for root in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" /usr/local/lib/android/sdk; do
+            if [ -n "$root" ]; then
+              sdk_roots+=("$root")
+            fi
+          done
+          apksigner_bin="$(command -v apksigner 2>/dev/null || true)"
+          if [ -z "$apksigner_bin" ]; then
+            for root in "${sdk_roots[@]}"; do
+              candidate="$(ls -1 "$root"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
+              if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+                apksigner_bin="$candidate"
+                break
+              fi
+            done
+          fi
+          resolve_jdk_tool() {
+            local found
+            found="$(command -v "$1" 2>/dev/null || true)"
+            if [ -z "$found" ] && [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/$1" ]; then
+              found="$JAVA_HOME/bin/$1"
+            fi
+            if [ -z "$found" ]; then
+              local java_dir
+              java_dir="$(dirname "$(command -v java 2>/dev/null || echo /nonexistent/java)")"
+              if [ -x "$java_dir/$1" ]; then
+                found="$java_dir/$1"
+              fi
+            fi
+            printf '%s\n' "$found"
+          }
+          jarsigner_bin="$(resolve_jdk_tool jarsigner)"
+          keytool_bin="$(resolve_jdk_tool keytool)"
+          if [ -z "$apksigner_bin" ]; then
+            echo "::error::apksigner was not found on PATH or in any build-tools directory under ${sdk_roots[*]}, so the Android APK cannot be verified"
+            exit 1
+          fi
+          if [ -z "$jarsigner_bin" ]; then
+            echo "::error::jarsigner was not found on PATH, under \$JAVA_HOME/bin or beside java, so the Android AAB cannot be verified"
+            exit 1
+          fi
+          if [ -z "$keytool_bin" ]; then
+            echo "::error::keytool was not found on PATH, under \$JAVA_HOME/bin or beside java, so the signer certificates cannot be read"
+            exit 1
+          fi
+          export PATH="$(dirname "$apksigner_bin"):$(dirname "$jarsigner_bin"):$(dirname "$keytool_bin"):$PATH"
+          # Every artifact the build produced is verified, so an extra unsigned or
+          # wrongly signed package fails the step instead of being staged.
           mapfile -t apks < <(find src-tauri/gen/android/app/build/outputs -name '*.apk' -type f)
           mapfile -t aabs < <(find src-tauri/gen/android/app/build/outputs -name '*.aab' -type f)
           if [ "${#apks[@]}" -eq 0 ] || [ "${#aabs[@]}" -eq 0 ]; then
             echo "::error::the Android build produced no APK or no AAB"
             exit 1
           fi
-          for artifact in "${apks[@]}" "${aabs[@]}"; do
-            apksigner verify --print-certs "$artifact"
+          # A fingerprint is compared as bare lowercase hex: `apksigner` prints the
+          # digest without separators, `keytool` prints colon-separated hex.
+          sha256_of() {
+            sed -n "s/.*$1:[[:space:]]*//p" | head -n 1 | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]'
+          }
+          keystore="src-tauri/gen/android/anywear-release.jks"
+          if ! keystore_certs="$(keytool -list -v -keystore "$keystore" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" 2>&1)"; then
+            echo "::error::keytool could not read the materialized keystore $keystore"
+            exit 1
+          fi
+          keystore_sha256="$(printf '%s\n' "$keystore_certs" | sha256_of 'SHA256')"
+          if [ -z "$keystore_sha256" ]; then
+            echo "::error::keytool printed no SHA-256 fingerprint for $keystore"
+            exit 1
+          fi
+          for apk in "${apks[@]}"; do
+            if ! apk_certs="$(apksigner verify --print-certs "$apk" 2>&1)"; then
+              printf '%s\n' "$apk_certs"
+              echo "::error::$apk did not pass apksigner verification"
+              exit 1
+            fi
+            printf '%s\n' "$apk_certs"
+            apk_sha256="$(printf '%s\n' "$apk_certs" | sha256_of 'certificate SHA-256 digest')"
+            if [ "$apk_sha256" != "$keystore_sha256" ]; then
+              echo "::error::$apk is signed by certificate SHA-256 ${apk_sha256:-none}, but the materialized keystore certificate is $keystore_sha256"
+              exit 1
+            fi
+            echo "$apk is signed by the materialized keystore certificate"
+          done
+          for aab in "${aabs[@]}"; do
+            if ! aab_jar="$(jarsigner -verify "$aab" 2>&1)"; then
+              printf '%s\n' "$aab_jar"
+              echo "::error::$aab did not pass jarsigner verification"
+              exit 1
+            fi
+            printf '%s\n' "$aab_jar"
+            if ! grep -q 'jar verified' <<<"$aab_jar"; then
+              echo "::error::$aab was not reported as \"jar verified\""
+              exit 1
+            fi
+            if ! aab_certs="$(keytool -printcert -jarfile "$aab" 2>&1)"; then
+              printf '%s\n' "$aab_certs"
+              echo "::error::keytool could not read the signer certificate of $aab"
+              exit 1
+            fi
+            printf '%s\n' "$aab_certs"
+            aab_sha256="$(printf '%s\n' "$aab_certs" | sha256_of 'SHA256')"
+            if [ "$aab_sha256" != "$keystore_sha256" ]; then
+              echo "::error::$aab is signed by certificate SHA-256 ${aab_sha256:-none}, but the materialized keystore certificate is $keystore_sha256"
+              exit 1
+            fi
+            echo "$aab is signed by the materialized keystore certificate"
           done
 
       - name: Stage the Android assets

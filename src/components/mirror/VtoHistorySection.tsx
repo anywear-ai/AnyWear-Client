@@ -7,6 +7,7 @@ import { getErrorMessage } from '../../lib/errors';
 import type { GetVtoGenerationsStatus } from '../../api/model/getVtoGenerationsStatus';
 import type { GetVtoGenerations200GenerationsItem } from '../../api/model/getVtoGenerations200GenerationsItem';
 import type { PostVtoGenerationsBody } from '../../api/model/postVtoGenerationsBody';
+import type { VtoSettledStatus } from '../../lib/vtoHistoryStatus';
 
 const RETRY_BLOCKED_REASON_ID = 'vto-retry-blocked-reason';
 const RETRY_FAILURE_FALLBACK = 'Failed to retry this generation';
@@ -87,6 +88,12 @@ interface VtoHistorySectionProps {
   basePhotoId: string | null;
   credits: number;
   isGenerating: boolean;
+  /**
+   * The terminal status Step 4 is showing for the generation under test, or
+   * `null` while the page holds none. The section forwards it to
+   * `useVtoHistory`, which derives that generation's row from it.
+   */
+  settledStatus?: VtoSettledStatus | null;
 }
 
 export default function VtoHistorySection({
@@ -95,6 +102,7 @@ export default function VtoHistorySection({
   basePhotoId,
   credits,
   isGenerating,
+  settledStatus = null,
 }: VtoHistorySectionProps) {
   const {
     generations,
@@ -109,7 +117,7 @@ export default function VtoHistorySection({
     deleteGeneration,
     ratingFailures,
     ratingEchoResetTokens,
-  } = useVtoHistory();
+  } = useVtoHistory(settledStatus);
   const [viewImageUrl, setViewImageUrl] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);

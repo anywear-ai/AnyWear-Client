@@ -91,9 +91,17 @@ export default function useVtoGeneration() {
 
   // The balance changes on generation start and again when the run settles
   // (deduction, refund, exhaustion), so re-read the profile at both points.
+  // The History list keeps the row it last fetched, which can still say the run
+  // is in flight, so the settle also schedules exactly one list read to
+  // reconcile the page. The card does not wait for it: its row is derived from
+  // the terminal status at render. `isTerminal` flips once per generation, so
+  // this adds one read per settle — never one per frame or per poll — and a
+  // read already in flight is joined rather than duplicated.
   useEffect(() => {
-    if (vtoId && isTerminal) invalidateProfile();
-  }, [vtoId, isTerminal, invalidateProfile]);
+    if (!vtoId || !isTerminal) return;
+    invalidateProfile();
+    queryClient.invalidateQueries({ queryKey: ['/vto/generations'] as const });
+  }, [vtoId, isTerminal, invalidateProfile, queryClient]);
 
   const result: VtoStatusResponse | null = statusQuery.data ?? null;
   const errorMessage: string | null = statusQuery.data?.error_message ?? (generateMutation.isError ? 'Failed to start generation' : null);

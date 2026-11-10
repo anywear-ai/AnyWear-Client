@@ -1,10 +1,12 @@
 import type { PropsWithChildren } from 'react';
 import { act, cleanup, renderHook } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, keepPreviousData } from '@tanstack/react-query';
 import { fetchAuthSession } from 'aws-amplify/auth';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VtoStatusResponse } from '../api/model/vtoStatusResponse';
+import type { GetVtoGenerations200 } from '../api/model/getVtoGenerations200';
 import { customInstance } from '../api/custom-instance';
+import { useGetVtoGenerations } from '../api/endpoints/vto/vto';
 import useVtoGeneration from './useVtoGeneration';
 
 vi.mock('../api/custom-instance', () => ({ customInstance: vi.fn() }));
@@ -18,6 +20,28 @@ const pendingStatus: VtoStatusResponse = {
   url: null,
   created_at: '2026-10-03T00:00:00.000Z',
   rating: null,
+};
+
+const SETTLED_URL = 'https://images.example.com/generation-1.jpg';
+
+const historyPage: GetVtoGenerations200 = {
+  generations: [
+    {
+      id: 'generation-1',
+      createdAt: '2026-10-03T00:00:00.000Z',
+      status: 'Pending',
+      imageId: null,
+      url: null,
+      rating: null,
+      promptUsed: null,
+      advancedSettings: null,
+      items: [],
+    },
+  ],
+  total: 1,
+  page: 1,
+  limit: 12,
+  nextPage: null,
 };
 
 function createWrapper(queryClient: QueryClient) {
@@ -304,5 +328,141 @@ describe('useVtoGeneration recovery lifecycle', () => {
     expect(result.current.status).toBe('Complete');
     expect(invalidate.mock.calls.filter(([arg]) => arg?.queryKey?.[0] === '/users/me').length)
       .toBeGreaterThanOrEqual(2);
+  });
+
+  function renderGenerationWithHistory() {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    clients.push(queryClient);
+    return {
+      queryClient,
+      ...renderHook(
+        () => ({
+          generation: useVtoGeneration(),
+          // The same read `useVtoHistory` mounts, keyed under `/vto/generations`.
+          history: useGetVtoGenerations(
+            { page: 1, limit: 12 },
+            { query: { placeholderData: keepPreviousData } },
+          ),
+        }),
+        { wrapper: createWrapper(queryClient) },
+      ),
+    };
+  }
+
+  /** Routes `customInstance` by URL, counting `GET /vto/generations` through `getHistory`. */
+  function routeHistoryReads(
+    getHistory: ReturnType<typeof vi.fn<() => Promise<GetVtoGenerations200>>>,
+  ) {
+    vi.mocked(customInstance).mockImplementation((config) => {
+      if (config.method === 'GET' && config.url === '/vto/generations') return getHistory();
+      if (config.method === 'POST') {
+        return Promise.resolve({ generation_id: 'generation-1', outfit_id: 'outfit-1' });
+      }
+      return getStatus();
+    });
+  }
+
+  async function startGeneration(generation: ReturnType<typeof useVtoGeneration>) {
+    await act(async () => {
+      await generation.generate({ base_photo_id: 'photo-1', outfit_id: 'outfit-1' });
+    });
+    await advance(0);
+  }
+
+  async function sendFrame(payload: VtoStatusResponse) {
+    await act(async () => {
+      streamControllers[0].enqueue(new TextEncoder().encode(
+        `event: status\ndata: ${JSON.stringify(payload)}\n\n`,
+      ));
+    });
+    await advance(1);
+  }
+
+  it('adds exactly one history read at the settle, and none for frames or polls', async () => {
+    const getHistory = vi.fn<() => Promise<GetVtoGenerations200>>().mockResolvedValue(historyPage);
+    routeHistoryReads(getHistory);
+    const { result } = renderGenerationWithHistory();
+
+    await advance(1);
+    expect(result.current.history.data).toEqual(historyPage);
+
+    await startGeneration(result.current.generation);
+    await advance(1);
+    expect(result.current.generation.status).toBe('Processing');
+    // The mount read, then the one the start already schedules. This is the
+    // baseline the settle's delta is measured from.
+    const baseline = getHistory.mock.calls.length;
+    expect(baseline).toBe(2);
+
+    // Two non-terminal frames and one 10-second poll add no history read.
+    await sendFrame({ ...pendingStatus, state_version: 2 });
+    await sendFrame({ ...pendingStatus, status: 'Pending', state_version: 3 });
+    await advance(10_000);
+    await advance(1);
+    expect(result.current.generation.status).toBe('Pending');
+    expect(result.current.generation.isTerminal).toBe(false);
+    expect(getHistory.mock.calls.length).toBe(baseline);
+
+    // The terminal frame adds exactly one.
+    await sendFrame({
+      ...pendingStatus,
+      status: 'Complete',
+      state_version: 4,
+      imageId: 'image-1',
+      url: SETTLED_URL,
+    });
+    expect(result.current.generation.isTerminal).toBe(true);
+    expect(getHistory.mock.calls.length).toBe(baseline + 1);
+
+    // A duplicate terminal frame and a further 60 seconds add none.
+    await sendFrame({
+      ...pendingStatus,
+      status: 'Complete',
+      state_version: 4,
+      imageId: 'image-1',
+      url: SETTLED_URL,
+    });
+    await advance(60_000);
+    expect(result.current.generation.status).toBe('Complete');
+    expect(getHistory.mock.calls.length).toBe(baseline + 1);
+  });
+
+  it('joins the first history read in flight instead of issuing another at the settle', async () => {
+    let resolveFirstPage!: (page: GetVtoGenerations200) => void;
+    const getHistory = vi.fn<() => Promise<GetVtoGenerations200>>()
+      .mockResolvedValue(historyPage)
+      .mockImplementationOnce(() => new Promise<GetVtoGenerations200>((resolve) => {
+        resolveFirstPage = resolve;
+      }));
+    routeHistoryReads(getHistory);
+    const { result } = renderGenerationWithHistory();
+
+    await advance(1);
+    expect(getHistory).toHaveBeenCalledTimes(1);
+    expect(result.current.history.data).toBeUndefined();
+
+    await startGeneration(result.current.generation);
+    await advance(1);
+    expect(streamControllers).toHaveLength(1);
+    // The start invalidation joined the held read rather than duplicating it.
+    expect(getHistory).toHaveBeenCalledTimes(1);
+
+    await sendFrame({
+      ...pendingStatus,
+      status: 'Complete',
+      state_version: 2,
+      imageId: 'image-1',
+      url: SETTLED_URL,
+    });
+    expect(result.current.generation.isTerminal).toBe(true);
+    // The settle invalidation joins the same held read: no request is issued.
+    expect(getHistory).toHaveBeenCalledTimes(1);
+
+    await act(async () => { resolveFirstPage(historyPage); });
+    await advance(1);
+    expect(result.current.history.data).toEqual(historyPage);
+    expect(getHistory).toHaveBeenCalledTimes(1);
   });
 });

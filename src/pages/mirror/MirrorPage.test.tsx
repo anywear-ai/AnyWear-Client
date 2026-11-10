@@ -493,6 +493,53 @@ describe('MirrorPage', () => {
       expect(sectionProps.latest!.isGenerating).toBe(true);
     });
 
+    it('passes the terminal result to the history read, and null while the run is not terminal', () => {
+      const terminalResult = {
+        generation_id: 'generation-1',
+        status: 'Complete',
+        state_version: 3,
+        imageId: 'image-1',
+        url: 'https://signed.example.com/result.jpg',
+        created_at: '2026-11-07T00:00:00.000Z',
+        rating: null,
+      };
+      vi.mocked(useVtoGeneration).mockReturnValue({
+        generate,
+        result: terminalResult,
+        isTerminal: true,
+        errorMessage: null,
+        isPolling: false,
+        isStarting: false,
+        vtoId: 'generation-1',
+      } as any);
+      const { rerenderPage } = renderPage();
+
+      // The same object Step 4 renders, so the card is derived from it.
+      expect(sectionProps.latest!.settledStatus).toBe(terminalResult);
+
+      const runningResult = {
+        ...terminalResult,
+        status: 'Processing',
+        state_version: 1,
+        imageId: null,
+        url: null,
+      };
+      vi.mocked(useVtoGeneration).mockReturnValue({
+        generate,
+        result: runningResult,
+        isTerminal: false,
+        errorMessage: null,
+        isPolling: true,
+        isStarting: false,
+        vtoId: 'generation-1',
+      } as any);
+      rerenderPage();
+
+      // A running generation holds no terminal status, so the card keeps the
+      // page's own badge and nothing is derived over it.
+      expect(sectionProps.latest!.settledStatus).toBeNull();
+    });
+
     it('runs the section body through generate unchanged and propagates its rejection', async () => {
       renderPage();
       const body = {

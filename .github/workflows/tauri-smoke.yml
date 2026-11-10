@@ -21,6 +21,12 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       SMOKE_BINARY: src-tauri/target/release/anywear.exe
+      # The smoke entry mounts the real App tree against the loopback fixture
+      # server in scripts/packaged-smoke.mjs; these values are compiled into
+      # dist-smoke and are fixtures, not a deployed identity or Service.
+      VITE_API_BASE_URL: http://127.0.0.1:38471
+      VITE_COGNITO_USER_POOL_ID: us-east-1_mockpool
+      VITE_COGNITO_CLIENT_ID: mock-client-id
 
     steps:
       - name: Checkout

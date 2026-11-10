@@ -27,6 +27,14 @@
 //   `http://asset.localhost`) with a non-zero rendered width
 // - no `securitypolicyviolation` was captured during the cache cycle
 // - an in-page fetch to `https://example.com` is blocked by the smoke policy
+// - after that phase the entry mounted the real `src/App.tsx` tree at `/wardrobe`,
+//   clicked the top link bar's Dashboard link once, and: the Wardrobe page was
+//   rendered and the link visible before the click; the link was the top bar's;
+//   the location became `/dashboard` with the boot counter still 1 (no document
+//   reload); the dashboard rendered `Hangzhou, Zhejiang`, `22°C`, `Sunny`, the
+//   `Today` heading and the `Explore your wardrobe` link; the navigation stayed
+//   visible before and after; `Setting up your wardrobe...` never appeared; and no
+//   `securitypolicyviolation` was recorded during the navigation phase.
 //
 // Evidence: `smoke-artifacts/result.json`, `smoke-artifacts/cache-listing.txt` and,
 // when WebDriver produced one, `smoke-artifacts/screenshot.png`. The script exits
@@ -60,10 +68,44 @@ const DRIVER_BASE_URL = `http://${FIXTURE_HOST}:${DRIVER_PORT}`;
 const DRIVER_START_TIMEOUT_MS = 60_000;
 const APP_START_TIMEOUT_MS = 240_000;
 const SMOKE_DEADLINE_MS = 480_000;
-const FILE_CHANNEL_TIMEOUT_MS = 120_000;
+// The entry's watchdog is 150 s: the image phase plus the app mount and the
+// click. This channel is 240 s so the watchdog always fires first and its
+// failure is reported instead of replaced by this read's own timeout.
+const FILE_CHANNEL_TIMEOUT_MS = 240_000;
 const DEFAULT_BINARY = 'src-tauri/target/release/anywear.exe';
 const RESULT_FILE_NAME = 'smoke-result.json';
 const SMOKE_CHANNEL = (process.env.SMOKE_CHANNEL ?? '').toLowerCase();
+
+// The profile the app reads at startup. It carries a location and a balance so
+// the dashboard and the Mirror shell have data; nothing here is a real identity.
+const FIXTURE_USER = {
+  id: 'test-user-id',
+  email: 'test@anywear.local',
+  displayName: null,
+  latitude: null,
+  longitude: null,
+  locationId: '101210101',
+  locationName: 'Hangzhou, Zhejiang',
+  dailyRecommendationTime: null,
+  dailyCredits: 10,
+  lastCreditRecharge: null,
+  createdAt: '2026-11-10T10:00:00Z',
+};
+
+// The exact values the browser spec uses, so both checks assert the same page.
+const FIXTURE_WEATHER = {
+  locationName: 'Hangzhou, Zhejiang',
+  temperature: '22',
+  feelsLike: '24',
+  icon: '100',
+  conditionText: 'Sunny',
+  humidity: '45',
+  windDir: 'North',
+  windScale: '1',
+  obsTime: '2026-11-10T10:00:00Z',
+  stale: false,
+  clothingIndex: { suggestion: 'Light clothing is enough.' },
+};
 
 class SmokeError extends Error {}
 
@@ -132,11 +174,15 @@ async function startFixtureServer() {
   let requests = 0;
   const server = createServer((request, response) => {
     // The packaged webview origin is `http://tauri.localhost`, so the fixture is a
-    // cross-origin fetch for `CachedImage`; without the CORS header the cold mount
-    // would fall back to the network instead of writing the cache.
+    // cross-origin request for `CachedImage` and for the app's Axios reads; without
+    // the CORS headers the cold mount would fall back to the network and every API
+    // read would fail. `access-control-allow-headers: *` admits the app's
+    // `Authorization` and `X-AnyWear-Client-Version` request headers, and every
+    // path answers the preflight.
     const headers = {
       'access-control-allow-origin': '*',
       'access-control-allow-methods': 'GET, OPTIONS',
+      'access-control-allow-headers': '*',
       'cache-control': 'no-store',
     };
     if (request.method === 'OPTIONS') {
@@ -144,7 +190,8 @@ async function startFixtureServer() {
       response.end();
       return;
     }
-    if (request.url === '/fixture.png') {
+    const pathname = new URL(request.url ?? '/', `http://${FIXTURE_HOST}`).pathname;
+    if (pathname === '/fixture.png') {
       requests += 1;
       response.writeHead(200, {
         ...headers,
@@ -152,6 +199,18 @@ async function startFixtureServer() {
         'content-length': png.length,
       });
       response.end(png);
+      return;
+    }
+    const jsonResponses = {
+      '/users/me': FIXTURE_USER,
+      '/wardrobe': [],
+      '/wardrobe/categories': { categories: [] },
+      '/outfits': { outfits: [] },
+      '/weather/current': FIXTURE_WEATHER,
+    };
+    if (pathname in jsonResponses) {
+      response.writeHead(200, { ...headers, 'content-type': 'application/json' });
+      response.end(JSON.stringify(jsonResponses[pathname]));
       return;
     }
     response.writeHead(404, { ...headers, 'content-type': 'text/plain' });
@@ -459,6 +518,57 @@ function assertSmoke(result) {
   if (result.fetchBlocked !== true) {
     problems.push('an in-page fetch to https://example.com was not blocked by the smoke CSP');
   }
+  if (result.wardrobeRenderedBeforeClick !== true) {
+    problems.push('the Wardrobe page had not rendered before the Dashboard click (wardrobeRenderedBeforeClick)');
+  }
+  if (result.dashboardLinkVisibleBeforeClick !== true) {
+    problems.push('the top bar\'s Dashboard link was not visible before the click (dashboardLinkVisibleBeforeClick)');
+  }
+  if (result.dashboardLinkWasTopBar !== true) {
+    problems.push('the clicked Dashboard link was not in the top link bar (dashboardLinkWasTopBar)');
+  }
+  if (result.dashboardLinkClicked !== true) {
+    problems.push('the top bar\'s Dashboard link was never clicked (dashboardLinkClicked)');
+  }
+  if (result.locationAfterClick !== '/dashboard') {
+    problems.push(`the location after the click was not /dashboard: ${String(result.locationAfterClick)}`);
+  }
+  if (result.boots !== 1 || result.documentReloaded !== false) {
+    problems.push(`the document reloaded during the navigation (boots: ${String(result.boots)}, documentReloaded: ${String(result.documentReloaded)})`);
+  }
+  if (result.weatherLocationText !== 'Hangzhou, Zhejiang') {
+    problems.push(`the weather location did not render: ${String(result.weatherLocationText)}`);
+  }
+  if (result.weatherTemperatureText !== '22°C') {
+    problems.push(`the weather temperature did not render: ${String(result.weatherTemperatureText)}`);
+  }
+  if (result.weatherConditionText !== 'Sunny') {
+    problems.push(`the weather condition did not render: ${String(result.weatherConditionText)}`);
+  }
+  if (result.todayHeadingVisible !== true) {
+    problems.push('the Today heading did not render on the dashboard');
+  }
+  if (result.exploreWardrobeLinkVisible !== true) {
+    problems.push('the Explore your wardrobe link did not render on the dashboard');
+  }
+  if (result.navigationVisibleBeforeClick !== true) {
+    problems.push('the navigation was not visible before the Dashboard click');
+  }
+  if (result.navigationVisibleAfterClick !== true) {
+    problems.push('the navigation was not visible after the Dashboard click');
+  }
+  if (result.dashboardLinkVisibleAfterClick !== true) {
+    problems.push('the top bar Dashboard link was not visible after the click (dashboardLinkVisibleAfterClick)');
+  }
+  if (typeof result.dashboardLinkDisplay !== 'string' || result.dashboardLinkDisplay === '' || result.dashboardLinkDisplay === 'none') {
+    problems.push(`the top bar Dashboard link was not laid out (display: ${String(result.dashboardLinkDisplay)})`);
+  }
+  if (result.settingUpWardrobeAfterClick !== false) {
+    problems.push('`Setting up your wardrobe...` appeared after the Dashboard click');
+  }
+  if (!Array.isArray(result.navigationViolations) || result.navigationViolations.length !== 0) {
+    problems.push(`the page captured CSP violations during the navigation: ${JSON.stringify(result.navigationViolations)}`);
+  }
   if (problems.length > 0) {
     throw new SmokeError(`packaged smoke assertions failed:\n- ${problems.join('\n- ')}`);
   }
@@ -565,6 +675,24 @@ try {
     naturalWidth: smoke.naturalWidth,
     violations: smoke.violations,
     fetchBlocked: smoke.fetchBlocked,
+    boots: smoke.boots,
+    wardrobeRenderedBeforeClick: smoke.wardrobeRenderedBeforeClick,
+    dashboardLinkVisibleBeforeClick: smoke.dashboardLinkVisibleBeforeClick,
+    dashboardLinkWasTopBar: smoke.dashboardLinkWasTopBar,
+    dashboardLinkClicked: smoke.dashboardLinkClicked,
+    locationAfterClick: smoke.locationAfterClick,
+    documentReloaded: smoke.documentReloaded,
+    weatherLocationText: smoke.weatherLocationText,
+    weatherTemperatureText: smoke.weatherTemperatureText,
+    weatherConditionText: smoke.weatherConditionText,
+    todayHeadingVisible: smoke.todayHeadingVisible,
+    exploreWardrobeLinkVisible: smoke.exploreWardrobeLinkVisible,
+    navigationVisibleBeforeClick: smoke.navigationVisibleBeforeClick,
+    navigationVisibleAfterClick: smoke.navigationVisibleAfterClick,
+    dashboardLinkVisibleAfterClick: smoke.dashboardLinkVisibleAfterClick,
+    dashboardLinkDisplay: smoke.dashboardLinkDisplay,
+    settingUpWardrobeAfterClick: smoke.settingUpWardrobeAfterClick,
+    navigationViolations: smoke.navigationViolations,
   });
   result.fixture.requests = fixture.requestCount();
   result.duration_ms = Date.now() - startedAt;

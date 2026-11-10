@@ -7,7 +7,9 @@ import tseslint from 'typescript-eslint';
 export default tseslint.config(
   {
     // Orval output is validated by regeneration and TypeScript compilation.
-    ignores: ['dist/**', 'src/api/**'],
+    // `dist-smoke` and the Rust build target are build output, not source; a
+    // Tauri codegen step emits a JS asset under `src-tauri/target`.
+    ignores: ['dist/**', 'dist-smoke/**', 'src-tauri/target/**', 'src/api/**'],
   },
   {
     files: ['**/*.{ts,tsx}'],

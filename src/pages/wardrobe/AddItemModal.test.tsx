@@ -94,10 +94,10 @@ describe('AddItemModal', () => {
     expect(confirmUpload).not.toHaveBeenCalled();
   });
 
-  it('announces both visible upload texts and names the close, submit, and cancel controls', () => {
+  it('announces the single upload entry and names the close, submit, and cancel controls', () => {
     render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
 
-    const input = screen.getByLabelText('Image Choose from library');
+    const input = screen.getByLabelText('Image Upload a file or take a photo');
     expect(input).toHaveAttribute('type', 'file');
     expect(input).toHaveAttribute('id', 'add-item-image');
 
@@ -198,6 +198,37 @@ describe('AddItemModal', () => {
     return fetchMock;
   }
 
+  /** The Android WebView: `isTauri` plus the platform token in the user agent. */
+  function stubAndroidApp() {
+    vi.stubGlobal('isTauri', true);
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.6099.230 Mobile Safari/537.36',
+    });
+  }
+
+  /** The desktop client: a Tauri shell whose WebView user agent has no Android token. */
+  function stubDesktopApp() {
+    vi.stubGlobal('isTauri', true);
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+    });
+  }
+
+  it('offers one upload entry with one multi-select file input and no camera entry', () => {
+    const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+    const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toBe(picker(container));
+    expect(inputs[0]).toHaveAttribute('multiple');
+    expect(inputs[0]).toHaveAttribute('accept', 'image/jpeg,image/png,image/webp');
+    expect(inputs[0]).not.toHaveAttribute('capture');
+    // The Android camera entry is not in the web shape's DOM at all.
+    expect(container.querySelector('#add-item-camera')).toBeNull();
+    expect(screen.getByLabelText('Image Upload a file or take a photo')).toBe(inputs[0]);
+    expect(screen.queryByText('Take photo')).toBeNull();
+  });
+
   it('lists one row per selected photo, each naming its file', () => {
     const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
 
@@ -211,35 +242,24 @@ describe('AddItemModal', () => {
     expect(within(list[1]).getByText('jeans.png')).toBeInTheDocument();
     expect(within(list[2]).getByText('boots.png')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add 3 items' })).toBeInTheDocument();
-    // The picker keeps the existing contract and stays the first file input.
+    // The picker keeps the existing contract and stays the only file input.
     const firstInput = container.querySelector<HTMLInputElement>('input[type="file"]');
     expect(firstInput).toBe(picker(container));
     expect(firstInput).toHaveAttribute('multiple');
     expect(firstInput).toHaveAttribute('id', 'add-item-image');
     expect(firstInput).toHaveAttribute('accept', 'image/jpeg,image/png,image/webp');
     expect(firstInput).not.toHaveAttribute('capture');
-    expect(screen.getByLabelText('Image Choose from library')).toBe(firstInput);
-    // The camera is the other entry: one file, and `image/*` so wry takes the
-    // ACTION_IMAGE_CAPTURE branch instead of the picker.
-    const cameraInput = camera(container);
-    expect(cameraInput).not.toBe(firstInput);
-    expect(cameraInput).toHaveAttribute('accept', 'image/*');
-    expect(cameraInput).toHaveAttribute('capture', 'environment');
-    expect(cameraInput).not.toHaveAttribute('multiple');
-    expect(screen.getByLabelText('Take photo')).toBe(cameraInput);
+    expect(screen.getByLabelText('Image Upload a file or take a photo')).toBe(firstInput);
   });
 
-  it('appends one row per camera activation inside one open dialog', async () => {
+  it('appends one row per selection inside one open dialog', async () => {
     stubReservations();
     stubSignedPost();
     const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
-    const cameraInput = camera(container);
-    expect(cameraInput).toHaveAttribute('capture', 'environment');
-    expect(cameraInput.id).not.toBe('add-item-image');
-    expect(screen.getByLabelText('Take photo')).toBe(cameraInput);
+    const filePicker = picker(container);
 
-    fireEvent.change(cameraInput, { target: { files: [photo('shot-one.png')] } });
-    fireEvent.change(cameraInput, { target: { files: [photo('shot-two.png')] } });
+    fireEvent.change(filePicker, { target: { files: [photo('shot-one.png')] } });
+    fireEvent.change(filePicker, { target: { files: [photo('shot-two.png')] } });
 
     const list = rows();
     expect(list).toHaveLength(2);
@@ -247,7 +267,7 @@ describe('AddItemModal', () => {
     expect(within(list[1]).getByText('shot-two.png')).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Add Wardrobe Item' })).toBeInTheDocument();
 
-    // The two shots are one action: two reservations, two items, one open dialog.
+    // The two selections are one action: two reservations, two items, one open dialog.
     fireEvent.submit(container.querySelector('form')!);
     await waitFor(() => expect(screen.getByText('2 items added, 0 failed')).toBeInTheDocument());
     expect(getUploadUrl).toHaveBeenCalledTimes(2);
@@ -484,7 +504,7 @@ describe('AddItemModal', () => {
     expect(screen.getByText('2 items added, 0 failed')).toBeInTheDocument();
   });
 
-  it('disables both file inputs while the batch runs and re-enables them once it settles', async () => {
+  it('disables its file input while the batch runs and re-enables it once it settles', async () => {
     // Self-contained: the confirmation implementation is declared here, then the
     // reservation is gated so the run can be observed in flight.
     stubReservations();
@@ -496,16 +516,14 @@ describe('AddItemModal', () => {
     fireEvent.change(picker(container), { target: { files: [photo('one.png'), photo('two.png')] } });
     fireEvent.submit(container.querySelector('form')!);
 
-    expect(picker(container)).toBeDisabled();
-    expect(camera(container)).toBeDisabled();
-    // The label carries the busy affordance, and the ring tokens stay authored.
-    for (const input of [picker(container), camera(container)]) {
-      const label = input.closest('label')!;
-      const tokens = label.className.split(/\s+/);
-      expect(tokens).toContain('opacity-50');
-      expect(tokens).toContain('cursor-not-allowed');
-      expectRingTokens(label, 'focus-within:');
-    }
+    const filePicker = picker(container);
+    expect(filePicker).toBeDisabled();
+    // The only label carries the busy affordance, and the ring tokens stay authored.
+    const label = filePicker.closest('label')!;
+    const tokens = label.className.split(/\s+/);
+    expect(tokens).toContain('opacity-50');
+    expect(tokens).toContain('cursor-not-allowed');
+    expectRingTokens(label, 'focus-within:');
 
     gate.resolve({
       reservationId: 'reservation-1',
@@ -515,7 +533,6 @@ describe('AddItemModal', () => {
 
     await waitFor(() => expect(screen.getByText('2 items added, 0 failed')).toBeInTheDocument());
     expect(picker(container)).toBeEnabled();
-    expect(camera(container)).toBeEnabled();
     expect(picker(container).closest('label')!.className.split(/\s+/)).toContain('cursor-pointer');
   });
 
@@ -618,18 +635,16 @@ describe('AddItemModal', () => {
     expect(within(rows()[0]).getByText('denim.png')).toBeInTheDocument();
   });
 
-  it('keeps both capture entries visible and says nothing when a chooser is cancelled', () => {
+  it('says nothing and keeps the single entry when a chooser is cancelled', () => {
     const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
 
-    // A cancelled system camera or picker supplies no files: no row, no hint,
-    // and both entries still on screen for the next attempt.
+    // A cancelled picker supplies no files: no row, no hint, and the one entry
+    // still on screen for the next attempt.
     fireEvent.change(picker(container), { target: { files: [] } });
-    fireEvent.change(camera(container), { target: { files: [] } });
 
     expect(screen.queryByRole('list', { name: 'Added photos' })).toBeNull();
     expect(screen.queryByText(/Could not process this image/)).toBeNull();
-    expect(screen.getByLabelText('Image Choose from library')).toBeInTheDocument();
-    expect(screen.getByLabelText('Take photo')).toBeInTheDocument();
+    expect(screen.getByLabelText('Image Upload a file or take a photo')).toBeInTheDocument();
   });
 
   it('shows a decode failure inline and sends no request for that photo', async () => {
@@ -642,8 +657,102 @@ describe('AddItemModal', () => {
     await waitFor(() => expect(screen.getByText('Could not process this image')).toBeInTheDocument());
     expect(getUploadUrl).not.toHaveBeenCalled();
     expect(confirmUpload).not.toHaveBeenCalled();
-    // The library entry is still one click away, so the failure is not a dead end.
-    expect(screen.getByLabelText('Image Choose from library')).toBeInTheDocument();
-    expect(screen.getByLabelText('Take photo')).toBeInTheDocument();
+    // The single entry is still one click away, so the failure is not a dead end.
+    expect(screen.getByLabelText('Image Upload a file or take a photo')).toBeInTheDocument();
+    expect(container.querySelector('#add-item-camera')).toBeNull();
+  });
+
+  describe('in the desktop client', () => {
+    beforeEach(() => {
+      stubDesktopApp();
+    });
+
+    it('renders one upload entry under the default name and no camera entry', () => {
+      const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+      const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+      expect(inputs).toHaveLength(1);
+      expect(screen.getByLabelText('Image Upload a file or take a photo')).toBe(inputs[0]);
+      expect(container.querySelector('#add-item-camera')).toBeNull();
+      expect(screen.queryByText('Take photo')).toBeNull();
+    });
+  });
+
+  describe('in the Android app', () => {
+    beforeEach(() => {
+      stubAndroidApp();
+    });
+
+    it('keeps both capture entries with the attributes each system path needs', () => {
+      const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+      const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+      expect(inputs).toHaveLength(2);
+      const libraryInput = picker(container);
+      expect(screen.getByLabelText('Image Choose from library')).toBe(libraryInput);
+      expect(libraryInput).toHaveAttribute('accept', 'image/jpeg,image/png,image/webp');
+      expect(libraryInput).not.toHaveAttribute('capture');
+      // The camera is the other entry: one file, and `image/*` so wry takes the
+      // ACTION_IMAGE_CAPTURE branch instead of the picker.
+      const cameraInput = camera(container);
+      expect(cameraInput).not.toBe(libraryInput);
+      expect(cameraInput).toHaveAttribute('accept', 'image/*');
+      expect(cameraInput).toHaveAttribute('capture', 'environment');
+      expect(cameraInput).not.toHaveAttribute('multiple');
+      expect(screen.getByLabelText('Take photo')).toBe(cameraInput);
+    });
+
+    it('appends one row per camera activation inside one open dialog', async () => {
+      stubReservations();
+      stubSignedPost();
+      const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+      const cameraInput = camera(container);
+
+      fireEvent.change(cameraInput, { target: { files: [photo('shot-one.png')] } });
+      fireEvent.change(cameraInput, { target: { files: [photo('shot-two.png')] } });
+
+      const list = rows();
+      expect(list).toHaveLength(2);
+      expect(within(list[0]).getByText('shot-one.png')).toBeInTheDocument();
+      expect(within(list[1]).getByText('shot-two.png')).toBeInTheDocument();
+      expect(screen.getByRole('dialog', { name: 'Add Wardrobe Item' })).toBeInTheDocument();
+
+      // The two shots are one action: two reservations, two items, one open dialog.
+      fireEvent.submit(container.querySelector('form')!);
+      await waitFor(() => expect(screen.getByText('2 items added, 0 failed')).toBeInTheDocument());
+      expect(getUploadUrl).toHaveBeenCalledTimes(2);
+      expect(confirmUpload).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole('dialog', { name: 'Add Wardrobe Item' })).toBeInTheDocument();
+      expect(onSuccess).not.toHaveBeenCalled();
+    });
+
+    it('keeps both capture entries visible and says nothing when a chooser is cancelled', () => {
+      const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+
+      // A cancelled system camera or picker supplies no files: no row, no hint,
+      // and both entries still on screen for the next attempt.
+      fireEvent.change(picker(container), { target: { files: [] } });
+      fireEvent.change(camera(container), { target: { files: [] } });
+
+      expect(screen.queryByRole('list', { name: 'Added photos' })).toBeNull();
+      expect(screen.queryByText(/Could not process this image/)).toBeNull();
+      expect(screen.getByLabelText('Image Choose from library')).toBeInTheDocument();
+      expect(screen.getByLabelText('Take photo')).toBeInTheDocument();
+    });
+
+    it('shows a decode failure inline, sends no request, and keeps both entries', async () => {
+      vi.mocked(prepareImageForUpload).mockRejectedValueOnce(new Error('Could not process this image'));
+      const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+
+      fireEvent.change(picker(container), { target: { files: [photo('shot.jpg')] } });
+      fireEvent.submit(container.querySelector('form')!);
+
+      await waitFor(() => expect(screen.getByText('Could not process this image')).toBeInTheDocument());
+      expect(getUploadUrl).not.toHaveBeenCalled();
+      expect(confirmUpload).not.toHaveBeenCalled();
+      // The library entry is still one click away, so the failure is not a dead end.
+      expect(screen.getByLabelText('Image Choose from library')).toBeInTheDocument();
+      expect(screen.getByLabelText('Take photo')).toBeInTheDocument();
+    });
   });
 });

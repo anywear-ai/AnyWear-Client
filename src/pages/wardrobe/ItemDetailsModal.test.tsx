@@ -82,7 +82,7 @@ function makeItem(overrides: Partial<GetWardrobe200Item> = {}): GetWardrobe200It
     id: 'item-1',
     ownerId: 'user-1',
     name: 'Black Hoodie',
-    // The add-image input renders only when the item already has a gallery.
+    // The gallery starts populated; the empty-gallery case is its own test.
     images: [{ imageId: 'image-1', url: 'https://signed.example.com/k.jpg', view: null, isPrimary: true }],
     category: 'Top',
     taggingStatus: 'complete',
@@ -121,7 +121,35 @@ describe('ItemDetailsModal', () => {
   afterEach(() => {
     cleanup();
     document.body.style.overflow = '';
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  /** The Android WebView: `isTauri` plus the platform token in the user agent. */
+  function stubAndroidApp() {
+    vi.stubGlobal('isTauri', true);
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.6099.230 Mobile Safari/537.36',
+    });
+  }
+
+  /** The desktop client: a Tauri shell whose WebView user agent has no Android token. */
+  function stubDesktopApp() {
+    vi.stubGlobal('isTauri', true);
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+    });
+  }
+
+  it('offers one Add image tile and one narrow file input, with no camera entry', () => {
+    const { container } = renderModal(makeItem());
+    const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toHaveAttribute('accept', 'image/jpeg,image/png,image/webp');
+    expect(inputs[0]).not.toHaveAttribute('capture');
+    expect(screen.getByRole('button', { name: 'Add image' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Take photo' })).toBeNull();
   });
 
   it('narrows the add-image picker and shows the HEIC guidance inline before any network call', async () => {
@@ -139,7 +167,7 @@ describe('ItemDetailsModal', () => {
     expect(window.alert).not.toHaveBeenCalled();
   });
 
-  it('renders both capture entries and prepares the file before reserving as JPEG', async () => {
+  it('renders the Add image tile and prepares the file before reserving as JPEG', async () => {
     postMock
       .mockResolvedValueOnce({
         data: {
@@ -154,17 +182,12 @@ describe('ItemDetailsModal', () => {
 
     const { container } = renderModal(makeItem());
     const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
-    expect(inputs).toHaveLength(2);
+    expect(inputs).toHaveLength(1);
 
-    const library = screen.getByRole('button', { name: 'Choose from library' });
-    const camera = screen.getByRole('button', { name: 'Take photo' });
-    expect(library).toBeInTheDocument();
-    expect(camera).toBeInTheDocument();
-    // The camera input is the `image/*` + capture one, single file.
-    const cameraInput = inputs.find((input) => input.getAttribute('accept') === 'image/*')!;
-    expect(cameraInput).toHaveAttribute('capture', 'environment');
-    expect(cameraInput).not.toHaveAttribute('multiple');
-    const libraryInput = inputs.find((input) => input.getAttribute('accept') === 'image/jpeg,image/png,image/webp')!;
+    expect(screen.getByRole('button', { name: 'Add image' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Take photo' })).toBeNull();
+    const libraryInput = inputs[0];
+    expect(libraryInput).toHaveAttribute('accept', 'image/jpeg,image/png,image/webp');
     expect(libraryInput).not.toHaveAttribute('capture');
 
     fireEvent.change(libraryInput, {
@@ -263,8 +286,7 @@ describe('ItemDetailsModal', () => {
     expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Show image 1' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Remove image 1' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add image' })).toBeInTheDocument();
   });
 
   it('paints the 2px indigo ring tokens on every focus stop in the dialog', () => {
@@ -288,17 +310,15 @@ describe('ItemDetailsModal', () => {
 
     expect(screen.queryByRole('button', { name: /Show image/ })).toBeNull();
     expect(screen.queryByRole('combobox', { name: 'View' })).toBeNull();
-    // Both capture entries stay on screen even with an empty gallery.
-    expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument();
+    // The one add entry stays on screen even with an empty gallery.
+    expect(screen.getByRole('button', { name: 'Add image' })).toBeInTheDocument();
     expectEveryStopRings(screen.getByRole('dialog', { name: 'Item Details' }));
   });
 
   it('shows a decode failure inline and says nothing when a chooser is cancelled', async () => {
     vi.mocked(prepareImageForUpload).mockRejectedValueOnce(new Error('Could not process this image'));
     const { container } = renderModal(makeItem());
-    const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
-    const libraryInput = inputs.find((input) => input.getAttribute('accept') !== 'image/*')!;
+    const libraryInput = container.querySelector<HTMLInputElement>('input[type="file"]')!;
 
     fireEvent.change(libraryInput, { target: { files: [] } });
     expect(screen.queryByRole('alert')).toBeNull();
@@ -310,8 +330,8 @@ describe('ItemDetailsModal', () => {
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('Could not process this image');
     expect(postMock).not.toHaveBeenCalled();
-    // The library entry remains the one-click retry.
-    expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
+    // The Add image tile remains the one-click retry.
+    expect(screen.getByRole('button', { name: 'Add image' })).toBeInTheDocument();
   });
 
   it('locks the body while open and restores it on unmount', () => {
@@ -330,5 +350,46 @@ describe('ItemDetailsModal', () => {
 
     rerender(<ItemDetailsModal item={null} isOpen onClose={vi.fn()} onSuccess={vi.fn()} />);
     expect(document.body.style.overflow).toBe('');
+  });
+
+  describe('in the desktop client', () => {
+    beforeEach(() => {
+      stubDesktopApp();
+    });
+
+    it('renders the single Add image tile and one file input', () => {
+      const { container } = renderModal(makeItem());
+      const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+      expect(inputs).toHaveLength(1);
+      expect(inputs[0]).toHaveAttribute('accept', 'image/jpeg,image/png,image/webp');
+      expect(inputs[0]).not.toHaveAttribute('capture');
+      expect(screen.getByRole('button', { name: 'Add image' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Take photo' })).toBeNull();
+    });
+  });
+
+  describe('in the Android app', () => {
+    beforeEach(() => {
+      stubAndroidApp();
+    });
+
+    it('keeps both capture entries with the attributes each system path needs', () => {
+      const { container } = renderModal(makeItem());
+      const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+      expect(inputs).toHaveLength(2);
+      expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument();
+      // The camera input is the `image/*` + capture one, single file.
+      const cameraInput = inputs.find((input) => input.getAttribute('accept') === 'image/*')!;
+      expect(cameraInput).toHaveAttribute('capture', 'environment');
+      expect(cameraInput).not.toHaveAttribute('multiple');
+      // The library input keeps the narrow list: it only ever opens the picker.
+      const libraryInput = inputs.find(
+        (input) => input.getAttribute('accept') === 'image/jpeg,image/png,image/webp',
+      )!;
+      expect(libraryInput).not.toHaveAttribute('capture');
+    });
   });
 });

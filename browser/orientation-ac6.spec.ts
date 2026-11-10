@@ -7,9 +7,9 @@ import { mockClientBoundaries, expectOnlyMockedCalls } from './mock-boundaries';
 import { mockAmplifySession } from './auth-session';
 
 /**
- * AC-6: a photo with EXIF Orientation 6 that arrives through a camera entry must
- * reach the wardrobe card and The Mirror's base-photo surface upright, with the
- * orientation baked into the pixels and no EXIF orientation left in the bytes.
+ * AC-6: a photo with EXIF Orientation 6 that arrives through a photo upload entry
+ * must reach the wardrobe card and The Mirror's base-photo surface upright, with
+ * the orientation baked into the pixels and no EXIF orientation left in the bytes.
  *
  * The fixture is built by `browser/fixtures/build-orientation6-jpeg.mjs`: a real
  * baseline JPEG whose stored frame is 40x20, whose EXIF Orientation tag is 6, and
@@ -19,7 +19,7 @@ import { mockAmplifySession } from './auth-session';
  * the dimensions and in the pixels.
  *
  * Everything under test is real: the fixture goes through `setInputFiles` into
- * the camera input, Chromium's own `createImageBitmap`/`canvas.toBlob` run
+ * the file input, Chromium's own `createImageBitmap`/`canvas.toBlob` run
  * `prepareImageForUpload`, and the bytes the test inspects are the ones the
  * browser actually posted to the signed S3 policy. Only the network is mocked.
  */
@@ -409,14 +409,14 @@ async function expectBakedArtifact(page: Page, posted: PostedPart, upright: Deco
   expect(Math.abs(decoded.right.r - upright.right.r)).toBeLessThanOrEqual(20);
 }
 
-test.describe('AC-6 EXIF orientation through the camera entry', () => {
+test.describe('AC-6 EXIF orientation through a photo upload entry', () => {
   test.beforeEach(async ({ page }) => {
     await mockAmplifySession(page);
   });
 
   test.afterEach(({ page }) => expectOnlyMockedCalls(page));
 
-  test('the wardrobe camera entry posts upright, EXIF-free pixels and the card renders them upright', async ({ page }) => {
+  test('the wardrobe upload entry posts upright, EXIF-free pixels and the card renders them upright', async ({ page }) => {
     const state = createState();
     await setupMock(page, state);
     await page.goto('/wardrobe');
@@ -424,10 +424,10 @@ test.describe('AC-6 EXIF orientation through the camera entry', () => {
 
     const upright = await expectFixtureIsOrientation6(page);
 
-    // The camera entry, not the library one: `accept="image/*"` plus
-    // `capture="environment"` is the branch the native shell sends to the camera.
+    // The Add dialog's only file input: the web build renders one upload entry,
+    // and its multi-select picker is that input.
     await page.getByRole('button', { name: 'Add Item', exact: true }).click();
-    await page.locator('#add-item-camera').setInputFiles(FIXTURE_FILE);
+    await page.locator('#add-item-image').setInputFiles(FIXTURE_FILE);
     await page.getByRole('button', { name: 'Upload & Auto-Tag', exact: true }).click();
 
     // One photo keeps the single-photo contract: success closes the dialog and the
@@ -455,7 +455,7 @@ test.describe('AC-6 EXIF orientation through the camera entry', () => {
       .toEqual(UPRIGHT);
   });
 
-  test('the Mirror camera entry posts the same upright, EXIF-free artifact as the base photo', async ({ page }) => {
+  test('the Mirror upload entry posts the same upright, EXIF-free artifact as the base photo', async ({ page }) => {
     const state = createState();
     await setupMock(page, state);
     await page.goto('/mirror');
@@ -463,11 +463,11 @@ test.describe('AC-6 EXIF orientation through the camera entry', () => {
 
     const upright = await expectFixtureIsOrientation6(page);
 
-    // The Mirror's camera entry. A base photo is the only client-side image the
-    // try-on generation is derived from; the generated result itself is a Service
-    // artifact this client never re-encodes, so the base photo is what AC-6's
-    // client half can prove.
-    await page.locator('input[type="file"][capture="environment"]').setInputFiles(FIXTURE_FILE);
+    // The Mirror panel's only file input, the one behind the `Upload` button. A
+    // base photo is the only client-side image the try-on generation is derived
+    // from; the generated result itself is a Service artifact this client never
+    // re-encodes, so the base photo is what AC-6's client half can prove.
+    await page.locator('input[type="file"]').setInputFiles(FIXTURE_FILE);
 
     // The confirmation adopts the photo as the effective base photo: the card is
     // selected, so a try-on request would be built from this artifact.

@@ -82,10 +82,13 @@ test('the 390 px shell clears the bottom navigation and carries the touch layer'
     .toBe('text');
   await page.keyboard.press('Escape');
 
-  // Both capture entries are visible in the Add dialog at this width.
+  // The web build offers one upload entry in the Add dialog at this width; the
+  // Android pair belongs to the Android app, not to a narrow browser window.
   await page.getByRole('button', { name: 'Add Item' }).click();
-  await expect(page.getByText('Choose from library')).toBeVisible();
-  await expect(page.getByText('Take photo')).toBeVisible();
+  const addDialog = page.getByRole('dialog', { name: 'Add Wardrobe Item' });
+  await expect(addDialog.getByText('Upload a file or take a photo')).toBeVisible();
+  await expect(addDialog.getByText('Take photo')).toHaveCount(0);
+  await expect(addDialog.locator('input[type="file"]')).toHaveCount(1);
 });
 
 test.afterEach(({ page }) => expectOnlyMockedCalls(page));

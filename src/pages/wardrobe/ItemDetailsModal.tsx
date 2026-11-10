@@ -9,6 +9,7 @@ import { resolveImageContentType, uploadImageWithSignedPost, validateImageFile }
 import { prepareImageForUpload } from '../../lib/imagePreparation';
 import { getErrorMessage } from '../../lib/errors';
 import useAccessibleDialog from '../../hooks/useAccessibleDialog';
+import { isAndroidApp } from '../../lib/platform';
 
 /** #140's terminal code: the provider cannot decode the stored image format. */
 const INPUT_IMAGE_UNSUPPORTED_FORMAT_CODE = 'input_image_unsupported_format';
@@ -266,6 +267,9 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
   const isProcessing = item.taggingStatus === 'processing' || item.taggingStatus === 'uploading';
   const isUnsupportedFormatFailure =
     item.taggingStatus === 'failed' && item.taggingErrorCode === INPUT_IMAGE_UNSUPPORTED_FORMAT_CODE;
+  // The platform, never the window width, decides whether the gallery footer
+  // offers the Android pair or the web build's one `+` tile.
+  const android = isAndroidApp();
 
   return (
     <div className="fixed inset-0 z-10 overflow-y-auto">
@@ -371,43 +375,69 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
                 )}
               </div>
 
-              {/* Both capture entries stay visible whatever the gallery holds,
-                  so a photo that cannot be decoded leaves the library one click
-                  away instead of a dead end. */}
+              {/* The platform decides the entry row: the web build and the desktop
+                  client keep one `+` tile, Android keeps its pair. The tile sits
+                  outside the gallery list, so an item with no images can still
+                  gain its first one. */}
               <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => libraryInputRef.current?.click()}
-                  disabled={isAddingImage}
-                  className="inline-flex justify-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
-                >
-                  {isAddingImage ? 'Uploading...' : 'Choose from library'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => cameraInputRef.current?.click()}
-                  disabled={isAddingImage}
-                  className="inline-flex justify-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
-                >
-                  Take photo
-                </button>
-                <input
-                  ref={libraryInputRef}
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp"
-                  className="hidden"
-                  onChange={handleAddImage}
-                />
-                <input
-                  ref={cameraInputRef}
-                  type="file"
-                  // `image/*` is the branch wry sends to ACTION_IMAGE_CAPTURE;
-                  // with only JPEG/PNG/WebP listed it opens the file picker.
-                  accept="image/*"
-                  capture="environment"
-                  className="hidden"
-                  onChange={handleAddImage}
-                />
+                {android ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => libraryInputRef.current?.click()}
+                      disabled={isAddingImage}
+                      className="inline-flex justify-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+                    >
+                      {isAddingImage ? 'Uploading...' : 'Choose from library'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => cameraInputRef.current?.click()}
+                      disabled={isAddingImage}
+                      className="inline-flex justify-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+                    >
+                      Take photo
+                    </button>
+                    <input
+                      ref={libraryInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      className="hidden"
+                      onChange={handleAddImage}
+                    />
+                    <input
+                      ref={cameraInputRef}
+                      type="file"
+                      // `image/*` is the branch wry sends to ACTION_IMAGE_CAPTURE;
+                      // with only JPEG/PNG/WebP listed it opens the file picker.
+                      accept="image/*"
+                      capture="environment"
+                      className="hidden"
+                      onChange={handleAddImage}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      aria-label="Add image"
+                      onClick={() => libraryInputRef.current?.click()}
+                      disabled={isAddingImage}
+                      className="w-16 h-16 rounded border-2 border-dashed border-gray-300 flex items-center justify-center text-gray-400 hover:border-gray-500 hover:text-gray-600 transition flex-shrink-0 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                    >
+                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                      </svg>
+                    </button>
+                    <input
+                      ref={libraryInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      className="hidden"
+                      onChange={handleAddImage}
+                    />
+                  </>
+                )}
               </div>
               {addImageError && (
                 <p className="mt-2 text-sm text-red-600" role="alert">{addImageError}</p>

@@ -305,7 +305,7 @@ composes the utilities below.
 | Dialog panel | White surface, `rounded-xl shadow-xl`, `z-10` for Add/Details and `z-50` for outfit dialogs and the history image viewer, whose panel is the image itself; dismissed by backdrop click and Escape, with focus moved into the panel on open and restored to the control that opened it on close. While any panel is open the page behind it does not scroll: the shared dialog hook hides body overflow on the first open panel and restores the previous inline value when the last one closes. |
 | Text input | White surface with `border-gray-300` and `rounded-md`; focus moves the border to indigo and, in the dialogs, paints the 2px indigo ring inset where a scrolling form would clip an offset. |
 | Status badge | `rounded-full` pill with `text-xs`, one of the pending, processing, or failed pairs from [Colors](#colors), always paired with text. The Add dialog's photo rows use the same pill for their step: the pending pair for `queued`, the processing pair for `preparing`, `reserving`, `uploading` and `confirming`, the failed pair for `failed`, and the app surface and body text colors (`bg-gray-100 text-gray-700`) for `created`. |
-| Capture entry | Every photo surface renders two entries beside each other: `Choose from library` (`accept="image/jpeg,image/png,image/webp"`; multi-select in the Add dialog, one file elsewhere) and `Take photo` (`accept="image/*"`, `capture="environment"`, one file). The `image/*` token is what makes wry open the system camera through `ACTION_IMAGE_CAPTURE`; the narrower library list only ever opens the picker. Both entries stay visible while the other path is disabled or has just failed, so a cancelled or undecodable shot leaves the library one click away. A cancelled chooser (no file) shows no hint; a decode or format failure shows an inline message beside the entries. |
+| Capture entry | The platform the app runs on decides the entries, and the window size never does. In the web build and the desktop client each photo surface renders one upload entry: the Mirror's Step 1 button `Upload`, the Add Item dialog's `Upload a file or take a photo` (multi-select), and the item details dialog's `w-16 h-16` dashed `+` tile named `Add image`. Each entry drives one `<input type="file">` with `accept="image/jpeg,image/png,image/webp"` and no `capture` attribute — hidden in the Mirror and in the item details dialog, `sr-only` under the Add Item dialog's label — so the click always opens the picker. In the Android app each of the three surfaces renders two entries beside each other: `Choose from library` (the same narrow list; multi-select only in the Add dialog) and `Take photo` (`accept="image/*"`, `capture="environment"`, one file). The `image/*` token is what makes wry open the system camera through `ACTION_IMAGE_CAPTURE`; the narrower library list only ever opens the picker, which is why the camera entry is the one that reaches a camera. Both Android entries stay visible while the other path is disabled or has just failed, so a cancelled or undecodable shot leaves the library one click away. A cancelled chooser (no file) shows no hint on either platform; a decode or format failure shows an inline message beside the entries. |
 | Touch behaviour | [index.css](src/index.css) sets `touch-action: manipulation` on controls, `user-select: none` with `-webkit-touch-callout: none` on interactive shells and imagery, and restores `user-select: text` on inputs, textareas and `contenteditable` nodes; `overscroll-behavior-y: contain` stops the whole-page rubber band. Inside the Tauri shell [touch.ts](src/lib/touch.ts) additionally cancels `contextmenu` outside editable fields, covering the Android WebView long-press menu that CSS cannot close. |
 | Selection card | `aspect-[4/5]` image with `rounded-lg`; unselected uses a gray border, selected uses an indigo border with `ring` and a text label |
 | Credit pill | `rounded-full px-3 py-1.5 text-sm font-medium`, colored by remaining balance: green above 2, amber at 1–2, red at 0 |
@@ -323,15 +323,15 @@ badge, item count and rating.
 
 Focus in the four Wardrobe dialogs is a 2px indigo ring, defined per control rather
 than inherited from a shared component: `focus:` on controls, `focus-within:` on the labels
-that paint for AddItem's two `sr-only` file inputs (the multi-select picker and the camera
-input), `ring-offset-2` on buttons outside a clipping container, `ring-inset` where a
+that paint for AddItem's `sr-only` file inputs (the multi-select picker, and on Android the
+camera input), `ring-offset-2` on buttons outside a clipping container, `ring-inset` where a
 scrolling form or list would clip an offset, and `focus:border-indigo-500` on the text inputs
 and the View select; `:focus` also paints on the panel's opening focus and on a pointer
 click. The Add dialog's photo rows add two such controls, the per-row remove button and
 `Retry failed`, both `focus:ring-2 focus:ring-indigo-500`. While a batch runs, the dialog
-disables both file inputs and every per-row remove button so the row list cannot diverge from
+disables its file inputs and every per-row remove button so the row list cannot diverge from
 the run's targets: the remove buttons keep those ring tokens and dim through
-`disabled:opacity-50`, and the two labels dim with `opacity-50 cursor-not-allowed` while
+`disabled:opacity-50`, and the file-input labels dim with `opacity-50 cursor-not-allowed` while
 keeping their `focus-within:` tokens. The dialogs set both a width and a
 color, so the ring is indigo whatever the control's text color. A ring color without a ring
 width is not a focus treatment, and a width alone falls back to `currentColor`, which does not

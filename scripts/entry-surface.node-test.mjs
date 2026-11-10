@@ -897,6 +897,15 @@ test('#290: client-release.yml declares the publish condition over its own depen
     "!cancelled() && needs.preflight.result == 'success' && needs.assemble.result == 'success'",
     'a skipped undeclared platform must not skip publication, and a failed or skipped assemble must still stop it',
   );
+  // The condition must reference no platform leg: the two undeclared desktop legs are
+  // legitimately skipped, and re-gating publication on a leg's result would skip it
+  // again exactly as the client-v0.2.2 run did. The pinned string above only catches a
+  // change to the exact text; this catches the shape the incident came from.
+  assert.doesNotMatch(
+    condition,
+    /package-(windows|macos|android)/,
+    'publish must not be gated on a platform leg: an undeclared platform leg is skipped, and a skipped dependency must not skip publication',
+  );
 });
 
 test('#278: client-release.yml wires every declared-set consumer to its own preflight output', () => {

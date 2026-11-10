@@ -761,6 +761,13 @@ jobs:
   publish:
     name: Publish the client release
     needs: [preflight, assemble]
+    # Without a condition this job inherits the implicit `success()`, and GitHub
+    # propagates a skipped dependency through the chain: the undeclared desktop legs
+    # are skipped, which skipped publication even though `assemble` succeeded (#290).
+    # The explicit test runs after a successful assembly and still refuses a job whose
+    # `assemble` did not succeed — the `published`-complete rerun skips `assemble` and
+    # so skips this job rather than republishing.
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.assemble.result == 'success' }}
     runs-on: ubuntu-latest
     # The repository's only release write. It runs after assembly proved the asset
     # set, and the release is created as a draft before anything is published.

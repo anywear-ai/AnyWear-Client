@@ -66,7 +66,7 @@ interface SectionPropsOverrides {
   onReuseOutfit?: (ids: string[]) => void;
   onRetryGeneration?: (body: PostVtoGenerationsBody) => Promise<void>;
   basePhotoId?: string | null;
-  credits?: number;
+  credits?: number | null;
   isGenerating?: boolean;
 }
 
@@ -350,6 +350,11 @@ describe('VtoHistorySection blocked Retry', () => {
       'the daily credits are spent',
       { credits: 0 },
       'Out of daily credits. Credits reset at midnight.',
+    ],
+    [
+      'the credit balance is unknown',
+      { credits: null },
+      'Your credit balance is unavailable.',
     ],
   ])('marks every Retry aria-disabled with the reason while %s', async (_label, blocked, reason) => {
     const onRetryGeneration = vi.fn().mockResolvedValue(undefined);

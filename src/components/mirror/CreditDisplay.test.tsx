@@ -28,6 +28,30 @@ describe('CreditDisplay', () => {
     expect(screen.getByRole('status')).toHaveTextContent('8/10 today');
   });
 
+  it('shows an unknown balance instead of 0/10 when no profile exists', () => {
+    vi.mocked(useGetUsersMe).mockReturnValue({ data: undefined } as any);
+    render(<CreditDisplay />);
+
+    const pill = screen.getByRole('status');
+    expect(pill).toHaveTextContent('Credits unavailable');
+    expect(pill).toHaveAttribute('aria-label', 'Daily credits unavailable');
+    expect(pill).not.toHaveTextContent('0/10');
+    expect(pill.className).toContain('bg-gray-100');
+  });
+
+  it('keeps the cached balance when a later refetch fails', () => {
+    vi.mocked(useGetUsersMe).mockReturnValue({
+      status: 'success',
+      data: { dailyCredits: 8 },
+      failureCount: 1,
+      isError: false,
+    } as any);
+    render(<CreditDisplay />);
+
+    expect(screen.getByRole('status')).toHaveTextContent('8/10 today');
+    expect(screen.queryByText('Credits unavailable')).toBeNull();
+  });
+
   it('shows the replenished balance after the boundary revalidation', () => {
     vi.mocked(useGetUsersMe)
       .mockReturnValueOnce({ data: { dailyCredits: 8 } } as any)

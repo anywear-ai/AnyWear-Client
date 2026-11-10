@@ -367,6 +367,46 @@ describe('MirrorPage', () => {
     expect(screen.getByRole('button', { name: 'Generate try-on' })).toBeDisabled();
   });
 
+  it.each([
+    ['no profile data', { data: undefined }],
+    ['a null credit balance', { data: { dailyCredits: null } }],
+  ])('never invents 0/10 for %s', (_label, profile) => {
+    vi.mocked(useGetUsersMe).mockReturnValue(profile as any);
+    mockPhotos([ownDefaultPhoto]);
+    renderPage();
+
+    // The base photo is preselected; selecting an item would otherwise enable
+    // generation, so the credit state is the only remaining blocker.
+    fireEvent.click(screen.getByRole('button', { name: 'Select a wearable item' }));
+
+    expect(
+      screen.getByText(
+        'Your credit balance is unavailable. Try-on is disabled until your profile loads.',
+      ),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Credits Unavailable' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Out of Credits' })).toBeNull();
+    expect(screen.queryByText('Out of daily credits. Credits reset at midnight.')).toBeNull();
+    expect(sectionProps.latest!.credits).toBeNull();
+  });
+
+  it('keeps a cached balance when the profile refetch fails', () => {
+    vi.mocked(useGetUsersMe).mockReturnValue({
+      status: 'success',
+      data: { dailyCredits: 5 },
+      failureCount: 1,
+      isError: false,
+    } as any);
+    mockPhotos([ownDefaultPhoto]);
+    renderPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select a wearable item' }));
+
+    expect(screen.getByRole('button', { name: 'Generate try-on' })).toBeEnabled();
+    expect(screen.queryByText(/credit balance is unavailable/i)).toBeNull();
+    expect(sectionProps.latest!.credits).toBe(5);
+  });
+
   it('adopts an uploaded photo when the selection is default-derived', async () => {
     mockPhotos([ownDefaultPhoto]);
     const { container, rerenderPage } = renderPage();

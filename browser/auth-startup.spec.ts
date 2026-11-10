@@ -5,6 +5,80 @@ import { mockClientBoundaries, expectOnlyMockedCalls } from './mock-boundaries';
 const PERSISTED_REFRESH_TOKEN_KEY =
   `CognitoIdentityServiceProvider.${MOCK_USER_POOL_CLIENT_ID}.test-user.refreshToken`;
 
+interface ViewportCase {
+  name: string;
+  width: number;
+  height: number;
+  layout: 'top' | 'mobile';
+}
+
+// No viewport shows both navigation surfaces: the top link bar hides below
+// `sm` (640 px) and the Mobile navigation bar hides at `sm` and above.
+const VIEWPORTS: ViewportCase[] = [
+  { name: '1280x720', width: 1280, height: 720, layout: 'top' },
+  { name: '375x667', width: 375, height: 667, layout: 'mobile' },
+];
+
+function topDashboardLink(page: Page) {
+  return page.locator('nav').first().getByRole('link', { name: 'Dashboard', exact: true });
+}
+
+function mobileNav(page: Page) {
+  return page.getByRole('navigation', { name: 'Mobile navigation' });
+}
+
+async function expectLayoutNavigation(page: Page, layout: ViewportCase['layout']) {
+  if (layout === 'top') {
+    await expect(topDashboardLink(page)).toBeVisible();
+    await expect(mobileNav(page)).toBeHidden();
+  } else {
+    await expect(mobileNav(page)).toBeVisible();
+    await expect(topDashboardLink(page)).toBeHidden();
+  }
+}
+
+async function installBootCounter(page: Page) {
+  await page.addInitScript(() => {
+    Reflect.set(window, '__boots', (Reflect.get(window, '__boots') ?? 0) + 1);
+    // A `window` counter alone cannot detect a reload: a new document resets it.
+    // The sessionStorage copy survives within the tab, so the assertion can tell
+    // one document from a reload.
+    const documentBoots = Number(sessionStorage.getItem('anywear-document-boots') ?? '0') + 1;
+    sessionStorage.setItem('anywear-document-boots', String(documentBoots));
+    Reflect.set(window, '__documentBoots', documentBoots);
+  });
+}
+
+async function readBoots(page: Page): Promise<{ window: number; document: number }> {
+  return page.evaluate(() => ({
+    window: Number(Reflect.get(window, '__boots') ?? 0),
+    document: Number(Reflect.get(window, '__documentBoots') ?? 0),
+  }));
+}
+
+const WEATHER_FIXTURE = {
+  locationName: 'Hangzhou, Zhejiang',
+  temperature: '22',
+  feelsLike: '24',
+  icon: '100',
+  conditionText: 'Sunny',
+  humidity: '45',
+  windDir: 'North',
+  windScale: '1',
+  obsTime: '2026-11-10T10:00:00Z',
+  stale: false,
+  clothingIndex: { suggestion: 'Light clothing is enough.' },
+};
+
+/** The dashboard's own content, independent of the profile read's state. */
+async function expectDashboardSurface(page: Page) {
+  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Explore your wardrobe' })).toBeVisible();
+  await expect(page.getByText('Hangzhou, Zhejiang')).toBeVisible();
+  await expect(page.getByText('22°C')).toBeVisible();
+  await expect(page.getByText('Sunny')).toBeVisible();
+}
+
 async function mockProtectedRequests(page: Page, profileStatus = 200) {
   const calls: Array<{ path: string; authorization?: string }> = [];
   await mockClientBoundaries(page);
@@ -18,7 +92,7 @@ async function mockProtectedRequests(page: Page, profileStatus = 200) {
       '/wardrobe/categories': { categories: [] },
       '/outfits': { outfits: [] },
       '/weather/top-cities': { locations: [] },
-      '/weather/current': null,
+      '/weather/current': WEATHER_FIXTURE,
     };
     if (!(path in responses)) return route.fallback();
     return route.fulfill({
@@ -154,32 +228,81 @@ test('an expired SDK session without refresh credentials does not admit protecte
   expect(calls).toEqual([]);
 });
 
-test('protected content waits for server profile verification after SDK startup', async ({ page }) => {
-  await mockAmplifySession(page);
-  await mockProtectedRequests(page);
-  let releaseProfile!: () => void;
-  const profileReady = new Promise<void>(resolve => { releaseProfile = resolve; });
-  let observeProfile!: () => void;
-  const profileRequested = new Promise<void>(resolve => { observeProfile = resolve; });
-  await page.route('**/users/me', async (route) => {
-    observeProfile();
-    await profileReady;
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ id: 'test-user-id' }) });
-  });
-  await page.goto('/wardrobe');
-  await profileRequested;
-  await expect(page.getByText('Setting up your wardrobe...', { exact: true })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Wardrobe', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('heading', { name: 'Sign in' })).toHaveCount(0);
-  releaseProfile();
-  await expect(page.getByRole('heading', { name: 'Wardrobe', exact: true })).toBeVisible();
-});
+for (const viewport of VIEWPORTS) {
+  test(`a pending profile read leaves the routed page and navigation usable at ${viewport.name}`, async ({ page }) => {
+    await mockAmplifySession(page);
+    await mockProtectedRequests(page);
+    let releaseProfile!: () => void;
+    const profileReady = new Promise<void>(resolve => { releaseProfile = resolve; });
+    await page.route('**/users/me', async (route) => {
+      await profileReady;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ id: 'test-user-id', dailyCredits: 10 }),
+      });
+    });
 
-test('server profile validation still gates protected content', async ({ page }) => {
-  await mockAmplifySession(page);
-  const calls = await mockProtectedRequests(page, 500);
-  await page.goto('/wardrobe');
-  await expect(page.getByRole('heading', { name: 'Profile Sync Failed' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Wardrobe', exact: true })).toHaveCount(0);
-  expect(calls.every(call => call.path === '/users/me')).toBe(true);
-});
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto('/dashboard');
+
+    // After the Amplify bootstrap settles, the routed dashboard and the shell
+    // render while the profile read is still pending.
+    await expectDashboardSurface(page);
+    await expectLayoutNavigation(page, viewport.layout);
+    await expect(page.getByText('Checking your profile...', { exact: true })).toBeVisible();
+    await expect(page.getByText('Setting up your wardrobe...', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Profile Sync Failed' })).toHaveCount(0);
+
+    releaseProfile();
+    await expect(page.getByText('Checking your profile...', { exact: true })).toBeHidden();
+    await expectDashboardSurface(page);
+    await expectLayoutNavigation(page, viewport.layout);
+  });
+
+  test(`a failing profile read shows an in-page Retry and recovers without a reload at ${viewport.name}`, async ({ page }) => {
+    await mockAmplifySession(page);
+    await mockProtectedRequests(page);
+    await installBootCounter(page);
+
+    let profileStatus = 500;
+    const profileRequests: string[] = [];
+    await page.route('**/users/me', async (route) => {
+      profileRequests.push(new URL(route.request().url()).pathname);
+      await route.fulfill({
+        status: profileStatus,
+        contentType: 'application/json',
+        body: JSON.stringify(
+          profileStatus === 200
+            ? { id: 'test-user-id', dailyCredits: 10 }
+            : { error: 'PROFILE_UNAVAILABLE' },
+        ),
+      });
+    });
+
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto('/dashboard');
+
+    // The failure appears only after the query policy's retry has run, and it
+    // sits beside the routed dashboard instead of replacing it.
+    const notice = page.getByRole('status').filter({
+      hasText: "We couldn't load your profile. Some features may be unavailable until it loads.",
+    });
+    await expect(notice).toBeVisible({ timeout: 15_000 });
+    await expectDashboardSurface(page);
+    await expectLayoutNavigation(page, viewport.layout);
+    await expect(page.getByRole('heading', { name: 'Profile Sync Failed' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+
+    const requestsBeforeRetry = profileRequests.length;
+    profileStatus = 200;
+    await page.getByRole('button', { name: 'Retry' }).click();
+
+    // The retry re-runs the request (not the document): a further GET appears,
+    // the notice clears, and the boot counter is still one.
+    await expect.poll(() => profileRequests.length).toBeGreaterThan(requestsBeforeRetry);
+    await expect(notice).toBeHidden();
+    await expectDashboardSurface(page);
+    expect(await readBoots(page)).toEqual({ window: 1, document: 1 });
+  });
+}

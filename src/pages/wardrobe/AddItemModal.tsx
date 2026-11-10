@@ -11,6 +11,7 @@ import {
   type BatchRun,
 } from '../../lib/batchUpload';
 import useAccessibleDialog from '../../hooks/useAccessibleDialog';
+import { isAndroidApp } from '../../lib/platform';
 
 interface Props {
   isOpen: boolean;
@@ -109,6 +110,9 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
   }, [items]);
 
   if (!isOpen) return null;
+  // The platform, never the window width, decides whether the dialog offers the
+  // Android pair or the web build's one upload entry.
+  const android = isAndroidApp();
 
   const deps: BatchUploadDeps = {
     reserve: async (file) => {
@@ -253,38 +257,58 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
                         <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
                       <div className="flex flex-wrap justify-center gap-x-4 gap-y-1 text-sm text-gray-600">
-                        <label className={fileInputLabelClass}>
-                          <span>Choose from library</span>
-                          <input
-                            id="add-item-image"
-                            type="file"
-                            multiple
-                            disabled={isRunning}
-                            accept="image/jpeg,image/png,image/webp"
-                            className="sr-only"
-                            onChange={(e) => {
-                              addFiles(e.target.files);
-                              e.target.value = '';
-                            }}
-                          />
-                        </label>
-                        <label className={fileInputLabelClass}>
-                          <span>Take photo</span>
-                          <input
-                            id="add-item-camera"
-                            type="file"
-                            disabled={isRunning}
-                            // `image/*` is what makes wry take the camera branch:
-                            // with only JPEG/PNG/WebP listed it opens the file picker.
-                            accept="image/*"
-                            capture="environment"
-                            className="sr-only"
-                            onChange={(e) => {
-                              addFiles(e.target.files);
-                              e.target.value = '';
-                            }}
-                          />
-                        </label>
+                        {android ? (
+                          <>
+                            <label className={fileInputLabelClass}>
+                              <span>Choose from library</span>
+                              <input
+                                id="add-item-image"
+                                type="file"
+                                multiple
+                                disabled={isRunning}
+                                accept="image/jpeg,image/png,image/webp"
+                                className="sr-only"
+                                onChange={(e) => {
+                                  addFiles(e.target.files);
+                                  e.target.value = '';
+                                }}
+                              />
+                            </label>
+                            <label className={fileInputLabelClass}>
+                              <span>Take photo</span>
+                              <input
+                                id="add-item-camera"
+                                type="file"
+                                disabled={isRunning}
+                                // `image/*` is what makes wry take the camera branch:
+                                // with only JPEG/PNG/WebP listed it opens the file picker.
+                                accept="image/*"
+                                capture="environment"
+                                className="sr-only"
+                                onChange={(e) => {
+                                  addFiles(e.target.files);
+                                  e.target.value = '';
+                                }}
+                              />
+                            </label>
+                          </>
+                        ) : (
+                          <label className={fileInputLabelClass}>
+                            <span>Upload a file or take a photo</span>
+                            <input
+                              id="add-item-image"
+                              type="file"
+                              multiple
+                              disabled={isRunning}
+                              accept="image/jpeg,image/png,image/webp"
+                              className="sr-only"
+                              onChange={(e) => {
+                                addFiles(e.target.files);
+                                e.target.value = '';
+                              }}
+                            />
+                          </label>
+                        )}
                       </div>
                       <p className="text-xs text-gray-500">PNG, JPG or WebP up to 30MB</p>
                     </div>

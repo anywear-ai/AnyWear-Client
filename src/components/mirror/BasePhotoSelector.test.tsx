@@ -59,8 +59,25 @@ describe('BasePhotoSelector', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
+
+  /** The Android WebView: `isTauri` plus the platform token in the user agent. */
+  function stubAndroidApp() {
+    vi.stubGlobal('isTauri', true);
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.6099.230 Mobile Safari/537.36',
+    });
+  }
+
+  /** The desktop client: a Tauri shell whose WebView user agent has no Android token. */
+  function stubDesktopApp() {
+    vi.stubGlobal('isTauri', true);
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+    });
+  }
 
   function renderSelector(
     photos: unknown[],
@@ -103,6 +120,17 @@ describe('BasePhotoSelector', () => {
     createdAt: '2026-05-01T00:00:00.000Z',
   };
 
+  it('offers one Upload entry and one narrow file input, with no camera entry', () => {
+    const { container } = renderSelector([]);
+    const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toHaveAttribute('accept', 'image/jpeg,image/png,image/webp');
+    expect(inputs[0]).not.toHaveAttribute('capture');
+    expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Take photo' })).toBeNull();
+  });
+
   it('narrows the picker and reports the HEIC guidance in an alert before reserving', async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const { container } = render(
@@ -121,44 +149,28 @@ describe('BasePhotoSelector', () => {
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(HEIC_UNSUPPORTED_MESSAGE);
     expect(reservePhotoUpload).not.toHaveBeenCalled();
+    // The one entry is still there after the failure.
+    expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
   });
 
-  it('renders both capture entries with the attributes each system path needs', () => {
-    const { container } = renderSelector([]);
-    const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
-
-    expect(inputs).toHaveLength(2);
-    // The camera entry carries `image/*`: that is the branch wry sends to
-    // ACTION_IMAGE_CAPTURE, and one shot is one file.
-    const camera = inputs.find((input) => input.getAttribute('accept') === 'image/*')!;
-    expect(camera).toHaveAttribute('capture', 'environment');
-    expect(camera).not.toHaveAttribute('multiple');
-    // The library entry keeps the narrow list: it only ever opens the picker.
-    const library = inputs.find((input) => input.getAttribute('accept') === 'image/jpeg,image/png,image/webp');
-    expect(library).toBeDefined();
-    expect(library).not.toHaveAttribute('capture');
-    expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument();
-  });
-
-  it('shows a decode failure inline and leaves the library entry as the retry', async () => {
+  it('shows a decode failure inline and leaves the single Upload entry as the retry', async () => {
     vi.mocked(prepareImageForUpload).mockRejectedValueOnce(new Error('Could not process this image'));
     const { container } = renderSelector([]);
-    const library = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
 
     // A cancelled picker supplies no file: no hint, no request.
-    fireEvent.change(library, { target: { files: [] } });
+    fireEvent.change(input, { target: { files: [] } });
     expect(screen.queryByRole('alert')).toBeNull();
     expect(reservePhotoUpload).not.toHaveBeenCalled();
 
-    fireEvent.change(library, {
+    fireEvent.change(input, {
       target: { files: [new File(['bytes'], 'photo.jpg', { type: 'image/jpeg' })] },
     });
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('Could not process this image');
     expect(reservePhotoUpload).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
   });
 
   it('renders the effective default across own and system photos', () => {
@@ -248,5 +260,96 @@ describe('BasePhotoSelector', () => {
     expect(onSelect).toHaveBeenCalledWith(null);
     expect(queryClient.getQueryData(['/vto/base-photos'])).toEqual([systemPhoto]);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['/vto/base-photos'] });
+  });
+
+  describe('in the desktop client', () => {
+    beforeEach(() => {
+      stubDesktopApp();
+    });
+
+    it('renders the single Upload entry and no camera entry', () => {
+      const { container } = renderSelector([]);
+      const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+      expect(inputs).toHaveLength(1);
+      expect(inputs[0]).toHaveAttribute('accept', 'image/jpeg,image/png,image/webp');
+      expect(inputs[0]).not.toHaveAttribute('capture');
+      expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Take photo' })).toBeNull();
+    });
+
+    it('keeps the single Upload entry when the window is narrowed to 390 px', () => {
+      vi.stubGlobal('innerWidth', 390);
+
+      const { container } = renderSelector([]);
+      const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+      expect(inputs).toHaveLength(1);
+      expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Take photo' })).toBeNull();
+    });
+  });
+
+  describe('in the Android app', () => {
+    beforeEach(() => {
+      stubAndroidApp();
+    });
+
+    it('renders both capture entries with the attributes each system path needs', () => {
+      const { container } = renderSelector([]);
+      const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+
+      expect(inputs).toHaveLength(2);
+      // The camera entry carries `image/*`: that is the branch wry sends to
+      // ACTION_IMAGE_CAPTURE, and one shot is one file.
+      const camera = inputs.find((input) => input.getAttribute('accept') === 'image/*')!;
+      expect(camera).toHaveAttribute('capture', 'environment');
+      expect(camera).not.toHaveAttribute('multiple');
+      // The library entry keeps the narrow list: it only ever opens the picker.
+      const library = inputs.find((input) => input.getAttribute('accept') === 'image/jpeg,image/png,image/webp');
+      expect(library).toBeDefined();
+      expect(library).not.toHaveAttribute('capture');
+      expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument();
+    });
+
+    it('reports the HEIC guidance in an alert before reserving and keeps both entries', async () => {
+      const { container } = renderSelector([]);
+      const library = container.querySelector<HTMLInputElement>(
+        'input[accept="image/jpeg,image/png,image/webp"]',
+      )!;
+
+      // The browser omits the MIME type, so only the filename identifies the format.
+      fireEvent.change(library, { target: { files: [new File(['x'], 'photo.heic')] } });
+
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent(HEIC_UNSUPPORTED_MESSAGE);
+      expect(reservePhotoUpload).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument();
+    });
+
+    it('shows a decode failure inline and leaves both entries available', async () => {
+      vi.mocked(prepareImageForUpload).mockRejectedValueOnce(new Error('Could not process this image'));
+      const { container } = renderSelector([]);
+      const library = container.querySelector<HTMLInputElement>(
+        'input[accept="image/jpeg,image/png,image/webp"]',
+      )!;
+
+      // A cancelled camera or picker supplies no file: no hint, no request.
+      fireEvent.change(library, { target: { files: [] } });
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(reservePhotoUpload).not.toHaveBeenCalled();
+
+      fireEvent.change(library, {
+        target: { files: [new File(['bytes'], 'photo.jpg', { type: 'image/jpeg' })] },
+      });
+
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent('Could not process this image');
+      expect(reservePhotoUpload).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: 'Choose from library' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument();
+    });
   });
 });

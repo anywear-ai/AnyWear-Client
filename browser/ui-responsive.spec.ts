@@ -49,6 +49,10 @@ test('wardrobe and Mirror layouts fit target browser widths', async ({ page }, t
 
     await page.goto('/mirror');
     await expect(page.getByRole('heading', { name: 'The Mirror' })).toBeVisible();
+    // The platform, not the width, decides the entry set: every width keeps the
+    // one Upload entry the web build renders.
+    await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Take photo' })).toHaveCount(0);
     const wearableGrid = page.locator('.grid-cols-2').filter({ has: page.getByRole('button', { name: 'Select T-Shirt' }) }).first();
     await expect(page.getByRole('button', { name: 'Select T-Shirt' })).toBeVisible();
     await expect.poll(async () => (await wearableGrid.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(' ').length))).toBe(layout.wearableColumns);

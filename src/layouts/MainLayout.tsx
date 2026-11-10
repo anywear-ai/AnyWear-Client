@@ -1,6 +1,12 @@
-import { Outlet, NavLink } from 'react-router-dom';
+import { Suspense } from 'react';
+import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../store/authStore';
+import ProfileSyncStatus from '../components/ProfileSyncStatus';
+import RouteErrorBoundary from '../components/RouteErrorBoundary';
+import RouteLoading from '../components/RouteLoading';
+import { routeDestinationName } from '../lib/routeDestination';
 export default function MainLayout() {
+  const location = useLocation();
   const logout = useAuthStore((state) => state.logout);
   const isSigningOut = useAuthStore((state) => state.isSigningOut);
   const logoutError = useAuthStore((state) => state.logoutError);
@@ -80,7 +86,19 @@ export default function MainLayout() {
           (MainActivity), not by CSS, so this is the only bottom clearance the
           page owns. */}
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 pt-6 pb-24 sm:px-6 sm:pb-6 lg:px-8">
-        <Outlet />
+        <ProfileSyncStatus />
+        {/* Keyed by path so a navigation mounts a boundary with no revealed
+            content: the fallback can then name the destination instead of the
+            transition retaining the previous page. The error boundary sits
+            outside the Suspense so a rejected route module lands in it. */}
+        <RouteErrorBoundary key={location.pathname}>
+          <Suspense
+            key={location.pathname}
+            fallback={<RouteLoading destination={routeDestinationName(location.pathname)} />}
+          >
+            <Outlet />
+          </Suspense>
+        </RouteErrorBoundary>
       </main>
       
       {/* Mobile Bottom Navigation */}

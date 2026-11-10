@@ -1,6 +1,12 @@
-import { Outlet } from 'react-router-dom';
+import { Suspense } from 'react';
+import { Outlet, useLocation } from 'react-router-dom';
+import RouteErrorBoundary from '../components/RouteErrorBoundary';
+import RouteLoading from '../components/RouteLoading';
+import { routeDestinationName } from '../lib/routeDestination';
 
 export default function AuthLayout() {
+  const location = useLocation();
+
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
       <div className="sm:mx-auto sm:w-full sm:max-w-md">
@@ -11,7 +17,14 @@ export default function AuthLayout() {
 
       <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
         <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10">
-          <Outlet />
+          <RouteErrorBoundary key={location.pathname}>
+            <Suspense
+              key={location.pathname}
+              fallback={<RouteLoading destination={routeDestinationName(location.pathname)} />}
+            >
+              <Outlet />
+            </Suspense>
+          </RouteErrorBoundary>
         </div>
       </div>
     </div>

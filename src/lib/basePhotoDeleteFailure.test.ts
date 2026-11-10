@@ -85,6 +85,15 @@ describe('describeBasePhotoDeleteFailure', () => {
     });
   });
 
+  it('describes nothing for a 401, which the interceptor is redirecting on', () => {
+    // The page is leaving for /login; a card sentence would be an error beside
+    // a redirect the user cannot act on.
+    expect(describeBasePhotoDeleteFailure(rejection(401, { error: 'UNAUTHORIZED', message: 'Unauthorized' }))).toEqual({
+      message: null,
+      refresh: false,
+    });
+  });
+
   it('reports a server error with its status', () => {
     expect(describeBasePhotoDeleteFailure(rejection(500, { message: 'Internal Server Error' }))).toEqual({
       message: 'Could not remove this photo (server error 500). Try again.',

@@ -35,11 +35,9 @@ function responseData(error: unknown): unknown {
  * card could say about a resource it does not name.
  *
  * A 404 is not a failure to report: the requested end state already holds, so
- * the card leaves with the refreshed list and no sentence is shown.
- *
- * A 401 never reaches this table: the response interceptor in
- * `src/api/custom-instance.ts` clears the session and redirects to `/login`
- * before the mutation settles, so the card is no longer on screen.
+ * the card leaves with the refreshed list and no sentence is shown. A 401 is
+ * the interceptor's: it clears the session and redirects to `/login` before the
+ * mutation settles, so the mapping describes nothing for it.
  */
 export function describeBasePhotoDeleteFailure(error: unknown): BasePhotoDeleteFailure {
   const status = getHttpStatus(error);
@@ -55,6 +53,12 @@ export function describeBasePhotoDeleteFailure(error: unknown): BasePhotoDeleteF
   }
 
   if (status === 404) return { message: null, refresh: true };
+
+  // A 401 is the interceptor's to answer, not the card's: the response
+  // interceptor clears the session and redirects to `/login` before the
+  // mutation settles, so the card is no longer on screen. Returning no
+  // sentence keeps the redirect from printing an error beside it.
+  if (status === 401) return { message: null, refresh: false };
 
   if (status >= 500) {
     return {

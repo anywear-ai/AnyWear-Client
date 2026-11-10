@@ -89,16 +89,24 @@ describe('BasePhotoSelector', () => {
   ) {
     vi.mocked(useGetVtoBasePhotos).mockReturnValue({ data: photos, isLoading: false } as any);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const rendered = render(
+    const element = () => (
       <QueryClientProvider client={queryClient}>
         <BasePhotoSelector
           selectedPhotoId={props.selectedPhotoId ?? null}
           onSelect={props.onSelect ?? (() => {})}
           onUploaded={props.onUploaded ?? (() => {})}
         />
-      </QueryClientProvider>,
+      </QueryClientProvider>
     );
-    return { ...rendered, queryClient };
+    const rendered = render(element());
+    // `useGetVtoBasePhotos` is mocked, so the refetch is emulated by handing the
+    // next list to the mock and re-rendering: that is what the invalidated read
+    // supplies once the Service has removed the row.
+    const rerenderSelector = (next: unknown[]) => {
+      vi.mocked(useGetVtoBasePhotos).mockReturnValue({ data: next, isLoading: false } as any);
+      rendered.rerender(element());
+    };
+    return { ...rendered, queryClient, rerenderSelector };
   }
 
   const ownPhoto = {
@@ -332,6 +340,22 @@ describe('BasePhotoSelector', () => {
       expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Delete this base photo' }));
     });
 
+    it('closes on Escape only while focus is inside the card question', () => {
+      renderSelector([ownPhoto]);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Delete this base photo' }));
+
+      // The handler belongs to the card's media wrapper, which holds the focused
+      // buttons: a keydown from elsewhere in the selector leaves the question up.
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Upload' }), { key: 'Escape' });
+      expect(screen.getByText('Delete this base photo?')).toBeInTheDocument();
+
+      // The Escape the user reaches the question with still closes it.
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Cancel' }), { key: 'Escape' });
+      expect(screen.queryByText('Delete this base photo?')).toBeNull();
+      expect(deletePhoto).not.toHaveBeenCalled();
+    });
+
     it('issues one DELETE per confirmation and disables every delete control while it is in flight', () => {
       renderSelector([ownPhoto, otherOwnPhoto]);
 
@@ -348,9 +372,10 @@ describe('BasePhotoSelector', () => {
       expect(deletePhoto).toHaveBeenCalledTimes(1);
       expect(screen.getByText('Delete this base photo?')).toBeInTheDocument();
 
-      // The deleting card loses its select control; because its question is the
-      // overlay now, its Set Default control is not rendered at all. The other
-      // card's Delete is disabled and its select control stays available.
+      // The deleting card's always-rendered select control is disabled. The open
+      // question replaced that card's action set, so its Set Default control is
+      // absent rather than disabled. The other card's Delete is disabled and its
+      // select control stays available.
       expect(screen.getByRole('button', { name: 'Select base photo 2' })).toBeDisabled();
       expect(screen.queryByRole('button', { name: 'Set this photo as default' })).toBeNull();
       expect(screen.getByRole('button', { name: 'Select base photo 1, default' })).toBeEnabled();
@@ -386,9 +411,9 @@ describe('BasePhotoSelector', () => {
       expect(actions().className).not.toContain('opacity-0');
     });
 
-    it('trims the deleted row from the cached list and clears the selection with null', () => {
+    it('trims the cached row, clears the selection and removes the card on a 204', () => {
       const onSelect = vi.fn();
-      const { queryClient } = renderSelector([ownPhoto, systemPhoto], {
+      const { container, queryClient, rerenderSelector } = renderSelector([ownPhoto, systemPhoto], {
         selectedPhotoId: 'photo-own',
         onSelect,
       });
@@ -401,10 +426,17 @@ describe('BasePhotoSelector', () => {
       expect(deletePhoto.mock.calls[0][0]).toEqual({ id: 'photo-own' });
 
       resolveDelete();
+      // The invalidated read no longer holds the row the DELETE removed.
+      rerenderSelector([systemPhoto]);
 
       expect(onSelect).toHaveBeenCalledWith(null);
       expect(queryClient.getQueryData(['/vto/base-photos'])).toEqual([systemPhoto]);
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ['/vto/base-photos'] });
+      // The card actually leaves the grid, and no page reload was needed.
+      expect(container.querySelector('[data-cache-key="vto-base-image-own"]')).toBeNull();
+      expect(screen.getAllByRole('article')).toHaveLength(1);
+      expect(screen.queryByRole('button', { name: /base photo 1, default/ })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Select base photo 1, shared system photo' })).toBeInTheDocument();
     });
 
     it('moves focus to the selector group after a confirmed delete', () => {
@@ -493,9 +525,9 @@ describe('BasePhotoSelector', () => {
       expect(screen.getByRole('button', { name: 'Delete this base photo' })).toBeInTheDocument();
     });
 
-    it('removes the row on a 404 without a sentence', () => {
+    it('removes the card on a 404 without a sentence and focuses the group', () => {
       const onSelect = vi.fn();
-      const { queryClient } = renderSelector([ownPhoto, systemPhoto], {
+      const { container, queryClient, rerenderSelector } = renderSelector([ownPhoto, systemPhoto], {
         selectedPhotoId: 'photo-own',
         onSelect,
       });
@@ -504,13 +536,19 @@ describe('BasePhotoSelector', () => {
 
       confirmDelete();
       rejectDelete(rejection(404, { error: 'NOT_FOUND', message: 'Base photo not found' }));
+      // The row is already gone, so the refreshed list simply no longer holds it.
+      rerenderSelector([systemPhoto]);
 
-      // The row is already gone: the requested end state holds, so the card
-      // leaves with the refreshed list and reports nothing.
+      // The requested end state holds: the card leaves and nothing is reported.
       expect(screen.queryByRole('alert')).toBeNull();
+      expect(container.querySelector('[data-cache-key="vto-base-image-own"]')).toBeNull();
+      expect(screen.queryByRole('button', { name: /base photo 1, default/ })).toBeNull();
       expect(onSelect).toHaveBeenCalledWith(null);
       expect(queryClient.getQueryData(['/vto/base-photos'])).toEqual([systemPhoto]);
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ['/vto/base-photos'] });
+      // A confirmed delete hands focus to the always-present group, on this path
+      // as on the 204, because the removed card's Delete control is gone.
+      expect(document.activeElement).toBe(screen.getByRole('group', { name: 'Base photos' }));
     });
 
     it('renders the sentence after the media wrapper, outside the action overlay box', () => {
@@ -522,10 +560,11 @@ describe('BasePhotoSelector', () => {
       const alert = screen.getByRole('alert');
       const media = screen.getByTestId('base-photo-media');
       const actions = screen.getByTestId('base-photo-actions');
-      // Same card, but the sentence is a sibling of the wrapper that holds the
+      // Same card, but the sentence is rendered after the wrapper that holds the
       // absolutely positioned overlay, so the two boxes cannot overlap.
       expect(media.contains(actions)).toBe(true);
       expect(media.contains(alert)).toBe(false);
+      expect(media.nextElementSibling).toBe(alert);
       expect(alert.closest('article')).toBe(media.closest('article'));
       expect(alert.className).toContain('text-xs');
       expect(alert.className).toContain('text-red-500');

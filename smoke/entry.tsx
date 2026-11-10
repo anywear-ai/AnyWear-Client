@@ -282,7 +282,10 @@ async function run(): Promise<void> {
 
     const snapshot = [...violations];
     const fetchBlocked = await probeFetchBlocked();
-    // The probe deliberately trips the CSP; the navigation phase starts after it.
+    // The blocked probe queues a `securitypolicyviolation` event that dispatches
+    // after the fetch promise settles. Flush it before the phase boundary so the
+    // navigation phase can only contain violations the app itself caused.
+    await new Promise((resolve) => setTimeout(resolve, 100));
     const navigationViolationStart = violations.length;
 
     // Phase 2 — replace the image root with the real app tree.

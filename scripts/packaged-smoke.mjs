@@ -560,7 +560,10 @@ function assertSmoke(result) {
   if (result.dashboardLinkVisibleAfterClick !== true) {
     problems.push('the top bar Dashboard link was not visible after the click (dashboardLinkVisibleAfterClick)');
   }
-  if (result.dashboardLinkDisplay !== 'inline-flex') {
+  // `inline-flex` is blockified to `flex` because the link is a flex item in the
+  // top bar row; both values prove the stylesheet reached the page, while an
+  // un-styled anchor computes `inline`.
+  if (!['flex', 'inline-flex'].includes(result.dashboardLinkDisplay)) {
     problems.push(`the top bar Dashboard link did not carry its Tailwind display utility (display: ${String(result.dashboardLinkDisplay)})`);
   }
   if (result.settingUpWardrobeAfterClick !== false) {

@@ -25,7 +25,7 @@ export default function MirrorPage() {
   const [outfitName, setOutfitName] = useState('');
   const [prompt, setPrompt] = useState('');
 
-  const { generate, result, errorMessage, isPolling, isStarting, vtoId } = useVtoGeneration();
+  const { generate, result, isTerminal, errorMessage, isPolling, isStarting, vtoId } = useVtoGeneration();
   const { save: saveRating, failures: ratingFailures, echoResetTokens: ratingEchoResetTokens } = useVtoRating();
   const { data: user } = useGetUsersMe();
   // The same `['/vto/base-photos']` query the selector runs: one request and
@@ -223,6 +223,7 @@ export default function MirrorPage() {
             basePhotoId={selectedBasePhotoId}
             credits={credits}
             isGenerating={isStarting || isPolling}
+            settledStatus={isTerminal ? result : null}
           />
         </div>
       </div>

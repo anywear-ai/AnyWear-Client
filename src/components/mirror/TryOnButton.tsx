@@ -2,11 +2,15 @@ interface TryOnButtonProps {
   onGenerate: () => void;
   disabled: boolean;
   isLoading: boolean;
-  credits: number;
+  /**
+   * `null` means the profile read has not produced a balance: the button states
+   * that the balance is unavailable and disables, rather than claiming zero.
+   */
+  credits: number | null;
 }
 
 export default function TryOnButton({ onGenerate, disabled, isLoading, credits }: TryOnButtonProps) {
-  const isDisabled = disabled || isLoading || credits === 0;
+  const isDisabled = disabled || isLoading || credits === null || credits === 0;
 
   return (
     <button
@@ -27,6 +31,8 @@ export default function TryOnButton({ onGenerate, disabled, isLoading, credits }
           </svg>
           <span>Generating...</span>
         </>
+      ) : credits === null ? (
+        'Credits Unavailable'
       ) : credits === 0 ? (
         'Out of Credits'
       ) : (

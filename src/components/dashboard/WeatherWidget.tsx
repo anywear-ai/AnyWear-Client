@@ -19,23 +19,26 @@ function weatherIconEmoji(iconCode: string): string {
 
 function WeatherWidgetSkeleton() {
   return (
-    <div className="bg-white shadow rounded-lg p-6 animate-pulse">
-      <div className="flex items-center justify-between mb-4">
-        <div className="h-4 bg-gray-200 rounded w-40" />
-        <div className="h-3 bg-gray-200 rounded w-24" />
-      </div>
-      <div className="flex items-center gap-6 mb-4">
-        <div className="h-16 w-16 bg-gray-200 rounded-full" />
-        <div className="space-y-2">
-          <div className="h-8 bg-gray-200 rounded w-20" />
-          <div className="h-4 bg-gray-200 rounded w-32" />
+    <div role="status" className="bg-white shadow rounded-lg p-6">
+      <p className="mb-4 text-sm font-medium text-gray-600">Loading weather...</p>
+      <div aria-hidden="true" className="animate-pulse">
+        <div className="flex items-center justify-between mb-4">
+          <div className="h-4 bg-gray-200 rounded w-40" />
+          <div className="h-3 bg-gray-200 rounded w-24" />
         </div>
+        <div className="flex items-center gap-6 mb-4">
+          <div className="h-16 w-16 bg-gray-200 rounded-full" />
+          <div className="space-y-2">
+            <div className="h-8 bg-gray-200 rounded w-20" />
+            <div className="h-4 bg-gray-200 rounded w-32" />
+          </div>
+        </div>
+        <div className="flex gap-4 mb-4">
+          <div className="h-4 bg-gray-200 rounded w-16" />
+          <div className="h-4 bg-gray-200 rounded w-24" />
+        </div>
+        <div className="h-16 bg-gray-100 rounded w-full" />
       </div>
-      <div className="flex gap-4 mb-4">
-        <div className="h-4 bg-gray-200 rounded w-16" />
-        <div className="h-4 bg-gray-200 rounded w-24" />
-      </div>
-      <div className="h-16 bg-gray-100 rounded w-full" />
     </div>
   );
 }
@@ -58,10 +61,17 @@ function WeatherWidgetEmpty() {
   );
 }
 
-function WeatherWidgetError({ message }: { message: string }) {
+function WeatherWidgetError({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <div className="bg-white shadow rounded-lg p-6 text-center">
       <p className="text-red-500 text-sm">{message}</p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="mt-3 inline-flex items-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-2"
+      >
+        Retry
+      </button>
     </div>
   );
 }
@@ -121,7 +131,7 @@ function WeatherWidgetContent({ data }: { data: GetWeatherCurrent200 }) {
 }
 
 export default function WeatherWidget() {
-  const { data, isLoading, isError, error } = useGetWeatherCurrent({
+  const { data, isLoading, isError, error, refetch } = useGetWeatherCurrent({
     query: {
       staleTime: 5 * 60 * 1000, // 5 minutes
       refetchOnWindowFocus: true,
@@ -134,14 +144,21 @@ export default function WeatherWidget() {
   }
 
   // 404 means no location configured
-  if (isError) {
+  if (isError && !data) {
     const status = getHttpStatus(error);
     if (status === 404) {
       return <WeatherWidgetEmpty />;
     }
-    return <WeatherWidgetError message="Unable to load weather data. Please try again later." />;
+    return (
+      <WeatherWidgetError
+        message="Unable to load weather data. Please try again later."
+        onRetry={() => { void refetch(); }}
+      />
+    );
   }
 
+  // A failed refresh keeps the cached reading on screen; only a first read with
+  // no data reaches the failure card above.
   if (!data) {
     return <WeatherWidgetEmpty />;
   }

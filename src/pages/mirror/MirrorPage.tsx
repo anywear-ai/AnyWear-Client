@@ -61,10 +61,11 @@ export default function MirrorPage() {
     }
   }, []);
 
-  const credits = user?.dailyCredits ?? 0;
+  // `undefined` means no profile has arrived: the balance is unknown, never 0.
+  const credits = user?.dailyCredits ?? undefined;
 
   const hasItems = mode === 'outfit' ? !!selectedOutfitId : selectedWearableItemIds.length > 0;
-  const canGenerate = !!selectedBasePhotoId && hasItems && credits > 0 && !isStarting && !isPolling;
+  const canGenerate = !!selectedBasePhotoId && hasItems && credits !== undefined && credits > 0 && !isStarting && !isPolling;
 
   const handleGenerate = useCallback(() => {
     if (!selectedBasePhotoId) return;
@@ -182,7 +183,7 @@ export default function MirrorPage() {
                 onGenerate={handleGenerate}
                 disabled={!canGenerate}
                 isLoading={isStarting || isPolling}
-                credits={credits}
+                credits={credits ?? null}
               />
               {!selectedBasePhotoId && !isLoadingBasePhotos && (
                 <p className="text-xs text-gray-600 text-center">Select a base photo to start</p>
@@ -190,6 +191,11 @@ export default function MirrorPage() {
               {selectedBasePhotoId && !hasItems && (
                 <p className="text-xs text-gray-600 text-center">
                   {mode === 'outfit' ? 'Select an outfit' : 'Select at least one wearable item'}
+                </p>
+              )}
+              {credits === undefined && (
+                <p className="text-xs text-gray-600 text-center">
+                  Your credit balance is unavailable. Try-on is disabled until your profile loads.
                 </p>
               )}
               {selectedBasePhotoId && hasItems && credits === 0 && (
@@ -221,7 +227,7 @@ export default function MirrorPage() {
             onReuseOutfit={handleReuseOutfit}
             onRetryGeneration={handleRetryGeneration}
             basePhotoId={selectedBasePhotoId}
-            credits={credits}
+            credits={credits ?? null}
             isGenerating={isStarting || isPolling}
             settledStatus={isTerminal ? result : null}
           />

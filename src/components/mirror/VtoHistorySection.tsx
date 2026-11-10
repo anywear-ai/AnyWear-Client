@@ -74,10 +74,11 @@ function buildRetryBody(
 function retryBlockedReason(
   isGenerating: boolean,
   basePhotoId: string | null,
-  credits: number,
+  credits: number | null,
 ): string | null {
   if (isGenerating) return 'A generation is already running — wait for it to finish.';
   if (basePhotoId === null) return 'Select a base photo in Step 1 to retry.';
+  if (credits === null) return 'Your credit balance is unavailable.';
   if (credits <= 0) return 'Out of daily credits. Credits reset at midnight.';
   return null;
 }
@@ -86,7 +87,8 @@ interface VtoHistorySectionProps {
   onReuseOutfit: (wearableItemIds: string[]) => void;
   onRetryGeneration: (body: PostVtoGenerationsBody) => Promise<void>;
   basePhotoId: string | null;
-  credits: number;
+  /** `null` means the profile read has not produced a balance; retry is blocked. */
+  credits: number | null;
   isGenerating: boolean;
   /**
    * The terminal status Step 4 is showing for the generation under test, or

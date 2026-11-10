@@ -1,14 +1,13 @@
 import { lazy, Suspense, useEffect } from 'react';
-import axios from 'axios';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './store/authStore';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Hub } from 'aws-amplify/utils';
-import { useGetUsersMe } from './api/endpoints/users/users';
 import FullPageLoading from './components/FullPageLoading';
 import AuthGate from './components/AuthGate';
 import AuthLayout from './layouts/AuthLayout';
 import MainLayout from './layouts/MainLayout';
+import { registerProfileQueryPolicy } from './lib/profileQueryPolicy';
 
 const RegisterPage = lazy(() => import('./pages/auth/RegisterPage'));
 const VerifyEmailPage = lazy(() => import('./pages/auth/VerifyEmailPage'));
@@ -19,48 +18,20 @@ const DashboardPage = lazy(() => import('./pages/dashboard/DashboardPage'));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage'));
 
 const queryClient = new QueryClient();
+// Every `useGetUsersMe` consumer inherits the one retry policy registered here.
+registerProfileQueryPolicy(queryClient);
 
+/**
+ * The authentication decision only. The profile read no longer gates the shell:
+ * `ProfileSyncStatus` inside `MainLayout` owns its pending and failed states, and
+ * the routed page renders beside them. A 401 is still terminal: the Axios
+ * interceptor clears the session and sends the browser to `/login`.
+ */
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
-  const { isLoading, isError, data } = useGetUsersMe({
-    query: {
-      enabled: isAuthenticated,
-      retry: (failureCount, error: unknown) => {
-        // Only retry a few times if it's a 404, giving the dev-fallback time to work
-        if (axios.isAxiosError(error) && error.response?.status === 404) return failureCount < 2;
-        return failureCount < 1;
-      }
-    }
-  });
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
-  }
-
-  if (isLoading) {
-    return <FullPageLoading />;
-  }
-
-  if (isError || !data) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-md w-full space-y-8 text-center">
-          <h2 className="text-3xl font-extrabold text-gray-900">Profile Sync Failed</h2>
-          <p className="mt-2 text-sm text-gray-600">
-            We couldn't synchronize your profile with our local database. 
-            This usually happens in dev environments when AWS permissions are restricted.
-          </p>
-          <div className="mt-5">
-            <button
-              onClick={() => window.location.reload()}
-              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-            >
-              Retry
-            </button>
-          </div>
-        </div>
-      </div>
-    );
   }
 
   return <>{children}</>;

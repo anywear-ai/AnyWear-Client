@@ -881,6 +881,24 @@ test('#278: client-release.yml declares the assemble condition over the declared
   );
 });
 
+// #290: `publish` had no job-level condition, so it inherited the implicit
+// `success()`. GitHub propagates a skipped dependency through the dependency chain, so
+// the two undeclared platform legs being skipped skipped publication even though its
+// own `needs` (`preflight` and `assemble`) had both succeeded, and a tagged run
+// published nothing. The explicit condition keeps publication after a successful
+// assembly and still refuses a job whose `assemble` did not succeed — including the
+// `published`-complete rerun, where `assemble` skips, so this must not republish.
+test('#290: client-release.yml declares the publish condition over its own dependencies', () => {
+  const publish = jobSection(read(tagEntry), 'publish');
+  const condition = /^ {4}if: \$\{\{ ([\s\S]*?) \}\}$/m.exec(publish)?.[1];
+  assert.ok(condition, 'publish must declare its condition');
+  assert.equal(
+    condition.replace(/\s+/g, ' ').trim(),
+    "!cancelled() && needs.preflight.result == 'success' && needs.assemble.result == 'success'",
+    'a skipped undeclared platform must not skip publication, and a failed or skipped assemble must still stop it',
+  );
+});
+
 test('#278: client-release.yml wires every declared-set consumer to its own preflight output', () => {
   const workflow = read(tagEntry);
   const preflight = jobSection(workflow, 'preflight');

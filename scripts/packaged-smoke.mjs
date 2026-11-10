@@ -560,8 +560,8 @@ function assertSmoke(result) {
   if (result.dashboardLinkVisibleAfterClick !== true) {
     problems.push('the top bar Dashboard link was not visible after the click (dashboardLinkVisibleAfterClick)');
   }
-  if (typeof result.dashboardLinkDisplay !== 'string' || result.dashboardLinkDisplay === '' || result.dashboardLinkDisplay === 'none') {
-    problems.push(`the top bar Dashboard link was not laid out (display: ${String(result.dashboardLinkDisplay)})`);
+  if (result.dashboardLinkDisplay !== 'inline-flex') {
+    problems.push(`the top bar Dashboard link did not carry its Tailwind display utility (display: ${String(result.dashboardLinkDisplay)})`);
   }
   if (result.settingUpWardrobeAfterClick !== false) {
     problems.push('`Setting up your wardrobe...` appeared after the Dashboard click');

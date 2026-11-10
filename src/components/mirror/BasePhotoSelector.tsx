@@ -1,4 +1,4 @@
-import { useState, useRef, useLayoutEffect } from 'react';
+import { useState, useRef, useLayoutEffect, useEffect } from 'react';
 import {
   useGetVtoBasePhotos,
   usePostVtoBasePhotosUpload,
@@ -10,6 +10,7 @@ import CachedImage from '../CachedImage';
 import { useQueryClient } from '@tanstack/react-query';
 import { resolveImageContentType, uploadImageWithSignedPost, validateImageFile } from '../../lib/imageUpload';
 import { prepareImageForUpload } from '../../lib/imagePreparation';
+import { describeBasePhotoDeleteFailure } from '../../lib/basePhotoDeleteFailure';
 import { isAndroidApp } from '../../lib/platform';
 import type { GetVtoBasePhotos200Item } from '../../api/model/getVtoBasePhotos200Item';
 
@@ -26,16 +27,58 @@ export default function BasePhotoSelector({ selectedPhotoId, onSelect, onUploade
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
+  // The delete confirmation is the card's own control, not a browser dialog: a
+  // native dialog is never presented on the macOS desktop build and is not part
+  // of the page's focus order anywhere.
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  // What the card is doing now, set before the request and cleared when it
+  // settles. It is local state rather than `isPending && variables?.id` so the
+  // same commit that disables the controls also names the card.
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteFailure, setDeleteFailure] = useState<{ photoId: string; message: string } | null>(null);
+
+  const groupRef = useRef<HTMLDivElement | null>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
+  const deleteButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const restoreDeleteFocusId = useRef<string | null>(null);
+  const focusGroupOnClose = useRef(false);
+
   const { data: photos, isLoading } = useGetVtoBasePhotos();
   const { mutateAsync: reservePhotoUpload } = usePostVtoBasePhotosUploadUrl();
   const { mutateAsync: confirmPhotoUpload } = usePostVtoBasePhotosUpload();
   const { mutate: setDefault } = usePatchVtoBasePhotosId();
   const { mutate: deletePhoto } = useDeleteVtoBasePhotosId();
 
-  // The delete confirmation resolves after the DELETE round trip, so the clear
-  // must compare against the last committed selection, not the one captured
-  // when the request started: a card clicked while it is in flight stays
-  // selected. This ref is refreshed after every commit.
+  // The delete confirmation replaces the action set, so it owns focus: Cancel on
+  // open, and that card's Delete control again when the question closes. A
+  // confirmed delete removes that control, so its card hands focus to the
+  // selector's own group container instead of leaving it on the removed button.
+  // The target is only focused once the request has settled, because the control
+  // is disabled while it runs.
+  useEffect(() => {
+    if (confirmingId) {
+      cancelButtonRef.current?.focus();
+      return;
+    }
+    if (deletingId) return;
+    if (focusGroupOnClose.current) {
+      focusGroupOnClose.current = false;
+      restoreDeleteFocusId.current = null;
+      groupRef.current?.focus();
+      return;
+    }
+    const restoreId = restoreDeleteFocusId.current;
+    restoreDeleteFocusId.current = null;
+    if (!restoreId) return;
+    const control = deleteButtonRefs.current.get(restoreId);
+    if (control) control.focus();
+    else groupRef.current?.focus();
+  }, [confirmingId, deletingId]);
+
+  // The DELETE settles after the round trip, so the clear must compare against
+  // the last committed selection, not the one captured when the request
+  // started: a card clicked while the delete is in flight stays selected. This
+  // ref is refreshed after every commit.
   const selectedPhotoIdRef = useRef(selectedPhotoId);
   useLayoutEffect(() => {
     selectedPhotoIdRef.current = selectedPhotoId;
@@ -92,20 +135,55 @@ export default function BasePhotoSelector({ selectedPhotoId, onSelect, onUploade
     });
   };
 
-  const handleDelete = (id: string) => {
-    if (!window.confirm('Remove this base photo?')) return;
+  // The row leaves the grid without a page reload: the page derives its
+  // selection from this list, so trimming it keeps what renders and what can be
+  // selected in agreement at the next commit, before the refetch lands.
+  const removeDeletedRow = (id: string) => {
+    if (selectedPhotoIdRef.current === id) onSelect(null);
+    queryClient.setQueryData<GetVtoBasePhotos200Item[]>(
+      ['/vto/base-photos'],
+      (cached) => (Array.isArray(cached) ? cached.filter((photo) => photo.id !== id) : cached),
+    );
+    queryClient.invalidateQueries({ queryKey: ['/vto/base-photos'] as const });
+    focusGroupOnClose.current = true;
+    setConfirmingId(null);
+  };
+
+  const handleStartConfirm = (id: string) => {
+    if (deletingId) return;
+    restoreDeleteFocusId.current = null;
+    // A new question replaces any sentence its card is still showing.
+    setDeleteFailure((current) => (current?.photoId === id ? null : current));
+    setConfirmingId(id);
+  };
+
+  const handleCancelConfirm = (id: string) => {
+    if (deletingId) return;
+    restoreDeleteFocusId.current = id;
+    setConfirmingId(null);
+  };
+
+  const handleConfirmDelete = (id: string) => {
+    // One confirmation issues exactly one DELETE, and nothing starts a second
+    // while the first is in flight.
+    if (deletingId) return;
+    setDeleteFailure(null);
+    setDeletingId(id);
     deletePhoto({ id }, {
-      onSuccess: () => {
-        if (selectedPhotoIdRef.current === id) onSelect(null);
-        // Drop the removed row before the refetch: the page derives its
-        // selection from this list, so trimming it keeps what renders and what
-        // can be selected in agreement at the next commit.
-        queryClient.setQueryData<GetVtoBasePhotos200Item[]>(
-          ['/vto/base-photos'],
-          (cached) => (Array.isArray(cached) ? cached.filter((photo) => photo.id !== id) : cached),
-        );
-        queryClient.invalidateQueries({ queryKey: ['/vto/base-photos'] as const });
+      onSuccess: () => removeDeletedRow(id),
+      onError: (error) => {
+        const failure = describeBasePhotoDeleteFailure(error);
+        if (failure.refresh) {
+          // A 404 is the row already being gone: the requested end state holds,
+          // so the card leaves with the refreshed list and shows no sentence.
+          removeDeletedRow(id);
+          return;
+        }
+        if (failure.message) setDeleteFailure({ photoId: id, message: failure.message });
+        restoreDeleteFocusId.current = id;
+        setConfirmingId(null);
       },
+      onSettled: () => setDeletingId(null),
     });
   };
 
@@ -124,8 +202,13 @@ export default function BasePhotoSelector({ selectedPhotoId, onSelect, onUploade
     );
   }
 
+  // One DELETE is in flight at a time for the whole selector: it disables every
+  // card's Delete and the open question's two answers. The deleting card also
+  // loses its select and Set Default controls; other cards stay selectable.
+  const deletePending = deletingId !== null;
+
   return (
-    <div>
+    <div ref={groupRef} role="group" aria-label="Base photos" tabIndex={-1}>
       <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
         {android ? (
           <>
@@ -217,6 +300,7 @@ export default function BasePhotoSelector({ selectedPhotoId, onSelect, onUploade
             // like any other photo except that it cannot be deleted.
             const isSystemPhoto = photo.userId === null;
             const kindLabel = photo.isDefault ? 'Default photo' : isSystemPhoto ? 'System photo' : 'Base photo';
+            const confirming = confirmingId === photo.id;
             return (
             <article
               key={photo.id}
@@ -226,47 +310,113 @@ export default function BasePhotoSelector({ selectedPhotoId, onSelect, onUploade
                   : 'border-gray-200 hover:border-gray-400'
               }`}
             >
-              <button type="button" aria-pressed={selectedPhotoId === photo.id} aria-label={`${selectedPhotoId === photo.id ? 'Selected' : 'Select'} base photo ${index + 1}${photo.isDefault ? ', default' : ''}${isSystemPhoto ? ', shared system photo' : ''}`} onClick={() => onSelect(photo.id)} className="block w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-600">
-                {photo.url ? (
-                  <CachedImage
-                    src={photo.url}
-                    cacheKey={`vto-base-${photo.imageId}`}
-                    alt=""
-                    className="aspect-[4/5] w-full object-cover"
-                  />
-                ) : (
-                  <div className="aspect-[4/5] w-full bg-gray-100" aria-hidden="true" />
+              {/* The image and its action overlay share one positioned wrapper, so
+                  the overlay's box ends with the image. The refusal sentence is a
+                  sibling after this wrapper and never sits under that box. */}
+              <div
+                data-testid="base-photo-media"
+                className="relative"
+                onKeyDown={(event) => {
+                  // Closing on Escape is new for this card: the focus convention is
+                  // the history card's, but its confirmation has no key handling.
+                  if (event.key !== 'Escape' || !confirming || deletePending) return;
+                  event.stopPropagation();
+                  restoreDeleteFocusId.current = photo.id;
+                  setConfirmingId(null);
+                }}
+              >
+                <button
+                  type="button"
+                  aria-pressed={selectedPhotoId === photo.id}
+                  aria-label={`${selectedPhotoId === photo.id ? 'Selected' : 'Select'} base photo ${index + 1}${photo.isDefault ? ', default' : ''}${isSystemPhoto ? ', shared system photo' : ''}`}
+                  onClick={() => onSelect(photo.id)}
+                  disabled={deletingId === photo.id}
+                  className="block w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-600 disabled:cursor-not-allowed"
+                >
+                  {photo.url ? (
+                    <CachedImage
+                      src={photo.url}
+                      cacheKey={`vto-base-${photo.imageId}`}
+                      alt=""
+                      className="aspect-[4/5] w-full object-cover"
+                    />
+                  ) : (
+                    <div className="aspect-[4/5] w-full bg-gray-100" aria-hidden="true" />
+                  )}
+                  <span className="absolute left-2 top-2 rounded-full bg-white/95 px-2 py-1 text-xs font-medium text-gray-800 shadow-sm">
+                    {kindLabel}{selectedPhotoId === photo.id ? ' · Selected' : ''}
+                  </span>
+                </button>
+                {photo.isDefault && (
+                  <span className="sr-only">Default photo</span>
                 )}
-                <span className="absolute left-2 top-2 rounded-full bg-white/95 px-2 py-1 text-xs font-medium text-gray-800 shadow-sm">
-                  {kindLabel}{selectedPhotoId === photo.id ? ' · Selected' : ''}
-                </span>
-              </button>
-              {photo.isDefault && (
-                <span className="sr-only">Default photo</span>
-              )}
-              <div className="absolute inset-x-0 bottom-0 flex justify-center gap-1 bg-gradient-to-t from-black/60 to-transparent p-2 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
-                {!photo.isDefault && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleSetDefault(photo.id); }}
-                    aria-label="Set this photo as default"
-                    className="rounded bg-white px-2 py-1 text-xs text-gray-800 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
-                  >
-                    Set Default
-                  </button>
-                )}
-                {!isSystemPhoto && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleDelete(photo.id); }}
-                      aria-label="Delete this base photo"
-                      className="rounded bg-red-700 px-2 py-1 text-xs text-white hover:bg-red-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
-                  >
-                    <svg className="w-3 h-3 inline mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                    Delete
-                  </button>
-                )}
+                <div
+                  data-testid="base-photo-actions"
+                  className={`absolute inset-x-0 bottom-0 p-2 transition-opacity ${
+                    confirming
+                      ? 'bg-black/60 opacity-100'
+                      : 'bg-gradient-to-t from-black/60 to-transparent opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100'
+                  }`}
+                >
+                  {confirming ? (
+                    <div className="flex flex-col gap-1">
+                      <p className="text-center text-xs font-medium text-white">Delete this base photo?</p>
+                      <button
+                        type="button"
+                        onClick={() => handleConfirmDelete(photo.id)}
+                        disabled={deletePending}
+                        className="w-full rounded bg-red-700 px-2 py-1 text-xs text-white hover:bg-red-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {deletingId === photo.id ? 'Removing…' : 'Yes, Delete'}
+                      </button>
+                      <button
+                        type="button"
+                        ref={cancelButtonRef}
+                        onClick={() => handleCancelConfirm(photo.id)}
+                        disabled={deletePending}
+                        className="w-full rounded bg-white px-2 py-1 text-xs text-gray-800 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex justify-center gap-1">
+                      {!photo.isDefault && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); handleSetDefault(photo.id); }}
+                          disabled={deletingId === photo.id}
+                          aria-label="Set this photo as default"
+                          className="rounded bg-white px-2 py-1 text-xs text-gray-800 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Set Default
+                        </button>
+                      )}
+                      {!isSystemPhoto && (
+                        <button
+                          type="button"
+                          ref={(node) => {
+                            if (node) deleteButtonRefs.current.set(photo.id, node);
+                            else deleteButtonRefs.current.delete(photo.id);
+                          }}
+                          onClick={(e) => { e.stopPropagation(); handleStartConfirm(photo.id); }}
+                          disabled={deletePending}
+                          aria-label="Delete this base photo"
+                          className="rounded bg-red-700 px-2 py-1 text-xs text-white hover:bg-red-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <svg className="w-3 h-3 inline mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
+              {deleteFailure?.photoId === photo.id && (
+                <p role="alert" className="px-2 py-1.5 text-xs text-red-500">{deleteFailure.message}</p>
+              )}
             </article>
             );
           })}

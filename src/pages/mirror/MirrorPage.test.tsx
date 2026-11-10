@@ -302,9 +302,9 @@ describe('MirrorPage', () => {
   it('returns to the refreshed effective default after the selected photo is deleted', () => {
     mockPhotos([ownDefaultPhoto, systemPhoto]);
     const { rerenderPage } = renderPage();
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete this base photo' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, Delete' }));
     expect(deletePhoto).toHaveBeenCalledTimes(1);
     const [variables, options] = deletePhoto.mock.calls[0];
     expect(variables).toEqual({ id: 'photo-own' });
@@ -312,6 +312,7 @@ describe('MirrorPage', () => {
     // The pointer was ON DELETE SET NULL: the refetch flags the system photo.
     mockPhotos([{ ...systemPhoto, isDefault: true }]);
     act(() => options.onSuccess());
+    act(() => options.onSettled?.());
     rerenderPage();
 
     const card = screen.getByRole('button', { name: 'Selected base photo 1, default, shared system photo' });
@@ -322,10 +323,10 @@ describe('MirrorPage', () => {
   it('keeps a photo clicked while a delete is in flight', () => {
     mockPhotos([ownDefaultPhoto, otherOwnPhoto, systemPhoto]);
     const { rerenderPage } = renderPage();
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
     expect(screen.getByRole('button', { name: 'Selected base photo 1, default' })).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Delete this base photo' })[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, Delete' }));
     expect(deletePhoto).toHaveBeenCalledTimes(1);
     const [variables, options] = deletePhoto.mock.calls[0];
     expect(variables).toEqual({ id: 'photo-own' });
@@ -339,6 +340,7 @@ describe('MirrorPage', () => {
     // photo must stay selected instead of being cleared by the resolution.
     mockPhotos([otherOwnPhoto, { ...systemPhoto, isDefault: true }]);
     act(() => options.onSuccess());
+    act(() => options.onSettled?.());
     rerenderPage();
 
     expect(screen.getByRole('button', { name: 'Selected base photo 1' }))

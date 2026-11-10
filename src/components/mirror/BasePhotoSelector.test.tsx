@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import '@testing-library/jest-dom/vitest';
-import { act, render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 vi.mock('../../api/endpoints/vto/vto', () => ({
@@ -239,27 +239,297 @@ describe('BasePhotoSelector', () => {
     );
   });
 
-  it('trims the deleted row from the cached list and clears the selection with null', () => {
-    const onSelect = vi.fn();
-    const { queryClient } = renderSelector([ownPhoto, systemPhoto], {
-      selectedPhotoId: 'photo-own',
-      onSelect,
+  describe('delete confirmation', () => {
+    const otherOwnPhoto = {
+      ...ownPhoto,
+      id: 'photo-other',
+      imageId: 'image-other',
+      url: 'https://signed.example.com/other.jpg',
+      isDefault: false,
+    };
+
+    /** An Axios rejection: the status and body live on `error.response`. */
+    function rejection(status: number, data?: unknown) {
+      return { isAxiosError: true, response: { status, data } };
+    }
+
+    /** The Service's 409 body for a photo a try-on still references. */
+    function referencedBody(dependentResources: { resource: string; count?: number }[], hint?: string) {
+      return {
+        error: 'RESOURCE_REFERENCED',
+        message: 'The base photo is still referenced by other resources',
+        details: {
+          reason: 'RESOURCE_REFERENCED',
+          dependent_resources: dependentResources,
+          action: 'DELETE_DEPENDENTS_FIRST',
+          hint: hint ?? 'Delete the outfit generation that references this base photo, then delete the photo',
+        },
+      };
+    }
+
+    /** Answer the card's question the way the user does. */
+    function confirmDelete(index = 0) {
+      fireEvent.click(screen.getAllByRole('button', { name: 'Delete this base photo' })[index]);
+      fireEvent.click(screen.getByRole('button', { name: 'Yes, Delete' }));
+    }
+
+    /** Settle the pending DELETE the way TanStack Query does. */
+    function resolveDelete() {
+      const options = deletePhoto.mock.calls[deletePhoto.mock.calls.length - 1][1];
+      act(() => options.onSuccess());
+      act(() => options.onSettled?.());
+    }
+
+    function rejectDelete(error: unknown) {
+      const options = deletePhoto.mock.calls[deletePhoto.mock.calls.length - 1][1];
+      act(() => options.onError(error));
+      act(() => options.onSettled?.());
+    }
+
+    function expectCardSentence(sentence: string) {
+      const alert = screen.getByRole('alert');
+      expect(alert.textContent).toBe(sentence);
+      return alert;
+    }
+
+    it('asks in the card instead of in a browser dialog and sends nothing before Yes, Delete', () => {
+      const confirm = vi.spyOn(window, 'confirm');
+      renderSelector([ownPhoto, systemPhoto]);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Delete this base photo' }));
+
+      const question = screen.getByText('Delete this base photo?');
+      const card = question.closest('article');
+      expect(card).not.toBeNull();
+      expect(within(card!).getByRole('button', { name: 'Yes, Delete' })).toBeInTheDocument();
+      expect(within(card!).getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+      // The confirmation is the page's own control: no native dialog, no request.
+      expect(confirm).not.toHaveBeenCalled();
+      expect(deletePhoto).not.toHaveBeenCalled();
+      // Cancel owns focus while the question is open.
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
     });
-    queryClient.setQueryData(['/vto/base-photos'], [ownPhoto, systemPhoto]);
-    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete this base photo' }));
+    it('closes on Cancel, sends nothing, and returns focus to that card Delete', () => {
+      renderSelector([ownPhoto]);
 
-    expect(deletePhoto).toHaveBeenCalledTimes(1);
-    const [variables, options] = deletePhoto.mock.calls[0];
-    expect(variables).toEqual({ id: 'photo-own' });
+      fireEvent.click(screen.getByRole('button', { name: 'Delete this base photo' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
-    act(() => options.onSuccess());
+      expect(screen.queryByText('Delete this base photo?')).toBeNull();
+      expect(deletePhoto).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Delete this base photo' }));
+    });
 
-    expect(onSelect).toHaveBeenCalledWith(null);
-    expect(queryClient.getQueryData(['/vto/base-photos'])).toEqual([systemPhoto]);
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['/vto/base-photos'] });
+    it('closes on Escape without a request and returns focus to that card Delete', () => {
+      renderSelector([ownPhoto]);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Delete this base photo' }));
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Cancel' }), { key: 'Escape' });
+
+      expect(screen.queryByText('Delete this base photo?')).toBeNull();
+      expect(deletePhoto).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Delete this base photo' }));
+    });
+
+    it('issues one DELETE per confirmation and disables every delete control while it is in flight', () => {
+      renderSelector([ownPhoto, otherOwnPhoto]);
+
+      confirmDelete(1);
+
+      expect(deletePhoto).toHaveBeenCalledTimes(1);
+      expect(deletePhoto.mock.calls[0][0]).toEqual({ id: 'photo-other' });
+      // The card that sent it reads Removing and both answers are disabled, so a
+      // second activation cannot start a second request.
+      const removing = screen.getByRole('button', { name: 'Removing…' });
+      expect(removing).toBeDisabled();
+      fireEvent.click(removing);
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(deletePhoto).toHaveBeenCalledTimes(1);
+      expect(screen.getByText('Delete this base photo?')).toBeInTheDocument();
+
+      // The deleting card loses its select control; because its question is the
+      // overlay now, its Set Default control is not rendered at all. The other
+      // card's Delete is disabled and its select control stays available.
+      expect(screen.getByRole('button', { name: 'Select base photo 2' })).toBeDisabled();
+      expect(screen.queryByRole('button', { name: 'Set this photo as default' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Select base photo 1, default' })).toBeEnabled();
+      expect(screen.getAllByRole('button', { name: 'Delete this base photo' })).toHaveLength(1);
+      expect(screen.getByRole('button', { name: 'Delete this base photo' })).toBeDisabled();
+    });
+
+    it('restores the card actions after a failed delete', () => {
+      renderSelector([ownPhoto, otherOwnPhoto]);
+
+      confirmDelete(1);
+      rejectDelete(rejection(409, referencedBody([{ resource: 'outfit_generation', count: 1 }])));
+
+      // The question is gone, so the card offers its actions again and is
+      // selectable: the failure does not leave a card that cannot be used.
+      expect(screen.getByRole('button', { name: 'Set this photo as default' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Select base photo 2' })).toBeEnabled();
+      const deletes = screen.getAllByRole('button', { name: 'Delete this base photo' });
+      expect(deletes).toHaveLength(2);
+      for (const control of deletes) expect(control).toBeEnabled();
+    });
+
+    it('keeps the action overlay visible while the question is open', () => {
+      renderSelector([ownPhoto]);
+      const actions = () => screen.getByTestId('base-photo-actions');
+      expect(actions().className).toContain('sm:opacity-0');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Delete this base photo' }));
+
+      // The reveal has no hover or focus gate while the question is open, so a
+      // pointer that leaves the card cannot hide it.
+      expect(actions().className).toContain('opacity-100');
+      expect(actions().className).not.toContain('opacity-0');
+    });
+
+    it('trims the deleted row from the cached list and clears the selection with null', () => {
+      const onSelect = vi.fn();
+      const { queryClient } = renderSelector([ownPhoto, systemPhoto], {
+        selectedPhotoId: 'photo-own',
+        onSelect,
+      });
+      queryClient.setQueryData(['/vto/base-photos'], [ownPhoto, systemPhoto]);
+      const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+
+      confirmDelete();
+
+      expect(deletePhoto).toHaveBeenCalledTimes(1);
+      expect(deletePhoto.mock.calls[0][0]).toEqual({ id: 'photo-own' });
+
+      resolveDelete();
+
+      expect(onSelect).toHaveBeenCalledWith(null);
+      expect(queryClient.getQueryData(['/vto/base-photos'])).toEqual([systemPhoto]);
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['/vto/base-photos'] });
+    });
+
+    it('moves focus to the selector group after a confirmed delete', () => {
+      const { queryClient } = renderSelector([ownPhoto, systemPhoto], { selectedPhotoId: 'photo-own' });
+      queryClient.setQueryData(['/vto/base-photos'], [ownPhoto, systemPhoto]);
+
+      confirmDelete();
+      resolveDelete();
+
+      // The removed card's Delete control is gone; the root group survives both
+      // the grid and the empty state.
+      expect(document.activeElement).toBe(screen.getByRole('group', { name: 'Base photos' }));
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    it('keeps the root group in the empty state', () => {
+      renderSelector([]);
+
+      expect(screen.getByRole('group', { name: 'Base photos' })).toBeInTheDocument();
+    });
+
+    it('keeps the card and names the try-on count when the Service refuses with a 409', () => {
+      renderSelector([ownPhoto, systemPhoto]);
+
+      confirmDelete();
+      rejectDelete(rejection(409, referencedBody([{ resource: 'outfit_generation', count: 3 }])));
+
+      const alert = expectCardSentence('This photo is used by 3 try-on(s). Delete it/them in History first.');
+      // The card's own sentence, not the Service's database wording.
+      expect(alert.textContent).not.toContain('outfit_generation');
+      expect(screen.getByRole('button', { name: 'Delete this base photo' })).toBeInTheDocument();
+      expect(screen.queryByText('Delete this base photo?')).toBeNull();
+      // Focus returns to the control that can retry.
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Delete this base photo' }));
+    });
+
+    it('states the count-less sentence when the try-on reference carries no count', () => {
+      renderSelector([ownPhoto]);
+
+      confirmDelete();
+      rejectDelete(rejection(409, referencedBody([{ resource: 'outfit_generation' }])));
+
+      expectCardSentence('This photo is used by a try-on. Delete it in History first.');
+      expect(screen.getByRole('button', { name: 'Delete this base photo' })).toBeInTheDocument();
+    });
+
+    it('keeps the Service hint verbatim for an unrecognised 409 reference', () => {
+      renderSelector([ownPhoto]);
+
+      confirmDelete();
+      rejectDelete(rejection(409, referencedBody([{ resource: 'outfit' }], 'Delete the outfit that uses this photo first')));
+
+      expectCardSentence('Delete the outfit that uses this photo first');
+      expect(screen.getByRole('button', { name: 'Delete this base photo' })).toBeInTheDocument();
+    });
+
+    it('keeps the card and states the Service message for a 403', () => {
+      renderSelector([ownPhoto]);
+
+      confirmDelete();
+      rejectDelete(rejection(403, { error: 'FORBIDDEN', message: 'A shared system base photo cannot be deleted' }));
+
+      expectCardSentence('A shared system base photo cannot be deleted');
+      expect(screen.getByRole('button', { name: 'Delete this base photo' })).toBeInTheDocument();
+    });
+
+    it('keeps the card and asks the user to try again after a server error', () => {
+      renderSelector([ownPhoto]);
+
+      confirmDelete();
+      rejectDelete(rejection(503, { message: 'Internal Server Error' }));
+
+      const alert = expectCardSentence('Could not remove this photo (server error 503). Try again.');
+      expect(alert.textContent).not.toContain('Internal Server Error');
+      expect(screen.getByRole('button', { name: 'Delete this base photo' })).toBeInTheDocument();
+    });
+
+    it('keeps the card and reports the connection when no response arrives', () => {
+      renderSelector([ownPhoto]);
+
+      confirmDelete();
+      // An Axios network failure: the request exists and there is no response.
+      rejectDelete({ isAxiosError: true, request: {}, message: 'Network Error' });
+
+      expectCardSentence('Could not reach the server. Check your connection and try again.');
+      expect(screen.getByRole('button', { name: 'Delete this base photo' })).toBeInTheDocument();
+    });
+
+    it('removes the row on a 404 without a sentence', () => {
+      const onSelect = vi.fn();
+      const { queryClient } = renderSelector([ownPhoto, systemPhoto], {
+        selectedPhotoId: 'photo-own',
+        onSelect,
+      });
+      queryClient.setQueryData(['/vto/base-photos'], [ownPhoto, systemPhoto]);
+      const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+
+      confirmDelete();
+      rejectDelete(rejection(404, { error: 'NOT_FOUND', message: 'Base photo not found' }));
+
+      // The row is already gone: the requested end state holds, so the card
+      // leaves with the refreshed list and reports nothing.
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(onSelect).toHaveBeenCalledWith(null);
+      expect(queryClient.getQueryData(['/vto/base-photos'])).toEqual([systemPhoto]);
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['/vto/base-photos'] });
+    });
+
+    it('renders the sentence after the media wrapper, outside the action overlay box', () => {
+      renderSelector([ownPhoto]);
+
+      confirmDelete();
+      rejectDelete(rejection(409, referencedBody([{ resource: 'outfit_generation', count: 1 }])));
+
+      const alert = screen.getByRole('alert');
+      const media = screen.getByTestId('base-photo-media');
+      const actions = screen.getByTestId('base-photo-actions');
+      // Same card, but the sentence is a sibling of the wrapper that holds the
+      // absolutely positioned overlay, so the two boxes cannot overlap.
+      expect(media.contains(actions)).toBe(true);
+      expect(media.contains(alert)).toBe(false);
+      expect(alert.closest('article')).toBe(media.closest('article'));
+      expect(alert.className).toContain('text-xs');
+      expect(alert.className).toContain('text-red-500');
+    });
   });
 
   describe('in the desktop client', () => {

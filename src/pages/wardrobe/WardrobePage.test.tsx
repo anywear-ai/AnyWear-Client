@@ -16,7 +16,9 @@ const REFRESHED_URL = 'https://anywear-beta.s3.amazonaws.com/wardrobe/coat.jpg?X
 interface CreateOutfitModalMockProps {
   isOpen: boolean;
   onClose?: () => void;
+  onSuccess?: () => Promise<unknown> | void;
   onSaved?: (outfit: { id: string; name?: string | null }) => void;
+  onNotice?: (notice: { retainedObjectKeys: number }) => void;
   outfit?: { id: string; name?: string | null } | null;
 }
 
@@ -346,7 +348,7 @@ describe('WardrobePage saved outfit look cards', () => {
     expect(screen.getByRole('button', { name: 'Edit T-Shirt, Jeans' })).toBeInTheDocument();
   });
 
-  it('never derives the image from wearable items: no look shows the empty state and Generate look', () => {
+  it('never derives the image from wearable items: no generation shows No look yet and Generate look', () => {
     renderPage({ seed: [] });
 
     expect(screen.queryByTestId('outfit-thumbnail-outfit-1')).toBeNull();
@@ -354,9 +356,11 @@ describe('WardrobePage saved outfit look cards', () => {
     expect(document.querySelector(`img[src="${ITEM_URL}"]`)).toBeNull();
     expect(screen.getByRole('button', { name: 'Generate look for Rainy Day' })).toBeInTheDocument();
     expect(screen.getByText('1 items')).toBeInTheDocument();
+    // An empty outfit paints the text placeholder, never the running skeleton.
+    expect(screen.queryByTestId('outfit-cover-skeleton-outfit-1')).toBeNull();
   });
 
-  it('shows Pending as a live state and offers no second action while it is active', () => {
+  it('shows Pending as a skeleton with aria-busy and offers no second action while it is active', () => {
     mockOutfits(outfitResponse(outfit({
       latestGeneration: { id: 'gen-2', status: 'Pending', errorCode: null, createdAt: '2026-06-02T00:00:00.000Z' },
     })));
@@ -364,11 +368,16 @@ describe('WardrobePage saved outfit look cards', () => {
     renderPage({ seed: [] });
 
     expect(screen.getByTestId('outfit-look-badge-pending')).toHaveTextContent('Pending');
-    expect(screen.getByText('Generating look...')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Generate look for/ })).toBeNull();
+    const skeleton = screen.getByTestId('outfit-cover-skeleton-outfit-1');
+    expect(skeleton).toHaveAttribute('aria-busy', 'true');
+    expect(skeleton).toHaveClass('animate-pulse');
+    expect(screen.getByText('Generating…')).toBeInTheDocument();
+    expect(screen.queryByText('Generating look...')).toBeNull();
+    expect(screen.queryByText('No look yet')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Generate look for|New look for|Retry for/ })).toBeNull();
   });
 
-  it('shows Processing as a live state without an action', () => {
+  it('shows Processing as a skeleton without an action', () => {
     mockOutfits(outfitResponse(outfit({
       latestGeneration: { id: 'gen-2', status: 'Processing', errorCode: null, createdAt: '2026-06-02T00:00:00.000Z' },
     })));
@@ -376,7 +385,50 @@ describe('WardrobePage saved outfit look cards', () => {
     renderPage({ seed: [] });
 
     expect(screen.getByTestId('outfit-look-badge-processing')).toHaveTextContent('Processing');
+    expect(screen.getByTestId('outfit-cover-skeleton-outfit-1')).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByText('Generating…')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Generate look for/ })).toBeNull();
+  });
+
+  it('shows Last try-on failed and Retry when the last generation failed with no look', () => {
+    mockOutfits(outfitResponse(outfit({
+      latestGeneration: { id: 'gen-2', status: 'Failed', errorCode: 'base_photo_unavailable', createdAt: '2026-06-02T00:00:00.000Z' },
+    })));
+
+    renderPage({ seed: [] });
+
+    expect(screen.getByText('Last try-on failed')).toBeInTheDocument();
+    expect(screen.queryByText('No look yet')).toBeNull();
+    expect(screen.queryByTestId('outfit-cover-skeleton-outfit-1')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Retry for Rainy Day' })).toBeInTheDocument();
+  });
+
+  it('shows Image unavailable and New look when a completed look has no signed url', () => {
+    mockOutfits(outfitResponse(outfit({
+      latestGeneration: { id: 'gen-1', status: 'Complete', errorCode: null, createdAt: '2026-06-01T00:00:00.000Z' },
+      look: { generationId: 'gen-1', url: null, createdAt: '2026-06-01T00:00:00.000Z' },
+    })));
+
+    renderPage({ seed: [] });
+
+    expect(screen.getByText('Image unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('No look yet')).toBeNull();
+    expect(screen.queryByTestId('outfit-thumbnail-outfit-1')).toBeNull();
+    expect(screen.getByRole('button', { name: 'New look for Rainy Day' })).toBeInTheDocument();
+  });
+
+  it('paints the running skeleton instead of Image unavailable while a generation is active', () => {
+    mockOutfits(outfitResponse(outfit({
+      latestGeneration: { id: 'gen-2', status: 'Processing', errorCode: null, createdAt: '2026-06-02T00:00:00.000Z' },
+      look: { generationId: 'gen-1', url: null, createdAt: '2026-06-01T00:00:00.000Z' },
+    })));
+
+    renderPage({ seed: [] });
+
+    expect(screen.getByTestId('outfit-cover-skeleton-outfit-1')).toHaveAttribute('aria-busy', 'true');
+    expect(screen.queryByText('Image unavailable')).toBeNull();
+    expect(screen.queryByText('No look yet')).toBeNull();
+    expect(screen.queryByRole('button', { name: /New look for|Generate look for/ })).toBeNull();
   });
 
   it('shows Failed with Retry while keeping the older completed look', () => {
@@ -519,6 +571,63 @@ describe('WardrobePage saved outfit look cards', () => {
     expect(dialog).toHaveTextContent('Generate a look for Rainy Day Updated?');
     expect(dialog).toHaveTextContent('This uses 1 of your daily credits.');
     expect(generateLook).not.toHaveBeenCalled();
+  });
+});
+
+describe('WardrobePage outfit cleanup notice', () => {
+  it('renders the retained-image notice the dialog reports and dismisses it', () => {
+    renderPage({ seed: [] });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Rainy Day' }));
+    const onNotice = createOutfitModal.props?.onNotice;
+    expect(onNotice).toBeTypeOf('function');
+
+    act(() => onNotice?.({ retainedObjectKeys: 2 }));
+
+    const notice = screen.getByRole('status');
+    expect(notice).toHaveTextContent('Outfit deleted. 2 images are still being cleaned up in the background.');
+
+    fireEvent.click(within(notice).getByRole('button', { name: 'Dismiss' }));
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('states one retained image in the singular', () => {
+    renderPage({ seed: [] });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Rainy Day' }));
+    act(() => createOutfitModal.props?.onNotice?.({ retainedObjectKeys: 1 }));
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Outfit deleted. 1 image is still being cleaned up in the background.',
+    );
+  });
+
+  it('refreshes the outfits list when the dialog reports a completed delete', async () => {
+    const { queryClient } = renderPage({ seed: [] });
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Rainy Day' }));
+
+    // A 204, a 404 and the completed 502 all run this success path, which is
+    // the page's one list refresh after a delete.
+    await act(async () => {
+      await createOutfitModal.props?.onSuccess?.();
+    });
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['/outfits'] });
+  });
+
+  it('keeps the notice visible when the page lists no outfits at all', () => {
+    mockOutfits({ outfits: [] });
+    renderPage({ seed: [] });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create Outfit' }));
+    act(() => createOutfitModal.props?.onNotice?.({ retainedObjectKeys: 3 }));
+
+    // The notice is not owned by the My Outfits block, so an emptied list keeps it.
+    expect(screen.getByText('No outfits yet')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Outfit deleted. 3 images are still being cleaned up in the background.',
+    );
   });
 });
 

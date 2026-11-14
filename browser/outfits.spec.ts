@@ -45,6 +45,8 @@ const mockBasePhoto: GetVtoBasePhotos200Item = {
 interface MockState {
   outfits: GetOutfits200OutfitsItem[];
   mutations: Array<{ method: string; path: string; body: unknown }>;
+  /** When set, DELETE /outfits/{id} answers 502 OBJECT_DELETION_INCOMPLETE with these keys. */
+  deleteRetainedObjectKeys?: string[];
 }
 
 function outfitItems(ids: string[]) {
@@ -123,7 +125,19 @@ async function setupOutfitMocks(page: Page, state: MockState) {
     if (id && method === 'DELETE') {
       state.mutations.push({ method, path, body: undefined });
       state.outfits = state.outfits.filter(outfit => outfit.id !== id);
-      return json({ success: true });
+      // The rows are deleted either way: a 502 only says the Service still owes
+      // the stored-image absence proof to its cleanup manifest.
+      if (state.deleteRetainedObjectKeys?.length) {
+        return json({
+          error: 'OBJECT_DELETION_INCOMPLETE',
+          message: 'The outfit was deleted; stored images are still owed by an open cleanup manifest.',
+          details: {
+            manifest_id: '99999999-9999-4999-8999-999999999999',
+            retained_object_keys: state.deleteRetainedObjectKeys,
+          },
+        }, 502);
+      }
+      return route.fulfill({ status: 204 });
     }
     return route.fallback();
   });
@@ -131,6 +145,14 @@ async function setupOutfitMocks(page: Page, state: MockState) {
 
 function outfitCard(page: Page, name: string) {
   return page.getByRole('heading', { name, exact: true }).locator('..').locator('..');
+}
+
+/**
+ * The whole card article. `outfitCard` stops at the edit button, which does not
+ * contain the action row; this scope reaches both the cover and its action.
+ */
+function outfitArticle(page: Page, name: string) {
+  return page.getByRole('article').filter({ has: page.getByRole('heading', { name, exact: true }) });
 }
 
 /** The dialogs' focusable stops, matching the shared dialog hook's selector. */
@@ -504,15 +526,48 @@ test.describe('Outfit Management (mocked Client integration)', () => {
   });
 
   test('deletes an outfit after confirmation and shows the empty state', async ({ page }) => {
-    const state: MockState = { outfits: [structuredClone(mockOutfit)], mutations: [] };
+    const state: MockState = {
+      outfits: [{ ...structuredClone(mockOutfit), generationCount: 2 }],
+      mutations: [],
+    };
     await setupOutfitMocks(page, state);
     await page.goto('/wardrobe');
     await page.getByRole('heading', { name: 'Weekend Casual', exact: true }).click();
     await page.getByRole('button', { name: 'Delete Outfit', exact: true }).click();
-    await expect(page.getByText('Delete this outfit? This cannot be undone.', { exact: true })).toBeVisible();
+    // The confirmation states the one count the Service returned, then the
+    // existing warning; the DELETE itself answers 204 with no body.
+    await expect(page.getByText('Delete this outfit? This also deletes its 2 try-on records and their images. This cannot be undone.', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Confirm', exact: true }).click();
     await expect(page.getByText('No outfits yet', { exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Weekend Casual', exact: true })).not.toBeVisible();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    expect(state.mutations).toEqual([{ method: 'DELETE', path: `/outfits/${OUTFIT_ID}`, body: undefined }]);
+  });
+
+  test('closes on a 502 incomplete object deletion and reports the background cleanup', async ({ page }) => {
+    const state: MockState = {
+      outfits: [structuredClone(mockOutfit)],
+      mutations: [],
+      deleteRetainedObjectKeys: [
+        'outfit-generations/test-user/generation-1.png',
+        'outfit-generations/test-user/generation-2.png',
+      ],
+    };
+    await setupOutfitMocks(page, state);
+    await page.goto('/wardrobe');
+    await page.getByRole('heading', { name: 'Weekend Casual', exact: true }).click();
+    await page.getByRole('button', { name: 'Delete Outfit', exact: true }).click();
+    await expect(page.getByText('Delete this outfit? This also deletes its try-on records and images. This cannot be undone.', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+
+    // The delete completed from the user's view: the modal closes, the list
+    // refreshes to empty, and only a non-blocking cleanup notice remains.
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    await expect(page.getByText('No outfits yet', { exact: true })).toBeVisible();
+    await expect(page.getByRole('status').filter({ hasText: 'Outfit deleted.' })).toContainText(
+      'Outfit deleted. 2 images are still being cleaned up in the background.',
+    );
+    await expect(page.getByText(/Delete failed/)).toHaveCount(0);
     expect(state.mutations).toEqual([{ method: 'DELETE', path: `/outfits/${OUTFIT_ID}`, body: undefined }]);
   });
 
@@ -541,6 +596,75 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     await expect(empty.getByText('No look yet', { exact: true })).toBeVisible();
     // The outfit's first garment is never used as the outfit's image.
     await expect(empty.getByRole('img')).toHaveCount(0);
+  });
+  test('paints each outfit cover state with its own action', async ({ page }) => {
+    const state: MockState = {
+      outfits: [
+        // A completed look with a signed url: the image, and New look.
+        { ...structuredClone(mockOutfit), id: '11111111-1111-4111-8111-111111111111', name: 'Look Outfit', generationCount: 2 },
+        // A running generation without a look: the skeleton, and no action.
+        {
+          ...structuredClone(mockOutfit),
+          id: '22222222-2222-4222-8222-222222222222',
+          name: 'Running Outfit',
+          latestGeneration: { id: GENERATION_ID, status: 'Processing', errorCode: null, createdAt: '2026-06-02T00:00:00.000Z' },
+          look: null,
+        },
+        // A failed last generation without a look: the failure sentence, and Retry.
+        {
+          ...structuredClone(mockOutfit),
+          id: '33333333-3333-4333-8333-333333333333',
+          name: 'Failed Outfit',
+          latestGeneration: { id: GENERATION_ID, status: 'Failed', errorCode: 'base_photo_unavailable', createdAt: '2026-06-02T00:00:00.000Z' },
+          look: null,
+        },
+        // A completed look whose url was not signed: Image unavailable, and New look.
+        {
+          ...structuredClone(mockOutfit),
+          id: '44444444-4444-4444-8444-444444444444',
+          name: 'Unsigned Outfit',
+          latestGeneration: { id: GENERATION_ID, status: 'Complete', errorCode: null, createdAt: '2026-06-01T00:00:00.000Z' },
+          look: { generationId: GENERATION_ID, url: null, createdAt: '2026-06-01T00:00:00.000Z' },
+        },
+        // No generation at all: No look yet, and Generate look.
+        {
+          ...structuredClone(mockOutfit),
+          id: '55555555-5555-4555-8555-555555555555',
+          name: 'Empty Outfit',
+          latestGeneration: null,
+          look: null,
+        },
+      ],
+      mutations: [],
+    };
+    await setupOutfitMocks(page, state);
+    await page.goto('/wardrobe');
+
+    const look = outfitArticle(page, 'Look Outfit');
+    await expect(look.getByRole('img', { name: 'Look Outfit' })).toHaveAttribute('src', LOOK_IMAGE);
+    await expect(look.getByRole('button', { name: 'New look for Look Outfit', exact: true })).toBeVisible();
+
+    const running = outfitArticle(page, 'Running Outfit');
+    const skeleton = running.getByTestId('outfit-cover-skeleton-22222222-2222-4222-8222-222222222222');
+    await expect(skeleton).toBeVisible();
+    await expect(skeleton).toHaveAttribute('aria-busy', 'true');
+    await expect(running.getByText('Generating…', { exact: true })).toBeVisible();
+    await expect(running.getByRole('button', { name: /for Running Outfit/ })).toHaveCount(0);
+
+    const failed = outfitArticle(page, 'Failed Outfit');
+    await expect(failed.getByText('Last try-on failed', { exact: true })).toBeVisible();
+    await expect(failed.getByRole('button', { name: 'Retry for Failed Outfit', exact: true })).toBeVisible();
+
+    const unsigned = outfitArticle(page, 'Unsigned Outfit');
+    await expect(unsigned.getByText('Image unavailable', { exact: true })).toBeVisible();
+    await expect(unsigned.getByRole('button', { name: 'New look for Unsigned Outfit', exact: true })).toBeVisible();
+    await expect(unsigned.getByRole('img')).toHaveCount(0);
+
+    const empty = outfitArticle(page, 'Empty Outfit');
+    await expect(empty.getByText('No look yet', { exact: true })).toBeVisible();
+    await expect(empty.getByRole('button', { name: 'Generate look for Empty Outfit', exact: true })).toBeVisible();
+
+    expect(state.mutations).toEqual([]);
   });
 });
 

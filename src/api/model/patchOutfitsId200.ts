@@ -19,4 +19,10 @@ export type PatchOutfitsId200 = {
   latestGeneration?: PatchOutfitsId200LatestGeneration;
   /** @nullable */
   look?: PatchOutfitsId200Look;
+  /**
+     * The number of outfit generations that `DELETE /outfits/{id}` removes with this outfit, across every status. Resolved in one aggregate statement per page; null when it could not be read.
+     * @minimum 0
+     * @nullable
+     */
+  generationCount?: number | null;
 };

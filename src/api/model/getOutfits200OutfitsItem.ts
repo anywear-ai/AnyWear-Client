@@ -19,4 +19,10 @@ export type GetOutfits200OutfitsItem = {
   latestGeneration?: GetOutfits200OutfitsItemLatestGeneration;
   /** @nullable */
   look?: GetOutfits200OutfitsItemLook;
+  /**
+     * The number of outfit generations that `DELETE /outfits/{id}` removes with this outfit, across every status. Resolved in one aggregate statement per page; null when it could not be read.
+     * @minimum 0
+     * @nullable
+     */
+  generationCount?: number | null;
 };

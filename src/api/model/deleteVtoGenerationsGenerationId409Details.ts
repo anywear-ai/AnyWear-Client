@@ -4,16 +4,8 @@
  * AnyWear API
  * OpenAPI spec version: 1.0.0
  */
-import type { DeleteVtoGenerationsGenerationId409DetailsAction } from './deleteVtoGenerationsGenerationId409DetailsAction';
-import type { DeleteVtoGenerationsGenerationId409DetailsDependentResourcesItem } from './deleteVtoGenerationsGenerationId409DetailsDependentResourcesItem';
-import type { DeleteVtoGenerationsGenerationId409DetailsReason } from './deleteVtoGenerationsGenerationId409DetailsReason';
 
 export type DeleteVtoGenerationsGenerationId409Details = {
-  /** The resource is still referenced, so the database refused the delete. */
-  reason: DeleteVtoGenerationsGenerationId409DetailsReason;
-  /** Dependent resources that must be deleted before this resource can be deleted. Nothing cascades. */
-  dependent_resources: DeleteVtoGenerationsGenerationId409DetailsDependentResourcesItem[];
-  /** The only action that unblocks the delete: remove the listed dependents first. This is permanent, not retryable. */
-  action: DeleteVtoGenerationsGenerationId409DetailsAction;
-  hint: string;
+  generation_id: string;
+  status: string;
 };

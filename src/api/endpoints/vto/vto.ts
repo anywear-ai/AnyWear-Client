@@ -26,6 +26,7 @@ import type {
 import type {
   DeleteVtoBasePhotosId409,
   DeleteVtoGenerationsGenerationId409,
+  DeleteVtoGenerationsGenerationId502,
   GetVtoBasePhotos200Item,
   GetVtoGenerations200,
   GetVtoGenerationsParams,
@@ -288,7 +289,7 @@ export const deleteVtoGenerationsGenerationId = (
 
 
 
-export const getDeleteVtoGenerationsGenerationIdMutationOptions = <TError = void | DeleteVtoGenerationsGenerationId409,
+export const getDeleteVtoGenerationsGenerationIdMutationOptions = <TError = void | DeleteVtoGenerationsGenerationId409 | DeleteVtoGenerationsGenerationId502,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteVtoGenerationsGenerationId>>, TError,{generationId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
 ): UseMutationOptions<Awaited<ReturnType<typeof deleteVtoGenerationsGenerationId>>, TError,{generationId: string}, TContext> => {
 
@@ -317,9 +318,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type DeleteVtoGenerationsGenerationIdMutationResult = NonNullable<Awaited<ReturnType<typeof deleteVtoGenerationsGenerationId>>>
 
-    export type DeleteVtoGenerationsGenerationIdMutationError = void | DeleteVtoGenerationsGenerationId409
+    export type DeleteVtoGenerationsGenerationIdMutationError = void | DeleteVtoGenerationsGenerationId409 | DeleteVtoGenerationsGenerationId502
 
-    export const useDeleteVtoGenerationsGenerationId = <TError = void | DeleteVtoGenerationsGenerationId409,
+    export const useDeleteVtoGenerationsGenerationId = <TError = void | DeleteVtoGenerationsGenerationId409 | DeleteVtoGenerationsGenerationId502,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteVtoGenerationsGenerationId>>, TError,{generationId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof deleteVtoGenerationsGenerationId>>,

@@ -1,5 +1,7 @@
 import { fetchAuthSession } from 'aws-amplify/auth';
 import { CLIENT_VERSION, CLIENT_VERSION_HEADER } from './client-version';
+import { parseClientVersionRefusal } from './client-version-refusal';
+import { useClientVersionRefusalStore } from '../store/clientVersionRefusalStore';
 
 type SseEventCallback<T = unknown> = (data: T) => void;
 
@@ -64,17 +66,30 @@ export class SseIdleTimeoutError extends Error {
   }
 }
 
-/** Whether `response` is the terminal Client-version rejection. */
-async function isClientVersionUnsupported(response: Response): Promise<boolean> {
+/**
+ * Reads the Service's terminal Client-version refusal from a stream response and
+ * records it into the same in-memory latch the REST path writes.
+ *
+ * The stream is a second caller of the one refusal parser, not a second
+ * mechanism: `sse.ts` uses `fetch` rather than Axios, so it parses the body
+ * itself, but the recognition and the state are shared. Recording matters
+ * because the wardrobe page has no steady-state REST read, so a floor raise
+ * against an open page can produce no REST refusal at all and the refused stream
+ * can be the only notice. The caller's stop path is unchanged.
+ */
+async function recordClientVersionRefusal(response: Response): Promise<boolean> {
   if (response.status !== 400) return false;
+  let body: unknown;
   try {
-    const body: unknown = await response.json();
-    return typeof body === 'object'
-      && body !== null
-      && (body as { error?: unknown }).error === 'CLIENT_VERSION_UNSUPPORTED';
+    body = await response.json();
   } catch {
+    // A body that is not JSON cannot be the refusal contract.
     return false;
   }
+  const refusal = parseClientVersionRefusal(response.status, body);
+  if (!refusal) return false;
+  useClientVersionRefusalStore.getState().recordRefusal(refusal);
+  return true;
 }
 
 function parseEventFrame(frame: string): SseFrame | null {
@@ -271,7 +286,7 @@ export function connectSse<T = unknown>(
         signal: controller.signal,
       });
 
-      if (await isClientVersionUnsupported(response)) {
+      if (await recordClientVersionRefusal(response)) {
         throw new ClientVersionUnsupportedError();
       }
       if ((response.status === 401 || response.status === 403) && !forceRefresh) {

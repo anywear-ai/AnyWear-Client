@@ -12,6 +12,7 @@ import {
 } from '../../lib/batchUpload';
 import useAccessibleDialog from '../../hooks/useAccessibleDialog';
 import { isAndroidApp } from '../../lib/platform';
+import { isClientVersionRefused } from '../../store/clientVersionRefusalStore';
 
 interface Props {
   isOpen: boolean;
@@ -167,6 +168,9 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
       if (settledPhoto?.status === 'created') {
         onSuccess();
       } else if (settledPhoto?.status === 'failed') {
+        // The batch can settle after the shell unmounted; a native alert is not
+        // unmounted with it, so the refusal guard suppresses the dialog.
+        if (isClientVersionRefused()) return;
         alert(`Failed to upload image: ${settledPhoto.error ?? 'Unknown error'}`);
       }
     }

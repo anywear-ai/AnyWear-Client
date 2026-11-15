@@ -1,13 +1,15 @@
 import { lazy, Suspense, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './store/authStore';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useClientVersionRefusalStore } from './store/clientVersionRefusalStore';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { queryClient } from './lib/queryClient';
 import { Hub } from 'aws-amplify/utils';
 import FullPageLoading from './components/FullPageLoading';
+import UpdateRequiredScreen from './components/UpdateRequiredScreen';
 import AuthGate from './components/AuthGate';
 import AuthLayout from './layouts/AuthLayout';
 import MainLayout from './layouts/MainLayout';
-import { registerProfileQueryPolicy } from './lib/profileQueryPolicy';
 
 const RegisterPage = lazy(() => import('./pages/auth/RegisterPage'));
 const VerifyEmailPage = lazy(() => import('./pages/auth/VerifyEmailPage'));
@@ -16,10 +18,6 @@ const WardrobePage = lazy(() => import('./pages/wardrobe/WardrobePage'));
 const MirrorPage = lazy(() => import('./pages/mirror/MirrorPage'));
 const DashboardPage = lazy(() => import('./pages/dashboard/DashboardPage'));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage'));
-
-const queryClient = new QueryClient();
-// Every `useGetUsersMe` consumer inherits the one retry policy registered here.
-registerProfileQueryPolicy(queryClient);
 
 /**
  * The authentication decision only. The profile read no longer gates the shell:
@@ -55,38 +53,50 @@ export function AuthListener() {
 }
 
 function App() {
+  // One selector: the latch flips once, from absent to present, and stays set
+  // for the life of the document. Everything below the provider — the auth
+  // listener, the gate, the router, every screen and every retry they own — is
+  // replaced by the one screen rather than patched.
+  const clientVersionRefused = useClientVersionRefusalStore((state) => state.refusal !== null);
+
   return (
     <QueryClientProvider client={queryClient}>
-      <AuthListener />
-      <AuthGate>
-        <Router>
-          <Suspense fallback={<FullPageLoading />}>
-            <Routes>
-            {/* Auth Routes */}
-            <Route element={<AuthLayout />}>
-              <Route path="/register" element={<RegisterPage />} />
-              <Route path="/verify" element={<VerifyEmailPage />} />
-              <Route path="/login" element={<LoginPage />} />
-            </Route>
+      {clientVersionRefused ? (
+        <UpdateRequiredScreen />
+      ) : (
+        <>
+          <AuthListener />
+          <AuthGate>
+            <Router>
+              <Suspense fallback={<FullPageLoading />}>
+                <Routes>
+                {/* Auth Routes */}
+                <Route element={<AuthLayout />}>
+                  <Route path="/register" element={<RegisterPage />} />
+                  <Route path="/verify" element={<VerifyEmailPage />} />
+                  <Route path="/login" element={<LoginPage />} />
+                </Route>
 
-            {/* Protected Routes */}
-            <Route
-              element={
-                <ProtectedRoute>
-                  <MainLayout />
-                </ProtectedRoute>
-              }
-            >
-              <Route path="/" element={<Navigate to="/dashboard" replace />} />
-              <Route path="/dashboard" element={<DashboardPage />} />
-              <Route path="/wardrobe" element={<WardrobePage />} />
-              <Route path="/mirror" element={<MirrorPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-            </Route>
-            </Routes>
-          </Suspense>
-        </Router>
-      </AuthGate>
+                {/* Protected Routes */}
+                <Route
+                  element={
+                    <ProtectedRoute>
+                      <MainLayout />
+                    </ProtectedRoute>
+                  }
+                >
+                  <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                  <Route path="/dashboard" element={<DashboardPage />} />
+                  <Route path="/wardrobe" element={<WardrobePage />} />
+                  <Route path="/mirror" element={<MirrorPage />} />
+                  <Route path="/settings" element={<SettingsPage />} />
+                </Route>
+                </Routes>
+              </Suspense>
+            </Router>
+          </AuthGate>
+        </>
+      )}
     </QueryClientProvider>
   );
 }

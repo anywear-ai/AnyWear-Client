@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchAuthSession } from 'aws-amplify/auth';
 import { ClientVersionUnsupportedError, SseIdleTimeoutError, connectSse } from './sse';
 import { CLIENT_VERSION } from './client-version';
+import { useClientVersionRefusalStore } from '../store/clientVersionRefusalStore';
 
 vi.mock('aws-amplify/auth', () => ({
   fetchAuthSession: vi.fn(),
@@ -23,6 +24,7 @@ describe('connectSse', () => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+    useClientVersionRefusalStore.setState({ refusal: null });
     vi.mocked(fetchAuthSession).mockResolvedValue({
       tokens: { accessToken: { toString: () => 'access-token' } },
     } as Awaited<ReturnType<typeof fetchAuthSession>>);
@@ -92,13 +94,16 @@ describe('connectSse', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  it('treats a CLIENT_VERSION_UNSUPPORTED 400 as terminal', async () => {
+  it('treats a CLIENT_VERSION_UNSUPPORTED 400 as terminal and records the parsed refusal', async () => {
     const onEvent = vi.fn();
     const onError = vi.fn();
     const onStateChange = vi.fn();
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
     const fetchMock = vi.fn().mockResolvedValue(new Response(
-      JSON.stringify({ error: 'CLIENT_VERSION_UNSUPPORTED' }),
+      JSON.stringify({
+        error: 'CLIENT_VERSION_UNSUPPORTED',
+        details: { minimum_client_version: 9, received_client_version: 8 },
+      }),
       { status: 400, headers: { 'content-type': 'application/json' } },
     ));
     vi.stubGlobal('fetch', fetchMock);
@@ -115,6 +120,13 @@ describe('connectSse', () => {
     expect(error).toBeInstanceOf(ClientVersionUnsupportedError);
     expect(String(error)).toContain('CLIENT_VERSION_UNSUPPORTED');
 
+    // The stream's own detector feeds the same latch the REST path writes.
+    expect(useClientVersionRefusalStore.getState().refusal).toEqual({
+      minimumClientVersion: 9,
+      receivedClientVersion: 8,
+      detailsReported: true,
+    });
+
     // A retry would be scheduled within a couple of milliseconds; wait longer
     // than that and prove the connection stayed closed.
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -122,6 +134,25 @@ describe('connectSse', () => {
     expect(onStateChange).toHaveBeenCalledWith('closed');
     expect(onStateChange).not.toHaveBeenCalledWith('reconnecting');
     expect(onEvent).not.toHaveBeenCalled();
+  });
+
+  it('latches a stream refusal whose details is absent', async () => {
+    const onError = vi.fn();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: 'CLIENT_VERSION_UNSUPPORTED' }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    )));
+
+    connectSse('/events', vi.fn(), { initialRetryMs: 1, maxRetryMs: 1, onError });
+
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(onError.mock.calls[0][0]).toBeInstanceOf(ClientVersionUnsupportedError);
+    expect(useClientVersionRefusalStore.getState().refusal).toEqual({
+      minimumClientVersion: null,
+      receivedClientVersion: null,
+      detailsReported: false,
+    });
   });
 
   it('reconnects after a 400 that is not a Client version rejection', async () => {

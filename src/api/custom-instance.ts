@@ -1,7 +1,10 @@
 import Axios, { AxiosError, AxiosRequestConfig, InternalAxiosRequestConfig } from 'axios';
 import { fetchAuthSession } from 'aws-amplify/auth';
 import { CLIENT_VERSION, CLIENT_VERSION_HEADER } from '../lib/client-version';
+import { getClientVersionRefusal } from '../lib/client-version-refusal';
+import { queryClient } from '../lib/queryClient';
 import { useAuthStore } from '../store/authStore';
+import { isClientVersionRefused, useClientVersionRefusalStore } from '../store/clientVersionRefusalStore';
 
 export const AXIOS_INSTANCE = Axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000' });
 
@@ -46,7 +49,23 @@ AXIOS_INSTANCE.interceptors.request.use(
 AXIOS_INSTANCE.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
-    if (error.response?.status === 401) {
+    // A terminal refusal is a fact about the build, not this request's failure,
+    // so it is recognised before the 401 branch and before the network retry.
+    // The original error is rejected unchanged: `batchUpload` treats a missing
+    // status as transient, so a wrapper would make the batch upload retry the
+    // refusal. The cancel runs in the same synchronous block as the latch.
+    const refusal = getClientVersionRefusal(error);
+    if (refusal) {
+      useClientVersionRefusalStore.getState().recordRefusal(refusal);
+      void queryClient.cancelQueries();
+      return Promise.reject(error);
+    }
+
+    // A 401 arriving after the refusal must not sign out or navigate to a login
+    // page that calls no Service route: that redirect is a full document load,
+    // which would clear the refusal and swap the blocking screen for a page one
+    // sign-in away from the same refusal.
+    if (error.response?.status === 401 && !isClientVersionRefused()) {
       const currentPath = window.location.pathname;
       if (currentPath !== '/login' && currentPath !== '/register') {
         // logout() destroys the persisted session even when the SDK sign-out rejects and records

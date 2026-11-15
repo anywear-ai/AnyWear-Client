@@ -275,7 +275,9 @@ project elevation token.
 Wardrobe cards gain `hover:shadow-md`. Overlays stack in three bands: `z-10` for the
 Add/Details dialogs, `z-50` for outfit dialogs, the Amplify bootstrap overlay, and the
 history image viewer. The `z-50` full-page `FullPageLoading` overlay is now the bootstrap
-splash only — the sole full-page state. A profile read, a route-module wait and a
+splash only. There are two full-page states, not one: that bootstrap splash, and the
+blocking update-required screen, which replaces the whole shell — navigation included —
+when the Service refuses this Client version. A profile read, a route-module wait and a
 route-module failure are all in-page surfaces inside the content column, beside the
 navigation. These three shadows are the whole elevation system; the document
 format defines no token group for elevation, so it stays in prose.
@@ -315,6 +317,7 @@ composes the utilities below.
 | Credit pill | `rounded-full px-3 py-1.5 text-sm font-medium`. A known balance is colored by remaining credits: green above 2, amber at 1–2, red at 0. With no profile (or a null balance) it states the unknown state instead of `0/10`: `bg-gray-100 text-gray-600`, the text `Credits unavailable`, and `aria-label="Daily credits unavailable"`. |
 | Page-area route loading card | Rendered inside `MainLayout` and `AuthLayout` as the keyed `Suspense` fallback, sized to the content column (`rounded-xl border border-gray-200 bg-white px-6 py-12 text-center shadow-sm`), never `fixed` and never full-screen, so the navigation stays usable. `role="status"`; an `aria-hidden` spinner; the visible sentence `Loading {destination}...` where the destination is `dashboard`, `wardrobe`, `the mirror`, `settings`, `sign in`, `registration` or `email verification` (anything else is `page`). |
 | Route error card | The in-page card for a route subtree whose module failed to load: `role="alert"`, `rounded-xl border border-gray-200 bg-white p-6 text-center shadow-sm`, heading `This page didn't load`, body `The page could not be loaded. Check your connection and reload the app.`, one `Reload` button and the router links `Back to dashboard` and `Back to wardrobe`. Reload is the only recovery control, because React caches a rejected `lazy()` promise and a remount re-throws; the links only navigate. |
+| Update-required screen | The blocking full-page card shown in place of the whole shell when the Service refuses this Client version with `400 CLIENT_VERSION_UNSUPPORTED`: `fixed inset-0 z-50` on `bg-gray-100`, holding a `max-w-lg` white card with `rounded-xl border border-gray-200 p-6 text-center shadow-sm` and `role="alert"`. It states the required version and this build's version, then offers exactly one platform action: on the web build a `Reload` button that reloads the document; in the Android and desktop shells a read-only `text` field on `bg-gray-50` and `border-gray-300` whose value is the Releases page address, with one `Copy` button beside it, and the desktop variant also states that no desktop build is published. Nothing on it offers a retry, a wait, a pending state or a navigation, and when the Clipboard API is absent or rejects, `Copy` selects the field's whole value and the hint names the gesture instead of claiming the copy happened. |
 | Profile notice | Inside `MainLayout` above the routed page, in normal flow and never full-page or `fixed`. Pending: a `role="status"` white notice with the sentence `Checking your profile...`. Failure, after the shared query policy's retries: a `role="status"` amber notice (`bg-amber-100 text-amber-800`) with `We couldn't load your profile. Some features may be unavailable until it loads.` and a `Retry` button that re-runs `GET /users/me` (disabled while fetching). It renders nothing once a profile exists, including when a cached profile survives a failed refetch, and it never replaces the navigation or the page. |
 | Weather states | Pending: a `role="status"` card with the visible label `Loading weather...` and `aria-hidden` pulse placeholders; no `Set Location` and no error card. 404: the `Set Location` card. Any other failure: the sentence `Unable to load weather data. Please try again later.` and a `Retry` button that calls the query's `refetch()`; cached data stays on screen through a failed refresh. |
 | Unknown credit state | With no profile the Mirror disables its primary action, which reads `Credits Unavailable`, and states `Your credit balance is unavailable. Try-on is disabled until your profile loads.` The history section's retry blocker reads `Your credit balance is unavailable.` A known zero balance keeps `Out of Credits` and `Out of daily credits. Credits reset at midnight.` |
@@ -373,4 +376,6 @@ duration, easing, or animation library is defined.
   change.
 - Don't claim WCAG conformance, measured contrast, or device parity from source inspection
   alone.
+- Don't give a terminal, non-dismissible state a way to wait, retry or navigate away: the
+  update-required screen names one way to a new build and nothing else.
 - Don't move a defect into this document. Fix it, or track it in a GitHub issue.

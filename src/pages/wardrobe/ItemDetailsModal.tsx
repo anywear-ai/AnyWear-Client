@@ -10,6 +10,7 @@ import { prepareImageForUpload } from '../../lib/imagePreparation';
 import { getErrorMessage } from '../../lib/errors';
 import useAccessibleDialog from '../../hooks/useAccessibleDialog';
 import { isAndroidApp } from '../../lib/platform';
+import { isClientVersionRefused } from '../../store/clientVersionRefusalStore';
 
 /** #140's terminal code: the provider cannot decode the stored image format. */
 const INPUT_IMAGE_UNSUPPORTED_FORMAT_CODE = 'input_image_unsupported_format';
@@ -159,6 +160,10 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
       onSuccess();
     } catch (error) {
       console.error('Failed to update item:', error);
+      // A native alert is not unmounted with the React tree, so a failure that
+      // settles after the shell is gone would raise a dialog over the blocking
+      // screen. The guard reads the one global state; it is not a recogniser.
+      if (isClientVersionRefused()) return;
       alert('Failed to update item');
     }
   };
@@ -170,6 +175,7 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
       onSuccess();
     } catch (error) {
       console.error('Failed to delete item:', error);
+      if (isClientVersionRefused()) return;
       alert('Failed to delete item');
     }
   };
@@ -182,6 +188,7 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
       onSuccess();
     } catch (error) {
       console.error('Failed to re-tag item:', error);
+      if (isClientVersionRefused()) return;
       alert('Failed to start re-tagging');
     }
   };

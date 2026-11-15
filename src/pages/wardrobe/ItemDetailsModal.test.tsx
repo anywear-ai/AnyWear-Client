@@ -38,6 +38,7 @@ import {
   usePostWardrobeItemsItemIdRetag,
 } from '../../api/endpoints/wardrobe/wardrobe';
 import type { GetWardrobe200Item } from '../../api/model/getWardrobe200Item';
+import { useClientVersionRefusalStore } from '../../store/clientVersionRefusalStore';
 
 const postMock = vi.mocked(AXIOS_INSTANCE.post);
 
@@ -352,6 +353,63 @@ describe('ItemDetailsModal', () => {
     expect(document.body.style.overflow).toBe('');
   });
 
+  describe('the failure alerts around a latched refusal', () => {
+    beforeEach(() => {
+      useClientVersionRefusalStore.setState({ refusal: null });
+    });
+
+    afterEach(() => {
+      useClientVersionRefusalStore.setState({ refusal: null });
+    });
+
+    function latchRefusal() {
+      useClientVersionRefusalStore.setState({
+        refusal: { minimumClientVersion: 9, receivedClientVersion: 8, detailsReported: true },
+      });
+    }
+
+    /** Every failure path in this dialog, driven through its own rejecting mutation. */
+    function stubFailures() {
+      const updateItem = vi.fn().mockRejectedValue(new Error('failed'));
+      const deleteItem = vi.fn().mockRejectedValue(new Error('failed'));
+      const retagItem = vi.fn().mockRejectedValue(new Error('failed'));
+      vi.mocked(usePatchWardrobeItemsId).mockReturnValue({ mutateAsync: updateItem, isPending: false } as any);
+      vi.mocked(useDeleteWardrobeItemsId).mockReturnValue({ mutateAsync: deleteItem, isPending: false } as any);
+      vi.mocked(usePostWardrobeItemsItemIdRetag).mockReturnValue({ mutateAsync: retagItem, isPending: false } as any);
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      return { updateItem, deleteItem, retagItem };
+    }
+
+    async function driveEveryFailure() {
+      const mocked = stubFailures();
+      renderModal(makeItem());
+
+      fireEvent.click(screen.getByRole('button', { name: 'Re-tag' }));
+      await waitFor(() => expect(mocked.retagItem).toHaveBeenCalledTimes(1));
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+      await waitFor(() => expect(mocked.deleteItem).toHaveBeenCalledTimes(1));
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+      await waitFor(() => expect(mocked.updateItem).toHaveBeenCalledTimes(1));
+    }
+
+    it('still raises the three alerts while nothing is refused', async () => {
+      await driveEveryFailure();
+
+      await waitFor(() => expect(window.alert).toHaveBeenCalledTimes(3));
+      expect(window.alert).toHaveBeenCalledWith('Failed to start re-tagging');
+      expect(window.alert).toHaveBeenCalledWith('Failed to delete item');
+      expect(window.alert).toHaveBeenCalledWith('Failed to update item');
+    });
+
+    it('raises no alert once the Client version refusal is latched', async () => {
+      latchRefusal();
+
+      await driveEveryFailure();
+
+      expect(window.alert).not.toHaveBeenCalled();
+    });
+  });
   describe('in the desktop client', () => {
     beforeEach(() => {
       stubDesktopApp();

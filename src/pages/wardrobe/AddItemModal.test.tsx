@@ -17,6 +17,7 @@ import { CONFIRM_CHECK_WARDROBE_HINT } from '../../lib/batchUpload';
 import { HEIC_UNSUPPORTED_MESSAGE } from '../../lib/imageUpload';
 import { prepareImageForUpload } from '../../lib/imagePreparation';
 import { usePostWardrobeUpload, usePostWardrobeUploadUrl } from '../../api/endpoints/wardrobe/wardrobe';
+import { useClientVersionRefusalStore } from '../../store/clientVersionRefusalStore';
 
 const FOCUSABLE = 'a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])';
 
@@ -58,6 +59,7 @@ describe('AddItemModal', () => {
     // every test declares the behaviour it depends on.
     getUploadUrl.mockReset();
     confirmUpload.mockReset();
+    useClientVersionRefusalStore.setState({ refusal: null });
     document.body.style.overflow = '';
     vi.mocked(usePostWardrobeUploadUrl).mockReturnValue({ mutateAsync: getUploadUrl } as any);
     vi.mocked(usePostWardrobeUpload).mockReturnValue({ mutateAsync: confirmUpload } as any);
@@ -394,6 +396,23 @@ describe('AddItemModal', () => {
     expect(onSuccess).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog', { name: 'Add Wardrobe Item' })).toBeInTheDocument();
+  });
+
+  it('suppresses that alert once the Client version refusal is latched', async () => {
+    useClientVersionRefusalStore.setState({
+      refusal: { minimumClientVersion: 9, receivedClientVersion: 8, detailsReported: true },
+    });
+    getUploadUrl.mockRejectedValue(new Error('reserve failed'));
+    const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
+
+    fireEvent.change(picker(container), { target: { files: [photo('only.png')] } });
+    fireEvent.submit(container.querySelector('form')!);
+
+    // The run starts disabled and re-enables once it settles, which is after the
+    // alert decision has run.
+    expect(picker(container)).toBeDisabled();
+    await waitFor(() => expect(picker(container)).toBeEnabled());
+    expect(window.alert).not.toHaveBeenCalled();
   });
 
   it('starts no photo that had not started when the dialog closes mid-run', async () => {

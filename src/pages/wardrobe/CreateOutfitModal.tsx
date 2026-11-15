@@ -3,7 +3,43 @@ import { usePostOutfits, usePatchOutfitsId, useDeleteOutfitsId } from '../../api
 import { useGetWardrobe } from '../../api/endpoints/wardrobe/wardrobe';
 import type { GetWardrobe200Item } from '../../api/model/getWardrobe200Item';
 import type { GetOutfits200OutfitsItem } from '../../api/model/getOutfits200OutfitsItem';
+import type { DeleteOutfitsId502 } from '../../api/model/deleteOutfitsId502';
 import useAccessibleDialog from '../../hooks/useAccessibleDialog';
+import { getHttpStatus } from '../../lib/errors';
+import { outfitHasActiveGeneration } from '../../lib/outfit-look';
+
+/**
+ * The confirmation states one number, the generation count the Service reports
+ * as the generations this delete removes. A true zero is not a number the user
+ * needs, so it keeps the plain sentence; a count the Service could not resolve
+ * keeps the wording without inventing one.
+ */
+function deleteConfirmationCopy(outfit: GetOutfits200OutfitsItem): string {
+  const count = outfit.generationCount;
+  if (typeof count === 'number' && count > 0) {
+    const records = count === 1 ? '1 try-on record' : `${count} try-on records`;
+    return `Delete this outfit? This also deletes its ${records} and their images. This cannot be undone.`;
+  }
+  if (count === 0) return 'Delete this outfit? This cannot be undone.';
+  return 'Delete this outfit? This also deletes its try-on records and images. This cannot be undone.';
+}
+
+/** The fact a delete adds to the confirmation while a generation is running. */
+const RUNNING_TRY_ON_COPY = 'A try-on that is still running is cancelled and its credit is not returned.';
+
+/**
+ * The Service's `502 OBJECT_DELETION_INCOMPLETE` body, read from the axios
+ * rejection. Those rows are deleted; the retained keys are still owed by an
+ * open cleanup manifest, so this is a completed delete from the caller's view.
+ * The generated error type keeps the member names aligned with the contract.
+ */
+function objectDeletionIncomplete(error: unknown): DeleteOutfitsId502 | null {
+  if (typeof error !== 'object' || error === null) return null;
+  const response = (error as { response?: { status?: number; data?: unknown } }).response;
+  if (response?.status !== 502) return null;
+  const data = response.data as Partial<DeleteOutfitsId502> | null | undefined;
+  return data?.error === 'OBJECT_DELETION_INCOMPLETE' ? (data as DeleteOutfitsId502) : null;
+}
 
 interface CreateOutfitModalProps {
   isOpen: boolean;
@@ -11,10 +47,12 @@ interface CreateOutfitModalProps {
   onSuccess: () => void;
   /** The saved outfit, so the page can offer the confirmed look action right after a save. */
   onSaved?: (outfit: { id: string; name?: string | null }) => void;
+  /** A delete the Service completed while it still owes stored-image cleanup. */
+  onNotice?: (notice: { retainedObjectKeys: number }) => void;
   outfit?: GetOutfits200OutfitsItem;
 }
 
-export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved, outfit }: CreateOutfitModalProps) {
+export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved, onNotice, outfit }: CreateOutfitModalProps) {
   const dialogRef = useAccessibleDialog(onClose, isOpen);
   const isEditMode = !!outfit;
   const [name, setName] = useState(outfit?.name ?? '');
@@ -22,6 +60,7 @@ export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved,
     outfit?.wearableItems?.map((item) => item.id) ?? [],
   );
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteFailure, setDeleteFailure] = useState<string | null>(null);
 
   const { data: wardrobeResponse } = useGetWardrobe({});
   const { mutate: createOutfit, isPending: isCreating } = usePostOutfits();
@@ -66,6 +105,7 @@ export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved,
 
   const handleDelete = () => {
     if (!outfit) return;
+    setDeleteFailure(null);
     deleteOutfit(
       { id: outfit.id },
       {
@@ -73,12 +113,37 @@ export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved,
           onSuccess();
           onClose();
         },
+        onError: (error: unknown) => {
+          const status = getHttpStatus(error);
+          // A 404 is already deleted; a 502 OBJECT_DELETION_INCOMPLETE deleted
+          // every row and still owes stored-image cleanup to the worker reaper.
+          // Both finish the delete for the user, so neither is a failure here.
+          if (status === 404) {
+            onSuccess();
+            onClose();
+            return;
+          }
+          const incomplete = objectDeletionIncomplete(error);
+          if (incomplete) {
+            const retained = incomplete.details?.retained_object_keys;
+            const retainedObjectKeys = Array.isArray(retained) ? retained.length : 0;
+            if (retainedObjectKeys > 0) onNotice?.({ retainedObjectKeys });
+            onSuccess();
+            onClose();
+            return;
+          }
+          // Anything else keeps the dialog open with a sentence naming the
+          // status, so the user can see what happened; no retry control is added.
+          setDeleteFailure(typeof status === 'number' ? `Delete failed with status ${status}.` : 'Delete failed.');
+        },
       },
     );
   };
 
   const isPending = isCreating || isUpdating || isDeleting;
   const submitLabel = isEditMode ? (isUpdating ? 'Saving...' : 'Save Changes') : (isCreating ? 'Creating...' : 'Create Outfit');
+  const showsRunningTryOn = !!outfit && outfitHasActiveGeneration(outfit);
+  const confirmationCopy = outfit ? deleteConfirmationCopy(outfit) : '';
 
   if (!isOpen) return null;
 
@@ -146,21 +211,29 @@ export default function CreateOutfitModal({ isOpen, onClose, onSuccess, onSaved,
           <div className="flex justify-between items-center">
             {isEditMode ? (
               showDeleteConfirm ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-red-600">Delete this outfit? This cannot be undone.</span>
-                  <button
-                    onClick={handleDelete}
-                    disabled={isDeleting}
-                    className="px-3 py-1.5 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
-                  >
-                    {isDeleting ? 'Deleting...' : 'Confirm'}
-                  </button>
-                  <button
-                    onClick={() => setShowDeleteConfirm(false)}
-                    className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                  >
-                    Cancel
-                  </button>
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-red-600">{confirmationCopy}</span>
+                    <button
+                      onClick={handleDelete}
+                      disabled={isDeleting}
+                      className="px-3 py-1.5 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+                    >
+                      {isDeleting ? 'Deleting...' : 'Confirm'}
+                    </button>
+                    <button
+                      onClick={() => setShowDeleteConfirm(false)}
+                      className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  {showsRunningTryOn && (
+                    <span className="text-sm text-red-600">{RUNNING_TRY_ON_COPY}</span>
+                  )}
+                  {deleteFailure && (
+                    <p role="alert" className="text-sm text-red-700">{deleteFailure}</p>
+                  )}
                 </div>
               ) : (
                 <button

@@ -57,6 +57,48 @@ function getMaterialFromAttributes(styleAttributes: unknown): string | null {
   return typeof sa.material === 'string' ? sa.material : null;
 }
 
+type OutfitCoverState = 'look' | 'generating' | 'failed' | 'image-unavailable' | 'empty';
+
+/** The cover copy of the states that have no image to paint. */
+const COVER_PLACEHOLDER: Record<Exclude<OutfitCoverState, 'look' | 'generating'>, string> = {
+  failed: 'Last try-on failed',
+  'image-unavailable': 'Image unavailable',
+  empty: 'No look yet',
+};
+
+/**
+ * The cover the card paints, in precedence order: a completed look with a
+ * signed URL, then a running generation (which outranks the failed and empty
+ * states), then a failed last generation, then a completed look whose URL the
+ * Service could not sign, and finally no generation at all.
+ */
+function outfitCoverState(outfit: GetOutfits200OutfitsItem): OutfitCoverState {
+  if (getOutfitLookImage(outfit.look)) return 'look';
+  if (outfitHasActiveGeneration(outfit)) return 'generating';
+  if (outfit.latestGeneration?.status === 'Failed') return 'failed';
+  if (outfit.look) return 'image-unavailable';
+  return 'empty';
+}
+
+/** The placeholder sentence a cover state paints, or null when it paints an image or skeleton. */
+function coverPlaceholder(state: OutfitCoverState): string | null {
+  return state === 'look' || state === 'generating' ? null : COVER_PLACEHOLDER[state];
+}
+
+/** The action the card offers; a running generation offers none. */
+function outfitActionLabel(outfit: GetOutfits200OutfitsItem): string {
+  // A failed latest generation offers Retry even while an older completed look
+  // is still painted; otherwise a completed look (signed or not) offers New look.
+  if (outfit.latestGeneration?.status === 'Failed') return 'Retry';
+  if (outfit.look) return 'New look';
+  return 'Generate look';
+}
+
+/** The page-level notice a delete that still owes image cleanup leaves behind. */
+function cleanupNoticeText(retainedObjectKeys: number): string {
+  return `Outfit deleted. ${retainedObjectKeys} image${retainedObjectKeys === 1 ? ' is' : 's are'} still being cleaned up in the background.`;
+}
+
 export default function WardrobePage() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isOutfitModalOpen, setIsOutfitModalOpen] = useState(false);
@@ -69,6 +111,9 @@ export default function WardrobePage() {
   // Held from the confirm click until the request and its refreshes settle, so
   // the confirmation cannot start a second charge while the first one starts.
   const [isStartingLook, setIsStartingLook] = useState(false);
+  // A delete whose rows are gone while the Service still owes stored-image
+  // cleanup: the outfit is deleted, so this is a notice outside the dialog.
+  const [cleanupNotice, setCleanupNotice] = useState<{ retainedObjectKeys: number } | null>(null);
 
   const queryClient = useQueryClient();
 
@@ -340,6 +385,22 @@ export default function WardrobePage() {
         </div>
       )}
 
+      {cleanupNotice && (
+        <div
+          role="status"
+          className="mt-8 flex items-center justify-between gap-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3"
+        >
+          <p className="text-sm text-green-800">{cleanupNoticeText(cleanupNotice.retainedObjectKeys)}</p>
+          <button
+            type="button"
+            onClick={() => setCleanupNotice(null)}
+            className="rounded-lg px-2 py-1 text-sm font-medium text-green-800 hover:bg-green-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {outfits.length > 0 && (
         <div className="mt-8">
           <div className="flex justify-between items-center mb-4">
@@ -356,12 +417,12 @@ export default function WardrobePage() {
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 sm:gap-4">
             {outfits.map((outfit) => {
+              const coverState = outfitCoverState(outfit);
+              const placeholder = coverPlaceholder(coverState);
               const lookImage = getOutfitLookImage(outfit.look);
               const latestStatus = outfit.latestGeneration?.status ?? null;
               const isGenerating = outfitHasActiveGeneration(outfit);
-              const actionLabel = latestStatus === 'Failed'
-                ? 'Retry'
-                : lookImage ? 'New look' : 'Generate look';
+              const actionLabel = outfitActionLabel(outfit);
               return (
                 <article
                   key={outfit.id}
@@ -369,7 +430,7 @@ export default function WardrobePage() {
                 >
                   <button type="button" onClick={() => handleOutfitClick(outfit)} aria-label={`Edit ${outfit.name || 'outfit'}`} className="block w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-600">
                     <div className="aspect-[4/5] bg-gray-100">
-                      {lookImage ? (
+                      {coverState === 'look' && lookImage ? (
                         <CachedImage
                           src={lookImage.src}
                           cacheKey={lookImage.cacheKey}
@@ -377,10 +438,16 @@ export default function WardrobePage() {
                           data-testid={`outfit-thumbnail-${outfit.id}`}
                           className="h-full w-full object-cover"
                         />
-                      ) : (
+                      ) : placeholder ? (
                         <div className="flex h-full flex-col items-center justify-center gap-1 px-2 text-center text-sm text-gray-400">
-                          <span>{isGenerating ? 'Generating look...' : 'No look yet'}</span>
+                          <span>{placeholder}</span>
                         </div>
+                      ) : (
+                        <div
+                          data-testid={`outfit-cover-skeleton-${outfit.id}`}
+                          aria-busy="true"
+                          className="h-full w-full animate-pulse bg-gray-200"
+                        />
                       )}
                     </div>
                     <div className="p-3">
@@ -392,7 +459,7 @@ export default function WardrobePage() {
                   <div className="flex items-center justify-between gap-2 border-t border-gray-100 px-3 py-2">
                     <OutfitLookBadge status={latestStatus} />
                     {isGenerating ? (
-                      <span className="text-xs text-gray-500">Generating...</span>
+                      <span className="text-xs text-gray-500">Generating…</span>
                     ) : (
                       <button
                         type="button"
@@ -458,6 +525,7 @@ export default function WardrobePage() {
           onClose={handleOutfitModalClose}
           onSuccess={() => queryClient.invalidateQueries({ queryKey: ['/outfits'] })}
           onSaved={openGenerateLook}
+          onNotice={setCleanupNotice}
           outfit={selectedOutfit ?? undefined}
         />
       )}

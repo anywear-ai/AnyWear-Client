@@ -22,6 +22,7 @@ vi.mock('../../api/endpoints/wardrobe/wardrobe', () => ({
 
 import { usePostOutfits, usePatchOutfitsId, useDeleteOutfitsId } from '../../api/endpoints/outfits/outfits';
 import { useGetWardrobe } from '../../api/endpoints/wardrobe/wardrobe';
+import type { GetOutfits200OutfitsItem } from '../../api/model/getOutfits200OutfitsItem';
 
 function setupMocks(items: typeof mockItems = mockItems) {
   vi.mocked(useGetWardrobe).mockReturnValue({
@@ -351,7 +352,8 @@ describe('CreateOutfitModal', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
 
-    expect(screen.getByText('Delete this outfit? This cannot be undone.')).toBeDefined();
+    // An absent count keeps the wording without a number or a zero.
+    expect(screen.getByText('Delete this outfit? This also deletes its try-on records and images. This cannot be undone.')).toBeDefined();
     expect(screen.getByRole('button', { name: 'Confirm' })).toBeDefined();
     // Two Cancel buttons: one in confirmation inline, one in footer; get them all
     const cancelButtons = screen.getAllByRole('button', { name: 'Cancel' });
@@ -369,7 +371,7 @@ describe('CreateOutfitModal', () => {
 
     // Back to delete button visible, confirmation text gone
     expect(screen.getByRole('button', { name: 'Delete Outfit' })).toBeDefined();
-    expect(screen.queryByText('Delete this outfit? This cannot be undone.')).toBeNull();
+    expect(screen.queryByText('Delete this outfit? This also deletes its try-on records and images. This cannot be undone.')).toBeNull();
   });
 
   it('calls useDeleteOutfitsId on confirm delete', () => {
@@ -397,6 +399,218 @@ describe('CreateOutfitModal', () => {
     setupMocks();
     render(<CreateOutfitModal {...defaultProps} />);
     expect(screen.queryByRole('button', { name: 'Delete Outfit' })).toBeNull();
+  });
+
+  // ---- Delete-outfit confirmation and result tests (issue #312) ----
+
+  function outfitForDelete(overrides: {
+    generationCount?: number | null;
+    latestStatus?: string;
+  } = {}): GetOutfits200OutfitsItem {
+    const { generationCount, latestStatus } = overrides;
+    return {
+      ...editOutfit,
+      ...(generationCount !== undefined ? { generationCount } : {}),
+      ...(latestStatus
+        ? { latestGeneration: { id: 'gen-2', status: latestStatus, errorCode: null, createdAt: '2026-06-02T00:00:00.000Z' } }
+        : {}),
+    } as GetOutfits200OutfitsItem;
+  }
+
+  function openDeleteConfirmation() {
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
+    return screen.getByRole('dialog', { name: 'Edit Outfit' });
+  }
+
+  /** A delete mutation whose rejection is the test's axios-shaped error. */
+  function deleteRejectsWith(error: unknown) {
+    const mutate = vi.fn((_variables: { id: string }, options: { onError?: (error: unknown) => void }) => {
+      options.onError?.(error);
+    });
+    vi.mocked(useDeleteOutfitsId).mockReturnValue({ mutate, isPending: false } as any);
+    return mutate;
+  }
+
+  describe('delete confirmation copy', () => {
+    it('states the singular record count once and nothing else numeric in the sentence', () => {
+      setupMocks();
+      render(<CreateOutfitModal {...defaultProps} outfit={outfitForDelete({ generationCount: 1, latestStatus: 'Complete' })} />);
+
+      const dialog = openDeleteConfirmation();
+
+      const copy = 'Delete this outfit? This also deletes its 1 try-on record and their images. This cannot be undone.';
+      expect(screen.getByText(copy)).toBeInTheDocument();
+      // Exactly one confirmation sentence: no second count and no image count.
+      expect(screen.getAllByText(/Delete this outfit\?/)).toHaveLength(1);
+      expect(dialog).not.toHaveTextContent(/\d+ (?:images?|pictures?)/i);
+      // A terminal generation adds no running-try-on fact.
+      expect(screen.queryByText(/still running/)).toBeNull();
+    });
+
+    it('states the plural record count once', () => {
+      setupMocks();
+      render(<CreateOutfitModal {...defaultProps} outfit={outfitForDelete({ generationCount: 3 })} />);
+
+      openDeleteConfirmation();
+
+      const copy = 'Delete this outfit? This also deletes its 3 try-on records and their images. This cannot be undone.';
+      expect(screen.getByText(copy)).toBeInTheDocument();
+      expect(screen.getAllByText(/Delete this outfit\?/)).toHaveLength(1);
+      expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    });
+
+    it('renders the plain sentence and no number when the count is a true zero', () => {
+      setupMocks();
+      render(<CreateOutfitModal {...defaultProps} outfit={outfitForDelete({ generationCount: 0 })} />);
+
+      openDeleteConfirmation();
+
+      const copy = screen.getByText('Delete this outfit? This cannot be undone.');
+      expect(copy.textContent).not.toMatch(/\d/);
+      expect(screen.queryByText(/try-on record/)).toBeNull();
+    });
+
+    it('renders the no-number wording when the count is absent', () => {
+      setupMocks();
+      render(<CreateOutfitModal {...defaultProps} outfit={outfitForDelete()} />);
+
+      openDeleteConfirmation();
+
+      const copy = screen.getByText('Delete this outfit? This also deletes its try-on records and images. This cannot be undone.');
+      expect(copy.textContent).not.toMatch(/\d/);
+      expect(screen.queryByText('0')).toBeNull();
+    });
+
+    it('renders the no-number wording when the count is null', () => {
+      setupMocks();
+      render(<CreateOutfitModal {...defaultProps} outfit={outfitForDelete({ generationCount: null })} />);
+
+      openDeleteConfirmation();
+
+      const copy = screen.getByText('Delete this outfit? This also deletes its try-on records and images. This cannot be undone.');
+      expect(copy.textContent).not.toMatch(/\d/);
+    });
+
+    it.each(['Pending', 'Processing'])('adds the cancelled-running-try-on fact while the generation is %s', (status) => {
+      setupMocks();
+      render(
+        <CreateOutfitModal
+          {...defaultProps}
+          outfit={outfitForDelete({ generationCount: 2, latestStatus: status })}
+        />,
+      );
+
+      openDeleteConfirmation();
+
+      expect(screen.getByText('Delete this outfit? This also deletes its 2 try-on records and their images. This cannot be undone.')).toBeInTheDocument();
+      expect(screen.getByText('A try-on that is still running is cancelled and its credit is not returned.')).toBeInTheDocument();
+    });
+  });
+
+  describe('delete result handling', () => {
+    const incompleteDeletion = {
+      response: {
+        status: 502,
+        data: {
+          error: 'OBJECT_DELETION_INCOMPLETE',
+          message: 'The outfit was deleted; two stored images are still owed by the cleanup manifest.',
+          details: {
+            manifest_id: '11111111-1111-4111-8111-111111111111',
+            retained_object_keys: [
+              'outfit-generations/user-1/gen-1.png',
+              'outfit-generations/user-1/gen-2.png',
+            ],
+          },
+        },
+      },
+    };
+
+    it('treats a 502 OBJECT_DELETION_INCOMPLETE as a completed delete and reports the retained images', () => {
+      const onSuccess = vi.fn();
+      const onClose = vi.fn();
+      const onNotice = vi.fn();
+      setupMocks();
+      deleteRejectsWith(incompleteDeletion);
+
+      render(
+        <CreateOutfitModal
+          {...defaultProps}
+          onSuccess={onSuccess}
+          onClose={onClose}
+          onNotice={onNotice}
+          outfit={outfitForDelete({ generationCount: 2 })}
+        />,
+      );
+
+      openDeleteConfirmation();
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+      // The delete completed: the page refreshes its list and closes the modal.
+      expect(onSuccess).toHaveBeenCalledTimes(1);
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(onNotice).toHaveBeenCalledWith({ retainedObjectKeys: 2 });
+      // It is not a failure and it offers no retry control.
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.queryByText(/Delete failed/)).toBeNull();
+      expect(screen.queryByRole('button', { name: /retry/i })).toBeNull();
+    });
+
+    it('treats a 404 as an already-deleted outfit', () => {
+      const onSuccess = vi.fn();
+      const onClose = vi.fn();
+      const onNotice = vi.fn();
+      setupMocks();
+      deleteRejectsWith({ response: { status: 404, data: { error: 'NOT_FOUND', message: 'Outfit not found' } } });
+
+      render(
+        <CreateOutfitModal
+          {...defaultProps}
+          onSuccess={onSuccess}
+          onClose={onClose}
+          onNotice={onNotice}
+          outfit={outfitForDelete({ generationCount: 1 })}
+        />,
+      );
+
+      openDeleteConfirmation();
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+      expect(onSuccess).toHaveBeenCalledTimes(1);
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(onNotice).not.toHaveBeenCalled();
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('keeps the dialog open and names the failing status for any other error', () => {
+      const onSuccess = vi.fn();
+      const onClose = vi.fn();
+      setupMocks();
+      deleteRejectsWith({ response: { status: 503, data: { error: 'SERVICE_UNAVAILABLE', message: 'Try again later' } } });
+
+      render(<CreateOutfitModal {...defaultProps} onSuccess={onSuccess} onClose={onClose} outfit={outfitForDelete({ generationCount: 1 })} />);
+
+      const dialog = openDeleteConfirmation();
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+      expect(screen.getByRole('alert')).toHaveTextContent('Delete failed with status 503.');
+      expect(onClose).not.toHaveBeenCalled();
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(within(dialog).getByRole('button', { name: 'Confirm' })).toBeInTheDocument();
+    });
+
+    it('keeps the dialog open when the request never reached the Service', () => {
+      const onClose = vi.fn();
+      setupMocks();
+      deleteRejectsWith(new Error('Network Error'));
+
+      render(<CreateOutfitModal {...defaultProps} onClose={onClose} outfit={outfitForDelete({ generationCount: 1 })} />);
+
+      openDeleteConfirmation();
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+      expect(screen.getByRole('alert')).toHaveTextContent('Delete failed.');
+      expect(onClose).not.toHaveBeenCalled();
+    });
   });
 
   it('names the close control, the outfit name field, and the select-items group with its count', () => {

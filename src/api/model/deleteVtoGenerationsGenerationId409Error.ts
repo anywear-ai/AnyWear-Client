@@ -9,5 +9,5 @@ export type DeleteVtoGenerationsGenerationId409Error = typeof DeleteVtoGeneratio
 
 
 export const DeleteVtoGenerationsGenerationId409Error = {
-  RESOURCE_REFERENCED: 'RESOURCE_REFERENCED',
+  GENERATION_IN_PROGRESS: 'GENERATION_IN_PROGRESS',
 } as const;

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useEffect, useRef } from 'react';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AxiosAdapter, AxiosError, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
@@ -97,6 +97,17 @@ function axiosBadRequest(
 
 async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 20; index += 1) await Promise.resolve();
+}
+
+/** A retryable failure the interceptor does not recognise as a refusal. */
+function axiosServerError(config: InternalAxiosRequestConfig): AxiosError {
+  return new Axios.AxiosError('Request failed', 'ERR_BAD_RESPONSE', config, undefined, {
+    data: { error: 'INTERNAL_ERROR' },
+    status: 500,
+    statusText: 'Internal Server Error',
+    headers: {},
+    config,
+  } as AxiosResponse);
 }
 
 /** Drives one refusal through the real interceptor, outside the React tree. */
@@ -283,6 +294,7 @@ describe('the two 10-second reads', () => {
 
 describe('the wardrobe list a query created after the cancel', () => {
   it('issues its one queued trailing read exactly once, not four times', async () => {
+    vi.useFakeTimers();
     window.history.pushState({}, '', '/wardrobe');
 
     const wardrobeCalls: string[] = [];
@@ -298,7 +310,13 @@ describe('the wardrobe list a query created after the cancel', () => {
             releaseFirst = () => reject(axiosBadRequest(config, refusalBody(9, 8)));
           });
         }
-        throw axiosBadRequest(config, refusalBody(9, 8));
+        // The queued read is issued after the unmount, so the interceptor's
+        // `cancelQueries()` — run by the mount read's refusal — cannot reach this
+        // retryer. A second refusal here would cancel it again and hide the retry
+        // predicate, so the trailing read fails with a retryable 500 instead: the
+        // client default would retry it three times, and only the store-aware
+        // predicate refuses them.
+        throw axiosServerError(config);
       }
       return respond(config, null);
     };
@@ -307,8 +325,12 @@ describe('the wardrobe list a query created after the cancel', () => {
 
     try {
       render(<App />);
-      await waitFor(() => expect(screen.getByText('wardrobe list stub')).toBeInTheDocument());
-      await waitFor(() => expect(wardrobeCalls).toHaveLength(1));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+        await flushMicrotasks();
+      });
+      expect(screen.getByText('wardrobe list stub')).toBeInTheDocument();
+      expect(wardrobeCalls).toHaveLength(1);
 
       // The first recovery trigger joins the in-flight read; the second, landing
       // while that run is still in flight, queues exactly one trailing read.
@@ -317,20 +339,23 @@ describe('the wardrobe list a query created after the cancel', () => {
         window.dispatchEvent(new Event('focus'));
       });
 
-      // The refusal lands, the shell is replaced, and the queued read still runs.
+      // The refusal lands, the shell is replaced, and the queued read is issued
+      // after the observers it belonged to are gone.
       await act(async () => {
         releaseFirst();
         await flushMicrotasks();
       });
-      await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
-      await waitFor(() => expect(wardrobeCalls).toHaveLength(2));
+      expect(screen.getByRole('alert')).toBeInTheDocument();
+      expect(wardrobeCalls).toHaveLength(2);
 
-      // One attempt for the trailing read, not the client default's four.
+      // 8000ms covers query-core's whole default ladder for this read —
+      // 1000, 2000 and 4000 ms — so an unguarded default has made all four
+      // attempts by now. The store-aware predicate leaves exactly one.
       await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 60));
+        await vi.advanceTimersByTimeAsync(8000);
         await flushMicrotasks();
       });
-      expect(wardrobeCalls).toHaveLength(2);
+      expect(wardrobeCalls.slice(1)).toHaveLength(1);
     } finally {
       AXIOS_INSTANCE.defaults.adapter = previousAdapter;
     }

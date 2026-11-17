@@ -181,8 +181,8 @@ each of `AnyWear-Client`, `AnyWear-E2E` and `AnyWear-Infra`;
 `gh api /repos/anywear-ai/AnyWear-Client/commits/{sha}/check-runs` for the check
 name the ruleset pins. An empty answer is the finding, not a missing read: at this
 commit the first answers `[]` for each of the three repositories, `rulesets`
-answers `[]`, and `tags/protection` answers `404`, which is the evidence that only
-the source half is in force.
+answers `[]`, and `tags/protection` answers `404`. Until those reads return the
+rules, the source half is the only enforcement in force.
 
 The limit is the same for both: they bind actors who cannot change the requirement. A
 repository administrator or organisation owner can disable the rule or act under its

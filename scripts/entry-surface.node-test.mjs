@@ -5,13 +5,15 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 // #163: the repository-side census of the entry face. Client ends this change with
-// exactly three entries — one automatic check, one tag-triggered binary publication
-// (#278) and one publication entry that runs on a merge to `main` and on a manual
-// dispatch — one dispatch surface and one activation switch, and the publication
-// chain keeps the only AWS-credential job behind the credential-free verify job with
-// a credential-free record job after it and a credential-free dispatch job after
-// that. These are source assertions, read as text with no YAML dependency, so the
-// next change cannot drift the entry face without failing `pnpm run test:run`.
+// exactly four entries — one automatic check, one merge-triggered Android
+// publication with an optional prerelease publish (#322), one tag-triggered binary
+// publication (#278) and one publication entry that runs on a merge to `main` and on
+// a manual dispatch — two dispatch surfaces and one activation switch, and the
+// publication chain keeps the only AWS-credential job behind the credential-free
+// verify job with a credential-free record job after it and a credential-free
+// dispatch job after that. These are source assertions, read as text with no YAML
+// dependency, so the next change cannot drift the entry face without failing
+// `pnpm run test:run`.
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const workflowsDirectory = join(repositoryRoot, '.github', 'workflows');
@@ -22,6 +24,7 @@ const workflowFiles = readdirSync(workflowsDirectory, { withFileTypes: true })
 const read = (name) => readFileSync(join(workflowsDirectory, name), 'utf8');
 
 const automaticEntry = 'check.yml';
+const mergeAndroidEntry = 'client-beta-apk.yml';
 const tagEntry = 'client-release.yml';
 const manualEntry = 'release.yml';
 const calledWorkflows = ['build.yml', 'test.yml', 'browser.yml', 'tauri-smoke.yml'];
@@ -151,11 +154,12 @@ function envSection(workflow) {
   return rest.slice(0, next < 0 ? undefined : next);
 }
 
-test('the workflow directory contains exactly the seven repository workflows', () => {
+test('the workflow directory contains exactly the eight repository workflows', () => {
   assert.deepEqual(workflowFiles, [
     'browser.yml',
     'build.yml',
     'check.yml',
+    'client-beta-apk.yml',
     'client-release.yml',
     'release.yml',
     'tauri-smoke.yml',
@@ -163,38 +167,44 @@ test('the workflow directory contains exactly the seven repository workflows', (
   ]);
 });
 
-test('the repository exposes exactly three entries, one per trigger class', () => {
+test('the repository exposes exactly four entries, in a closed trigger map', () => {
   // An entry is a workflow with a repository event or a dispatch surface. Everything
   // else must be a called workflow, which has no entry identity of its own.
   const entries = workflowFiles.filter((name) => {
     const declared = triggers(read(name));
     return declared.some((trigger) => trigger === 'push' || trigger === 'pull_request' || trigger === 'workflow_dispatch');
   });
-  assert.deepEqual(entries, [automaticEntry, tagEntry, manualEntry]);
+  assert.deepEqual(entries, [automaticEntry, mergeAndroidEntry, tagEntry, manualEntry]);
 
-  // The three classes are mutually exclusive and each is carried by exactly one
-  // workflow: `check.yml` is the only pull-request entry, `release.yml` the only
-  // manual dispatch surface, and `client-release.yml` the only tag entry (a tag
-  // trigger with no branch filter).
+  // The trigger classes are a closed map, not mutually exclusive three ways: the
+  // repository now has two dispatch entries, so each entry's own trigger set is
+  // pinned instead of counting how many classes it belongs to.
+  const entryTriggers = {
+    [automaticEntry]: ['pull_request', 'push'],
+    [mergeAndroidEntry]: ['push', 'workflow_dispatch'],
+    [tagEntry]: ['push'],
+    [manualEntry]: ['push', 'workflow_dispatch'],
+  };
+  assert.deepEqual(
+    Object.fromEntries(entries.map((name) => [name, triggers(read(name)).sort()])),
+    entryTriggers,
+  );
+
+  // `check.yml` is the only pull-request entry, `client-release.yml` the only tag
+  // entry (a tag trigger with no branch filter), and the two dispatch entries are
+  // exactly `release.yml` (web publication) and `client-beta-apk.yml` (Android
+  // packaging plus an optional `client-beta.*` prerelease).
   const isTagEntry = (name) => {
     const on = onSection(read(name));
     return /^ {4}tags:/m.test(on) && !/^ {4}branches:/m.test(on);
   };
   assert.deepEqual(workflowFiles.filter((name) => triggers(read(name)).includes('pull_request')), [automaticEntry]);
-  assert.deepEqual(workflowFiles.filter((name) => triggers(read(name)).includes('workflow_dispatch')), [manualEntry]);
+  assert.deepEqual(workflowFiles.filter((name) => triggers(read(name)).includes('workflow_dispatch')), [mergeAndroidEntry, manualEntry]);
   assert.deepEqual(workflowFiles.filter(isTagEntry), [tagEntry]);
-  for (const name of entries) {
-    const classes = [
-      triggers(read(name)).includes('pull_request'),
-      triggers(read(name)).includes('workflow_dispatch'),
-      isTagEntry(name),
-    ].filter(Boolean).length;
-    assert.equal(classes, 1, `${name} must belong to exactly one trigger class`);
-  }
 
   // `check.yml` stays the only automatic check: it is the only workflow that runs on
   // pull requests, and the only one whose push event is a check rather than a
-  // publication tag.
+  // publication.
   const checks = workflowFiles.filter((name) => triggers(read(name)).includes('pull_request'));
   assert.deepEqual(checks, [automaticEntry]);
   assert.deepEqual(triggers(read(automaticEntry)).sort(), ['pull_request', 'push']);
@@ -202,6 +212,151 @@ test('the repository exposes exactly three entries, one per trigger class', () =
   for (const name of calledWorkflows) {
     assert.deepEqual(triggers(read(name)), ['workflow_call'], `${name} is a called workflow, not an entry`);
   }
+});
+
+// #322: the fourth entry. A merge to `main` outside the documentation set builds,
+// signs, verifies and uploads one Beta APK as that run's own 30-day artifact and
+// creates no tag and no release; a manual dispatch publishes that same run's bytes
+// as one immutable `client-beta.<n>` prerelease. The trigger shape is the same as
+// `release.yml`'s, so the two dispatch entries are distinguished by what they do
+// here, not by their triggers.
+test('#322: client-beta-apk.yml is the merge-triggered Android publication with an optional prerelease publish', () => {
+  const workflow = read(mergeAndroidEntry);
+  assert.deepEqual(jobNames(workflow), ['package-beta-apk', 'publish-beta-prerelease']);
+  assert.deepEqual(triggers(workflow).sort(), ['push', 'workflow_dispatch']);
+  assert.doesNotMatch(onSection(workflow), /^ {2}pull_request:/m, 'the APK build is not a pull-request check');
+  assert.doesNotMatch(onSection(workflow), /tags:/, 'a tag push never starts the Beta build');
+  assert.match(
+    onSection(workflow),
+    /^ {2}push:\n {4}branches: \[main\]\n {4}paths-ignore:\n {6}- '\*\*\/\*\.md'$/m,
+    'the push trigger keeps `branches: [main]` and excludes exactly the documentation set',
+  );
+  assert.doesNotMatch(workflow, /^ {4}paths:/m, 'the push trigger excludes with `paths-ignore`, not with an allowlist');
+  assert.doesNotMatch(workflow, /^ {2}workflow_dispatch:\n {4}inputs:/m, 'the dispatch takes no typed value');
+
+  // The declared list is read back from the workflow text, so the skips/starts cases
+  // evaluate what the repository declares rather than a copy of it.
+  const pushStart = workflow.indexOf('\n  push:\n');
+  assert.ok(pushStart >= 0, `${mergeAndroidEntry} must declare a \`push\` trigger`);
+  const afterPush = workflow.slice(pushStart + '\n  push:\n'.length);
+  const nextTrigger = afterPush.search(/^ {2}[a-z_]+:\n/m);
+  const push = afterPush.slice(0, nextTrigger < 0 ? undefined : nextTrigger);
+  const declared = [...push.matchAll(/^ {6}- '([^']+)'$/gm)].map((match) => match[1]);
+  assert.deepEqual(declared, ['**/*.md'], 'the declared `paths-ignore` list is exactly the one Markdown pattern');
+  const skips = (paths) => paths.every((path) => declared.some((pattern) => matchesPathFilter(pattern, path)));
+  assert.ok(skips(['README.md']), 'a documentation-only merge starts no APK build');
+  assert.ok(skips(['docs/client-release.md', 'AGENTS.md']), 'a documentation-only merge of several files starts no APK build');
+  assert.ok(!skips(['README.md', 'src/main.tsx']), 'one source file beside a document starts the APK build');
+
+  // The permission boundary: the workflow-level grant is read-only, the packaging
+  // job adds nothing, and the dispatch-only publish job is the one release write.
+  assert.equal(
+    /^permissions:\n((?: {2}[a-z0-9-]+: [a-z]+(?:\n|$))+)/m.exec(workflow)?.[1],
+    '  contents: read\n',
+    'the workflow-level permission is exactly read-only contents',
+  );
+  const packaging = jobSection(workflow, 'package-beta-apk');
+  const publish = jobSection(workflow, 'publish-beta-prerelease');
+  assert.doesNotMatch(packaging, /^ {4}permissions:/m, 'the packaging job holds only the workflow-level read grant');
+  assert.match(publish, /^ {4}permissions:\n {6}contents: write$/m, 'the publish job holds exactly the release write');
+  assert.doesNotMatch(workflow, /id-token: write|attestations: write/, 'no Beta job holds an OIDC or attestation write');
+  assert.doesNotMatch(workflow, /^ {4}environment:/m, 'no Beta job declares an environment');
+
+  // The three publication entries compile the same reviewed interface.
+  const betaConstants = (name) => ['BETA_API_BASE_URL', 'BETA_COGNITO_USER_POOL_ID', 'BETA_COGNITO_CLIENT_ID']
+    .map((constant) => new RegExp(`^ {2}${constant}: '[^']*'$`, 'm').exec(read(name))?.[0]);
+  assert.deepEqual(betaConstants(mergeAndroidEntry), betaConstants(manualEntry));
+
+  // The packaging job is a real Android packaging leg, not a stub: fail-closed
+  // credentials first, the four Rust targets, the keystore, both numbers, and the
+  // APK-only build type.
+  assert.deepEqual(
+    [...packaging.matchAll(/^ {6}- name: (.+)$/gm)].map((match) => match[1]),
+    [
+      'Require the Android signing credentials',
+      'Checkout',
+      'Setup pnpm',
+      'Setup Node',
+      'Install Dependencies',
+      'Add the Android Rust targets',
+      'Materialize the Android keystore',
+      'Derive the Beta build identity',
+      'Build the signed Beta APK',
+      'Stage the Beta assets',
+      'Verify the Beta APK signature',
+      'Write the checksums and the step summary',
+      'Upload the Beta APK',
+    ],
+  );
+  const credentialProbe = stepSection(packaging, 'Require the Android signing credentials');
+  for (const secret of ['ANDROID_KEY_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD']) {
+    assert.match(credentialProbe, new RegExp(`\\$\\{\\{ secrets\\.${secret} \\}\\}`), `the credential probe must read ${secret}`);
+    assert.match(packaging, new RegExp(`secrets\\.${secret}\\b`), `package-beta-apk must declare ${secret}`);
+  }
+  assert.match(credentialProbe, /is not configured; a Beta Android APK cannot be produced/);
+
+  const targets = stepSection(packaging, 'Add the Android Rust targets');
+  for (const target of ['aarch64-linux-android', 'armv7-linux-androideabi', 'i686-linux-android', 'x86_64-linux-android']) {
+    assert.match(targets, new RegExp(`\\b${target}\\b`), `the packaging job must install ${target}`);
+  }
+  assert.ok(
+    packaging.indexOf('Add the Android Rust targets') < packaging.indexOf('Build the signed Beta APK'),
+    'the Rust Android targets must be installed before the Android build',
+  );
+
+  const identity = stepSection(packaging, 'Derive the Beta build identity');
+  assert.match(identity, /client-version\.json/);
+  assert.match(identity, /github\.run_number/);
+  assert.match(identity, /github\.run_attempt/);
+  assert.match(identity, /-gt 99/, 'a run attempt above 99 must fail closed');
+  assert.match(identity, /-gt 99999/, 'a run number above 99999 must fail closed');
+  assert.match(identity, /-gt 209/, 'a client_version above 209 must fail closed');
+  // The cross-channel premise the runbook relies on is asserted here, in source,
+  // rather than left as a comment: every Beta code outranks every release code.
+  assert.match(identity, /client_version \* 10000000/);
+  assert.match(identity, /client-beta-apk-\$\{client_version\}/, 'the artifact name carries the fixed channel prefix');
+
+  const build = stepSection(packaging, 'Build the signed Beta APK');
+  assert.match(build, /pnpm exec tauri android build --apk/);
+  assert.doesNotMatch(build, /--aab/, 'the Beta artifact is an installable APK, never a bundle');
+  assert.doesNotMatch(workflow, /tauri android init/, 'CI never initializes the Android project');
+
+  const verify = stepSection(packaging, 'Verify the Beta APK signature');
+  assert.match(verify, /apksigner verify --print-certs/);
+  assert.match(verify, /build-tools/, 'apksigner must be resolved from the SDK build-tools');
+  assert.match(verify, /sort -V/, 'the newest build-tools version must win');
+  assert.match(verify, /"\$apk_sha256" != "\$keystore_sha256"/, "the APK's signer must be the keystore's certificate");
+
+  const summary = stepSection(packaging, 'Write the checksums and the step summary');
+  for (const fact of ['versionCode', 'versionName', 'signer certificate SHA-256', 'APK SHA-256']) {
+    assert.ok(summary.includes(fact), `the step summary must state ${fact}`);
+  }
+  assert.match(summary, /GITHUB_STEP_SUMMARY/);
+  assert.match(summary, /signed in to GitHub/, 'the summary states the artifact needs a signed-in account');
+  assert.match(summary, /30 days/, 'the summary states the 30-day retention');
+
+  const upload = stepSection(packaging, 'Upload the Beta APK');
+  assert.match(upload, /^ {10}name: \$\{\{ steps\.identity\.outputs\.artifact_name \}\}$/m);
+  assert.match(upload, /retention-days: 30/);
+  assert.match(upload, /if-no-files-found: error/);
+
+  // The publish job runs only for a dispatch, downloads this run's artifact by name,
+  // creates the beta tag create-only, and never creates a formal release tag.
+  assert.match(publish, /^ {4}needs: \[package-beta-apk\]$/m);
+  assert.match(publish, /^ {4}if: github\.event_name == 'workflow_dispatch'$/m);
+  assert.match(publish, /actions\/download-artifact@v4/);
+  assert.match(publish, /^ {10}name: \$\{\{ needs\.package-beta-apk\.outputs\.artifact_name \}\}$/m);
+  assert.match(publish, /git\/matching-refs\/tags\/client-beta\./);
+  assert.match(publish, /--paginate/);
+  assert.match(publish, /git\/refs/);
+  assert.match(publish, /--method POST/);
+  assert.doesNotMatch(workflow, /--force/, 'the tag is created create-only, never forced');
+  assert.match(publish, /--verify-tag/);
+  assert.match(publish, /--draft --prerelease --latest=false/);
+  assert.match(publish, /--draft=false --prerelease --latest=false/);
+  assert.match(publish, /sha256sum release-assets\/android\.apk/, 'the published bytes are compared with the verified file');
+  assert.match(publish, /::error::the uploaded \$\{TAG\} android\.apk/);
+  assert.doesNotMatch(workflow, /client-v[0-9*]/, 'the Beta path names no formal release tag at all');
 });
 
 test('the publication entry runs on a merge to main as well as on a manual dispatch', () => {
@@ -272,10 +427,17 @@ test('a documentation-only merge starts nothing while a mixed merge starts the p
   assert.match(operation, /^ {8}options: \[deploy\]$/m);
 });
 
-test('the dispatch surface is exactly one workflow, release.yml', () => {
+test('the dispatch surfaces are exactly the two named entries', () => {
   const manual = workflowFiles.filter((name) => triggers(read(name)).includes('workflow_dispatch'));
-  assert.deepEqual(manual, [manualEntry]);
-  assert.equal([...read(manualEntry).matchAll(/^ {2}workflow_dispatch:$/gm)].length, 1);
+  assert.deepEqual(manual, [mergeAndroidEntry, manualEntry]);
+  for (const name of manual) {
+    assert.equal([...read(name).matchAll(/^ {2}workflow_dispatch:$/gm)].length, 1, `${name} must declare the dispatch trigger once`);
+  }
+  const total = workflowFiles.reduce(
+    (count, name) => count + [...read(name).matchAll(/^ {2}workflow_dispatch:$/gm)].length,
+    0,
+  );
+  assert.equal(total, 2, 'the repository exposes exactly two dispatch surfaces');
 });
 
 test('release.yml offers exactly one required choice operation: deploy', () => {
@@ -1003,7 +1165,15 @@ test('#278: client-release.yml creates a draft, verifies it, flips it and reads 
   assert.match(publish, /gh release create "\$TAG" --repo anywear-ai\/AnyWear-Client --verify-tag --draft --prerelease --latest=false/);
   assert.match(publish, /gh release upload "\$TAG"/);
   assert.match(publish, /sha256sum -c SHA256SUMS/);
-  assert.match(publish, /gh release edit "\$TAG" --repo anywear-ai\/AnyWear-Client --draft=false --prerelease --latest=false/);
+  // #322: the formal channel publishes as a non-pre-release and holds Latest, and
+  // that happens at the one post-verification flip.
+  assert.match(publish, /gh release edit "\$TAG" --repo anywear-ai\/AnyWear-Client --draft=false --prerelease=false --latest=true/);
+  // The published read-back proves the repository's Latest names the tag through the
+  // tested script, so the Latest proof cannot be dropped while the inventory check
+  // stays green.
+  const publishedReadback = stepSection(publish, 'Verify the published release');
+  assert.match(publishedReadback, /gh api "repos\/anywear-ai\/AnyWear-Client\/releases\/latest"/);
+  assert.match(publishedReadback, /node scripts\/assert-client-release\.mjs latest --tag "\$TAG" --view latest-release\.json/);
   assert.equal([...workflow.matchAll(/gh release edit/g)].length, 1, 'the flip is the only release edit');
   assert.doesNotMatch(workflow, /--clobber/);
   assert.equal([...workflow.matchAll(/isImmutable == true/g)].length, 0, 'the pipeline does not assert an administrator-only setting');
@@ -1034,13 +1204,14 @@ test('#278: client-release.yml creates a draft, verifies it, flips it and reads 
   );
 });
 
-test('#278: both publication workflows carry the identical reviewed Beta constants', () => {
+test('#278: all three publication workflows carry the identical reviewed Beta constants', () => {
   const constants = (name) => ['BETA_API_BASE_URL', 'BETA_COGNITO_USER_POOL_ID', 'BETA_COGNITO_CLIENT_ID'].map((constant) => {
     const line = new RegExp(`^ {2}${constant}: '[^']*'$`, 'm').exec(read(name))?.[0];
     assert.ok(line, `${name} must declare ${constant} as a reviewed workflow constant`);
     return line;
   });
   assert.deepEqual(constants(tagEntry), constants(manualEntry), 'the two publication entries must compile the same interface');
+  assert.deepEqual(constants(mergeAndroidEntry), constants(manualEntry), 'the Beta APK entry must compile the same interface');
 });
 
 test('#278: client-release.yml compiles the interface into every package job', () => {

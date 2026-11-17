@@ -18,7 +18,7 @@ import {
   readSubmoduleRevision,
   signingSecretSites,
   signingSites,
-  signingWorkflow,
+  signingWorkflows,
   sourceCiCredentialBoundary,
   sourceCiCredentialBoundaryWith,
   specificationRepositorySlug,
@@ -30,7 +30,7 @@ import {
 const repositoryRoot = new URL('../', import.meta.url);
 const workflowsDirectory = new URL('.github/workflows/', repositoryRoot);
 const gitmodulesPath = new URL('.gitmodules', repositoryRoot);
-const workflowFiles = ['build.yml', 'test.yml', 'browser.yml', 'check.yml', 'client-release.yml', 'release.yml', 'tauri-smoke.yml'];
+const workflowFiles = ['build.yml', 'test.yml', 'browser.yml', 'check.yml', 'client-beta-apk.yml', 'client-release.yml', 'release.yml', 'tauri-smoke.yml'];
 const tokenActionOf = (site) => `${sourceCiCredentialBoundary.tokenAction.repository}@${site.ref}`;
 
 // The revision the specification checkout must pin, read from the `api` submodule's
@@ -90,44 +90,87 @@ test('checked-in Client source workflows stay inside the credential boundary', a
   assertWithinBoundary(await repositoryWorkflows());
 });
 
-// #278: the nine signing secrets are closed to their platform jobs in both
-// `with:` and `env:`. Tauri reads its signing material through the environment,
-// which was a blind spot before this change.
-test('#278: the signing secrets are closed to their platform jobs and scanned in env', async () => {
+// #278/#322: the nine signing secrets are closed to their `workflow:job` sites in
+// both `with:` and `env:`. Tauri reads its signing material through the environment,
+// which was a blind spot before #278, and the four `ANDROID_*` secrets are admitted
+// at exactly two sites because the merge Beta path packages Android too.
+test('#278: the signing secrets are closed to their named sites and scanned in env', async () => {
   const { documents } = await repositoryWorkflows();
-  const clientRelease = documentOf(documents, signingWorkflow);
+  const reference = /^\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}$/;
 
-  for (const [job, names] of Object.entries(signingSites)) {
-    for (const name of names) {
-      const reference = new RegExp(`\\$\\{\\{\\s*secrets\\.${name}\\s*\\}\\}`);
-      const holders = [...new Set(clientRelease.steps
-        .filter((step) => [...(step.env ?? new Map()).values()].some((value) => reference.test(value)))
-        .map((step) => step.job))];
-      assert.deepEqual(holders, [job], `${name} may be read only by ${job}`);
-      assert.equal(signingSecretSites.get(name), job);
+  // Every referencing `workflow:job` site, read from the parsed steps' env maps.
+  const holders = new Map();
+  for (const document of documents) {
+    for (const step of document.steps) {
+      for (const value of (step.env ?? new Map()).values()) {
+        const name = reference.exec(value)?.[1];
+        if (name === undefined || !signingSecretSites.has(name)) continue;
+        const site = `${document.workflow.file}:${step.job}`;
+        if (!holders.has(name)) holders.set(name, new Set());
+        holders.get(name).add(site);
+      }
     }
+  }
+
+  for (const [name, sites] of signingSecretSites) {
+    assert.deepEqual(
+      [...(holders.get(name) ?? [])].sort(),
+      [...sites].sort(),
+      `${name} may be read only at its closed sites`,
+    );
+  }
+  for (const secret of ['ANDROID_KEY_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD']) {
+    assert.deepEqual(
+      [...signingSecretSites.get(secret)].sort(),
+      ['client-beta-apk.yml:package-beta-apk', 'client-release.yml:package-android'],
+      `${secret} is admitted at exactly the two Android packaging sites`,
+    );
+    assert.ok(holders.get(secret)?.has('client-beta-apk.yml:package-beta-apk'), `${secret} is read by the Beta packaging job`);
+  }
+  for (const secret of ['WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD', 'APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_API_KEY_P8']) {
+    assert.equal(signingSecretSites.get(secret).size, 1, `${secret} stays closed to one platform site`);
   }
 
   // A step-level env read in the wrong job names the only allowed site.
   for (const [job, secret, expected] of [
-    ['package-macos', 'WINDOWS_CERTIFICATE', /step `Setup Node` env `EXTRA` reads `secrets\.WINDOWS_CERTIFICATE`, which only `client-release\.yml:package-windows` may reference/],
-    ['preflight', 'APPLE_CERTIFICATE', /step `Setup Node` env `EXTRA` reads `secrets\.APPLE_CERTIFICATE`, which only `client-release\.yml:package-macos` may reference/],
+    ['package-macos', 'WINDOWS_CERTIFICATE', /step `Setup Node` env `EXTRA` reads `secrets\.WINDOWS_CERTIFICATE`, which only `client-release\.yml:package-windows` may reference; signing is isolated per site/],
+    ['preflight', 'APPLE_CERTIFICATE', /step `Setup Node` env `EXTRA` reads `secrets\.APPLE_CERTIFICATE`, which only `client-release\.yml:package-macos` may reference; signing is isolated per site/],
   ]) {
     const workflows = await repositoryWorkflows();
-    const step = documentOf(workflows.documents, signingWorkflow).steps
+    const step = documentOf(workflows.documents, signingWorkflows[0]).steps
       .find((candidate) => candidate.job === job && candidate.uses === 'actions/setup-node@v4');
     assert.ok(step, `expected a Setup Node step in ${job}`);
     step.env = new Map([['EXTRA', `\${{ secrets.${secret} }}`]]);
     assert.throws(() => assertWithinBoundary(workflows), expected, `expected ${secret} in ${job} to be rejected`);
   }
 
-  // A job-level env read is inherited by every step, so it is scanned too.
+  // The four Android secrets name both admitted sites in the refusal, and a
+  // reference from the Beta workflow's publish job fails even though the secret is
+  // admitted in the same file.
   const jobEnv = await repositoryWorkflows();
-  const verify = documentOf(jobEnv.documents, signingWorkflow).workflow.jobs.find((job) => job.id === 'verify');
+  const verify = documentOf(jobEnv.documents, signingWorkflows[0]).workflow.jobs.find((job) => job.id === 'verify');
   verify.env = new Map([['EXTRA', '${{ secrets.ANDROID_KEY_ALIAS }}']]);
   assert.throws(
     () => assertWithinBoundary(jobEnv),
-    /job `verify` env `EXTRA` reads `secrets\.ANDROID_KEY_ALIAS`, which only `client-release\.yml:package-android` may reference/,
+    /job `verify` env `EXTRA` reads `secrets\.ANDROID_KEY_ALIAS`, which only `client-beta-apk\.yml:package-beta-apk` and `client-release\.yml:package-android` may reference; signing is isolated per site/,
+  );
+
+  const wrongJob = await repositoryWorkflows();
+  documentOf(wrongJob.documents, 'client-beta-apk.yml').steps
+    .find((step) => step.job === 'publish-beta-prerelease')
+    .env = new Map([['EXTRA', '${{ secrets.ANDROID_KEY_ALIAS }}']]);
+  assert.throws(
+    () => assertWithinBoundary(wrongJob),
+    /step `Download this run's Beta APK` env `EXTRA` reads `secrets\.ANDROID_KEY_ALIAS`, which only `client-beta-apk\.yml:package-beta-apk` and `client-release\.yml:package-android` may reference; signing is isolated per site/,
+  );
+
+  // A job-level env read is inherited by every step, so it is scanned too.
+  const inherited = await repositoryWorkflows();
+  const verifyJob = documentOf(inherited.documents, signingWorkflows[0]).workflow.jobs.find((job) => job.id === 'verify');
+  verifyJob.env = new Map([['EXTRA', '${{ secrets.ANDROID_KEYSTORE_PASSWORD }}']]);
+  assert.throws(
+    () => assertWithinBoundary(inherited),
+    /job `verify` env `EXTRA` reads `secrets\.ANDROID_KEYSTORE_PASSWORD`, which only `client-beta-apk\.yml:package-beta-apk` and `client-release\.yml:package-android` may reference; signing is isolated per site/,
   );
 
   // A reference from another workflow is refused even when the job name matches a
@@ -138,19 +181,21 @@ test('#278: the signing secrets are closed to their platform jobs and scanned in
     .env = new Map([['EXTRA', '${{ secrets.WINDOWS_CERTIFICATE }}']]);
   assert.throws(
     () => assertWithinBoundary(otherWorkflow),
-    /step `Setup Node` env `EXTRA` reads `secrets\.WINDOWS_CERTIFICATE`, which only `client-release\.yml:package-windows` may reference/,
+    /step `Setup Node` env `EXTRA` reads `secrets\.WINDOWS_CERTIFICATE`, which only `client-release\.yml:package-windows` may reference; signing is isolated per site/,
   );
 });
 
-// #278: a job-level write permission is confined to the job that holds it. The
-// pipeline has one release writer and one attestation site; a new write grant in
-// any other job fails here instead of widening what a tag run can do.
-test('#278: job-level write permissions are confined to their named jobs', async () => {
+// #278/#322: a job-level write permission is confined to the job that holds it. The
+// pipeline has two release writers, each named: the tag path's `publish` and the
+// Beta path's dispatch-only `publish-beta-prerelease`. A third `contents: write`
+// holder fails here.
+test('#278: job-level write permissions are confined to their named sites', async () => {
   for (const [file, job, permission, expected] of [
     ['client-release.yml', 'publish', ['id-token', 'write'], /job `publish` grants `id-token: write`, which only `client-release\.yml:assemble` and `release\.yml:deploy` may hold/],
-    ['client-release.yml', 'assemble', ['contents', 'write'], /job `assemble` grants `contents: write`, which only `client-release\.yml:publish` may hold/],
+    ['client-release.yml', 'assemble', ['contents', 'write'], /job `assemble` grants `contents: write`, which only `client-beta-apk\.yml:publish-beta-prerelease` and `client-release\.yml:publish` may hold/],
     ['client-release.yml', 'assemble', ['artifact-metadata', 'write'], /job `assemble` grants `artifact-metadata: write`, which is not a reviewed job permission/],
-    ['client-release.yml', 'verify', ['contents', 'write'], /job `verify` grants `contents: write`, which only `client-release\.yml:publish` may hold/],
+    ['client-release.yml', 'verify', ['contents', 'write'], /job `verify` grants `contents: write`, which only `client-beta-apk\.yml:publish-beta-prerelease` and `client-release\.yml:publish` may hold/],
+    ['client-beta-apk.yml', 'package-beta-apk', ['contents', 'write'], /job `package-beta-apk` grants `contents: write`, which only `client-beta-apk\.yml:publish-beta-prerelease` and `client-release\.yml:publish` may hold/],
     ['build.yml', 'rust-check', ['id-token', 'write'], /job `rust-check` grants `id-token: write`, which only `client-release\.yml:assemble` and `release\.yml:deploy` may hold/],
   ]) {
     const workflows = await repositoryWorkflows();
@@ -165,10 +210,15 @@ test('#278: job-level write permissions are confined to their named jobs', async
   }
 
   assert.deepEqual(Object.keys(jobPermissionSites).sort(), [
+    'client-beta-apk.yml:publish-beta-prerelease',
     'client-release.yml:assemble',
     'client-release.yml:publish',
     'release.yml:deploy',
   ]);
+  // The merge path holds no release write: the Beta workflow's only write grant is
+  // on the job a merge cannot run.
+  assert.deepEqual(jobPermissionSites['client-beta-apk.yml:publish-beta-prerelease'], ['contents: write']);
+  assert.equal(jobPermissionSites['client-beta-apk.yml:package-beta-apk'], undefined);
 });
 
 test('exactly two App-token steps reach exactly one repository and one permission each', async () => {
@@ -816,15 +866,20 @@ function insertAfter(text, needle, addition) {
   return spliceFirst(text, needle, `${needle}${addition}`);
 }
 
-/** The live workflows with `client-release.yml` replaced by the spliced text, re-parsed. */
-async function splicedSigningWorkflow(splice) {
+/**
+ * The live workflows with one packaging entry replaced by the spliced text, re-parsed.
+ * `file` defaults to the tag path so the #294 fixtures stay where they were; the
+ * #322 fixtures splice into the Beta APK workflow, because the packaging-entry rules
+ * govern both.
+ */
+async function splicedSigningWorkflow(splice, file = signingWorkflows[0]) {
   const workflows = await repositoryWorkflows();
-  const text = await readFile(new URL(signingWorkflow, workflowsDirectory), 'utf8');
+  const text = await readFile(new URL(file, workflowsDirectory), 'utf8');
   const spliced = splice(text);
   assert.notEqual(spliced, text, 'the fixture must change the checked-in workflow text');
-  const index = workflows.documents.findIndex((document) => document.workflow.file === signingWorkflow);
-  assert.ok(index >= 0, `expected a parsed ${signingWorkflow}`);
-  workflows.documents[index] = parseWorkflow(spliced, signingWorkflow);
+  const index = workflows.documents.findIndex((document) => document.workflow.file === file);
+  assert.ok(index >= 0, `expected a parsed ${file}`);
+  workflows.documents[index] = parseWorkflow(spliced, file);
   return { workflows, text: spliced };
 }
 
@@ -1040,7 +1095,7 @@ test('#294: a job-level uses in the packaging entry is rejected, stricter than r
 });
 
 test('#294: the parser fails closed on a job shape it cannot read', async () => {
-  const text = await readFile(new URL(signingWorkflow, workflowsDirectory), 'utf8');
+  const text = await readFile(new URL(signingWorkflows[0], workflowsDirectory), 'utf8');
   for (const [addition, expected] of [
     [
       '  cloud: &cloud\n    runs-on: ubuntu-latest\n    environment: beta',
@@ -1057,21 +1112,65 @@ test('#294: the parser fails closed on a job shape it cannot read', async () => 
   ]) {
     const spliced = spliceFirst(text, 'jobs:\n', `jobs:\n${addition}\n`);
     assert.notEqual(spliced, text, 'the fixture must change the checked-in workflow text');
-    assert.throws(() => parseWorkflow(spliced, signingWorkflow), expected);
+    assert.throws(() => parseWorkflow(spliced, signingWorkflows[0]), expected);
   }
 });
 
-test('#294: the packaging-entry boundary is silent on the live workflow and fails closed without it', async () => {
+test('#294: the packaging-entry boundary is silent on the live workflows and fails closed without one', async () => {
   assert.deepEqual(validateSourceCiCredentialBoundary(await repositoryWorkflows()), []);
 
-  const workflows = await repositoryWorkflows();
-  workflows.documents = workflows.documents.filter((document) => document.workflow.file !== signingWorkflow);
-  assert.deepEqual(validateSourceCiCredentialBoundary(workflows), [
-    'client-release.yml:1 `client-release.yml` was not parsed; the packaging-entry boundary is unverified',
+  // Each packaging entry is its own closed census: removing one reports exactly that
+  // file as unverified and never accepts the other as a substitute.
+  for (const file of signingWorkflows) {
+    const workflows = await repositoryWorkflows();
+    workflows.documents = workflows.documents.filter((document) => document.workflow.file !== file);
+    assert.deepEqual(validateSourceCiCredentialBoundary(workflows), [
+      `${file}:1 \`${file}\` was not parsed; the packaging-entry boundary is unverified`,
+    ]);
+  }
+});
+
+// #322: the packaging-entry rules govern both packaging workflows, so one
+// representative fixture per rule is spliced into `client-beta-apk.yml` as well.
+test('#322: the packaging-entry boundary refuses the same constructs in the Beta APK workflow', async () => {
+  /** Splice one step before the Beta packaging job's `Checkout`. */
+  const withBetaStep = (step) => (text) => spliceFirst(
+    text,
+    '      - name: Checkout\n',
+    `${step}\n\n      - name: Checkout\n`,
+  );
+
+  const environment = await splicedSigningWorkflow(
+    (text) => insertAfter(text, '    name: Package the Beta APK\n', '    environment: beta\n'),
+    'client-beta-apk.yml',
+  );
+  assert.deepEqual(validateSourceCiCredentialBoundary(environment.workflows), [
+    `client-beta-apk.yml:${lineOf(environment.text, '    environment: beta')} job \`package-beta-apk\` declares \`environment: beta\`; the packaging entry holds no GitHub Environment, so no job may declare one — the Client workflow census is authoritative in pipeline_stages.md § Protected entry points`,
+  ]);
+
+  const cloudAction = await splicedSigningWorkflow(
+    withBetaStep('      - name: Cloud credentials\n        uses: aws-actions/configure-aws-credentials@v4'),
+    'client-beta-apk.yml',
+  );
+  assert.deepEqual(validateSourceCiCredentialBoundary(cloudAction.workflows), [
+    `client-beta-apk.yml:${lineOf(cloudAction.text, '      - name: Cloud credentials')} step \`Cloud credentials\` uses \`aws-actions/configure-aws-credentials@v4\`, a cloud-credential action (AWS); the packaging entry holds no cloud principal — adopting a cloud signing mechanism amends ADR-0036 §5 and the guard's signing table in the same delivery`,
+  ]);
+
+  const role = await splicedSigningWorkflow(withWorkflowEnv(roleVariable), 'client-beta-apk.yml');
+  assert.deepEqual(validateSourceCiCredentialBoundary(role.workflows), [
+    `client-beta-apk.yml:${lineOf(role.text, 'env:\n  EXTRA:')} workflow env \`EXTRA\` reads \`vars.CLIENT_PUBLISH_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
+  ]);
+
+  const cloudCli = await splicedSigningWorkflow(
+    withBetaStep('      - name: Cloud probe\n        run: |\n          aws sts get-caller-identity'),
+    'client-beta-apk.yml',
+  );
+  assert.deepEqual(validateSourceCiCredentialBoundary(cloudCli.workflows), [
+    `client-beta-apk.yml:${lineOf(cloudCli.text, '          aws sts get-caller-identity')} step \`Cloud probe\` runs \`aws\` in its \`run:\` body; the packaging entry runs no cloud CLI`,
   ]);
 });
 
-test('#294: the packaging-entry assertions are keyed to client-release.yml, not every workflow', async () => {
+test('#294: the packaging-entry assertions are keyed to the packaging workflows, not every workflow', async () => {
   assert.deepEqual(validateSourceCiCredentialBoundary(await repositoryWorkflows()), []);
 
   // The confinement is the rule: `release.yml` is the web-publication entry and
@@ -1097,7 +1196,7 @@ test('#294: the packaging-entry assertions are keyed to client-release.yml, not 
   // per-line scan. Other validator rules also fire on this renamed document, so the
   // packaging-entry messages are filtered out by family first; the total pins the
   // else-if rule too, because a `with:` finding on the known AWS action would add one.
-  const renamed = parseWorkflow(publisherText, signingWorkflow);
+  const renamed = parseWorkflow(publisherText, signingWorkflows[0]);
   const violations = validateSourceCiCredentialBoundary({
     documents: [renamed],
     submoduleRepositories: parseGitmodules(await readFile(gitmodulesPath, 'utf8')),
@@ -1122,7 +1221,15 @@ test('#294: the guard signing names match the env-scope allowlist', async () => 
   const secretsBlock = /^ {2}secrets: \[\n([\s\S]*?)^ {2}\],/m.exec(envScopeText)?.[1];
   assert.ok(secretsBlock, 'env-scope.node-test.mjs must declare REPOSITORY_SCOPED.secrets as a list');
   const envScopeSecrets = [...secretsBlock.matchAll(/^ {4}'([A-Z0-9_]+)',$/gm)].map((match) => match[1]);
-  assert.deepEqual([...Object.values(signingSites).flat()].sort(), envScopeSecrets.filter((name) => name !== 'APP_PRIVATE_KEY').sort());
-  assert.equal(Object.values(signingSites).flat().length, 9);
+  const signingNames = [...new Set(Object.values(signingSites).flat())].sort();
+  assert.deepEqual(signingNames, envScopeSecrets.filter((name) => name !== 'APP_PRIVATE_KEY').sort());
+  assert.equal(signingNames.length, 9, 'still nine distinct signing secret names; the Beta path adds no secret');
+  // #322: nine names across four `workflow:job` sites, so the two tables stay in step
+  // about which sites admit them.
+  assert.equal(Object.keys(signingSites).length, 4, 'the four named sites admit the nine names');
+  assert.deepEqual([...signingSecretSites.keys()].sort(), signingNames);
+  for (const sites of signingSecretSites.values()) {
+    assert.ok(sites.size >= 1 && sites.size <= 2, 'a signing secret is admitted at one or two named sites, never more');
+  }
   assert.match(envScopeText, /^const ENVIRONMENT_SCOPED = \[\];$/m);
 });

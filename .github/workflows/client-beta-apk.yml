@@ -1,0 +1,500 @@
+name: Build Beta Android APK
+
+# #322: the merge-triggered Beta Android publication. A merge to `main` whose
+# changed paths are not all documentation builds, signs, verifies and uploads one
+# Beta APK as that run's own 30-day artifact, and creates no tag and no release, so
+# routine merges leave the Releases page untouched. A manual dispatch builds the
+# same verified bytes and may publish them as one immutable `client-beta.<n>`
+# prerelease, which is never Latest and never a formal release tag.
+#
+# The two jobs keep every release write off the merge path: `package-beta-apk`
+# holds only the workflow-level `contents: read` and runs on both events, while
+# `publish-beta-prerelease` holds `contents: write`, runs only for a dispatch, and
+# is the only job in this workflow that can create a tag or a release.
+#
+# Signing is isolated: `package-beta-apk` is the one site in this workflow that
+# reads the four `ANDROID_*` secrets, and `scripts/source-ci-credential-boundary.mjs`
+# fails `pnpm run test:run` for a reference from any other job.
+on:
+  # A merge whose changed files are all documentation starts nothing: every changed
+  # path matches `paths-ignore`, so the run is skipped before any job and no APK is
+  # built. One changed file outside the list still starts it, because `paths-ignore`
+  # skips only when every changed path matches. This is the same declaration
+  # `release.yml` carries, so the web publication and the APK build start and skip
+  # together.
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+  # No inputs. A dispatch means "publish this revision's Beta build", and the build
+  # identity comes from the run, never from a typed value.
+  workflow_dispatch:
+
+# A newer merge queues behind an in-flight build; it never cancels one, because a
+# cancelled run would leave that merge without the artifact the Objective promises.
+concurrency:
+  group: client-beta-apk
+  cancel-in-progress: false
+
+# The workflow-level grant. The publish job raises its own grant, and nothing else
+# in this file writes to the repository.
+permissions:
+  contents: read
+
+# The reviewed Beta interface constants, byte-identical to `release.yml` and
+# `client-release.yml`: every publication entry compiles the same interface, and a
+# changed value is a reviewed change to these workflows, not an owner setting.
+env:
+  BETA_API_BASE_URL: 'https://d1pfqujqt29n11.cloudfront.net'
+  BETA_COGNITO_USER_POOL_ID: 'ap-east-1_XqXt4Kw1L'
+  BETA_COGNITO_CLIENT_ID: '4jp37atfitq59hmjo404342int'
+
+jobs:
+  package-beta-apk:
+    name: Package the Beta APK
+    runs-on: ubuntu-latest
+    # No job-level `permissions:`: the workflow-level `contents: read` is the whole
+    # grant, so a merge can never hold a release write.
+    outputs:
+      client_version: ${{ steps.identity.outputs.client_version }}
+      version_code: ${{ steps.identity.outputs.version_code }}
+      version_name: ${{ steps.identity.outputs.version_name }}
+      short_sha: ${{ steps.identity.outputs.short_sha }}
+      artifact_name: ${{ steps.identity.outputs.artifact_name }}
+    steps:
+      # Fail closed before any compilation. This is the only job in this workflow
+      # that reads these four secrets, and it names the one that is missing.
+      - name: Require the Android signing credentials
+        shell: bash
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for name in ANDROID_KEY_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is not configured; a Beta Android APK cannot be produced"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.18.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `tauri android build` compiles the Rust crate for each Android ABI and does
+      # not install the targets itself. These four are the set a Tauri v2 Android
+      # build covers: 64-bit ARM (aarch64), 32-bit ARM (armv7), 32-bit x86 (i686)
+      # and 64-bit x86 (x86_64).
+      - name: Add the Android Rust targets
+        shell: bash
+        run: rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+
+      # Never initialize the Android project in CI: it is committed, and CI only
+      # materializes the uncommitted signing material beside it.
+      - name: Materialize the Android keystore
+        shell: bash
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          keystore="src-tauri/gen/android/anywear-release.jks"
+          printf '%s' "$ANDROID_KEY_BASE64" | base64 --decode > "$keystore"
+          # Both `keytool` and Gradle default to PKCS12, so the store type has to come
+          # from the file: a JKS keystore starts with the FEED FEED magic word.
+          if [ "$(od -An -tx1 -N4 "$keystore" | tr -d ' \n')" = "feedfeed" ]; then
+            store_type=JKS
+          else
+            store_type=PKCS12
+          fi
+          {
+            echo "storeFile=$(pwd)/src-tauri/gen/android/anywear-release.jks"
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "keyPassword=$ANDROID_KEY_PASSWORD"
+            echo "storeType=$store_type"
+          } > src-tauri/gen/android/keystore.properties
+
+      # Android refuses an install whose versionCode is lower than the installed one
+      # (INSTALL_FAILED_VERSION_DOWNGRADE), so every build of this workflow needs a
+      # distinct, increasing code — and the runbook's cross-channel rule needs every
+      # Beta build to outrank every formal release, whose code is its own
+      # `client_version` (client-release.yml's `Derive the Android versionCode from
+      # client_version` step). The composition is therefore
+      #   client_version * 10_000_000 + run_number * 100 + run_attempt
+      # `run_number` is assigned to each run of this workflow and increments with
+      # every new run; a re-run keeps it and increments `run_attempt`.
+      # The low part R = run_number * 100 + run_attempt is confined to
+      # [101, 9_999_999] < 10_000_000, so cv = floor(code / 10^7) and
+      # R = code mod 10^7 decode the pair uniquely and no two builds collide.
+      - name: Derive the Beta build identity
+        id: identity
+        shell: bash
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          client_version="$(node -p "require('./client-version.json').client_version")"
+          if ! [[ "$client_version" =~ ^[0-9]+$ ]] || [ "$client_version" -gt 209 ]; then
+            echo "::error::client-version.json carries client_version ${client_version}; the versionCode composition admits 0 to 209"
+            exit 1
+          fi
+          if ! [[ "$RUN_ATTEMPT" =~ ^[0-9]+$ ]] || [ "$RUN_ATTEMPT" -lt 1 ] || [ "$RUN_ATTEMPT" -gt 99 ]; then
+            echo "::error::run_attempt is ${RUN_ATTEMPT}; the versionCode composition admits 1 to 99"
+            exit 1
+          fi
+          if ! [[ "$RUN_NUMBER" =~ ^[0-9]+$ ]] || [ "$RUN_NUMBER" -lt 1 ] || [ "$RUN_NUMBER" -gt 99999 ]; then
+            echo "::error::run_number is ${RUN_NUMBER}; the versionCode composition admits 1 to 99999"
+            exit 1
+          fi
+          version_code=$(( client_version * 10000000 + RUN_NUMBER * 100 + RUN_ATTEMPT ))
+          short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
+          version_name="0.0.0-beta.${client_version}.${short_sha}"
+          artifact="client-beta-apk-${client_version}-${version_code}-${short_sha}"
+          {
+            echo "version_code=$version_code"
+            echo "version_name=$version_name"
+            echo "client_version=$client_version"
+            echo "short_sha=$short_sha"
+            echo "artifact_name=$artifact"
+          } >> "$GITHUB_OUTPUT"
+          echo "versionCode ${version_code}, versionName ${version_name}, artifact ${artifact}"
+
+      # `--apk` alone: the artifact is an installable APK, and the app bundle stays
+      # the release path's asset. Both numbers are stamped in the same `--config`
+      # JSON the tag path uses, because the Gradle project reads
+      # `tauri.android.versionCode` and `tauri.android.versionName` from the
+      # CLI-generated `tauri.properties`.
+      - name: Build the signed Beta APK
+        shell: bash
+        env:
+          VERSION_CODE: ${{ steps.identity.outputs.version_code }}
+          VERSION_NAME: ${{ steps.identity.outputs.version_name }}
+          VITE_API_BASE_URL: ${{ env.BETA_API_BASE_URL }}
+          VITE_COGNITO_USER_POOL_ID: ${{ env.BETA_COGNITO_USER_POOL_ID }}
+          VITE_COGNITO_CLIENT_ID: ${{ env.BETA_COGNITO_CLIENT_ID }}
+        run: |
+          android_config="$(node -e "process.stdout.write(JSON.stringify({ version: process.env.VERSION_NAME, bundle: { android: { versionCode: Number(process.env.VERSION_CODE) } } }))")"
+          pnpm exec tauri android build --apk --config "$android_config"
+
+      # The staged copy is the one file every later step reads and the one the
+      # upload carries, so nothing can rebuild, re-sign or repackage it between the
+      # verification and either upload.
+      - name: Stage the Beta assets
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          apk="$(find src-tauri/gen/android/app/build/outputs -name '*.apk' -type f | head -n 1)"
+          if [ -z "$apk" ]; then
+            echo "::error::the Android build produced no APK"
+            exit 1
+          fi
+          cp "$apk" release-assets/android.apk
+          cp dist/build-metadata.json release-assets/build-metadata.json
+
+      # `apksigner` is not on the hosted runner's PATH, so it comes from the SDK's
+      # build-tools with the newest version winning. The signer certificate is
+      # compared with the certificate of the keystore this job materialized, so an
+      # unsigned, debug-signed or differently signed APK fails the job with no
+      # artifact uploaded.
+      - name: Verify the Beta APK signature
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          sdk_roots=()
+          for root in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" /usr/local/lib/android/sdk; do
+            if [ -n "$root" ]; then
+              sdk_roots+=("$root")
+            fi
+          done
+          apksigner_bin="$(command -v apksigner 2>/dev/null || true)"
+          if [ -z "$apksigner_bin" ]; then
+            for root in "${sdk_roots[@]}"; do
+              candidate="$(ls -1 "$root"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
+              if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+                apksigner_bin="$candidate"
+                break
+              fi
+            done
+          fi
+          keytool_bin="$(command -v keytool 2>/dev/null || true)"
+          if [ -z "$keytool_bin" ] && [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/keytool" ]; then
+            keytool_bin="$JAVA_HOME/bin/keytool"
+          fi
+          if [ -z "$apksigner_bin" ]; then
+            echo "::error::apksigner was not found on PATH or in any build-tools directory under ${sdk_roots[*]}, so the Beta APK cannot be verified"
+            exit 1
+          fi
+          if [ -z "$keytool_bin" ]; then
+            echo "::error::keytool was not found on PATH or under \$JAVA_HOME/bin, so the signer certificate cannot be read"
+            exit 1
+          fi
+          # Their directories are put first on PATH, so the documented commands below
+          # run the binaries just found.
+          export PATH="$(dirname "$apksigner_bin"):$(dirname "$keytool_bin"):$PATH"
+          # A fingerprint is compared as bare lowercase hex: `apksigner` prints the
+          # digest without separators, `keytool` prints colon-separated hex.
+          sha256_of() {
+            sed -n "s/.*$1:[[:space:]]*//p" | head -n 1 | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]'
+          }
+          keystore="src-tauri/gen/android/anywear-release.jks"
+          store_type="$(sed -n 's/^storeType=//p' src-tauri/gen/android/keystore.properties | head -n 1)"
+          if [ -z "$store_type" ]; then
+            echo "::error::keystore.properties does not declare storeType, so the keystore cannot be read with the right type"
+            exit 1
+          fi
+          if ! keystore_certs="$(keytool -list -v -keystore "$keystore" -storetype "$store_type" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" 2>&1)"; then
+            echo "::error::keytool could not read the materialized keystore $keystore as $store_type"
+            exit 1
+          fi
+          keystore_sha256="$(printf '%s\n' "$keystore_certs" | sha256_of 'SHA256')"
+          if [ -z "$keystore_sha256" ]; then
+            echo "::error::keytool printed no SHA-256 fingerprint for $keystore"
+            exit 1
+          fi
+          if ! apk_certs="$(apksigner verify --print-certs release-assets/android.apk 2>&1)"; then
+            printf '%s\n' "$apk_certs"
+            echo "::error::release-assets/android.apk did not pass apksigner verification"
+            exit 1
+          fi
+          printf '%s\n' "$apk_certs"
+          apk_sha256="$(printf '%s\n' "$apk_certs" | sha256_of 'certificate SHA-256 digest')"
+          if [ "$apk_sha256" != "$keystore_sha256" ]; then
+            echo "::error::release-assets/android.apk is signed by certificate SHA-256 ${apk_sha256:-none}, but the materialized keystore certificate is $keystore_sha256"
+            exit 1
+          fi
+          printf '%s' "$apk_sha256" > signer-certificate.txt
+          echo "release-assets/android.apk is signed by the materialized keystore certificate"
+
+      # The checksum and the summary are written from the same staged file the
+      # verification proved, so the numbers a reader sees are the numbers the phone
+      # installs.
+      - name: Write the checksums and the step summary
+        shell: bash
+        env:
+          CLIENT_VERSION: ${{ steps.identity.outputs.client_version }}
+          VERSION_CODE: ${{ steps.identity.outputs.version_code }}
+          VERSION_NAME: ${{ steps.identity.outputs.version_name }}
+          ARTIFACT_NAME: ${{ steps.identity.outputs.artifact_name }}
+        run: |
+          ( cd release-assets && sha256sum android.apk > SHA256SUMS )
+          apk_file_sha256="$(cut -d' ' -f1 release-assets/SHA256SUMS)"
+          signer_sha256="$(cat signer-certificate.txt)"
+          {
+            echo '## Beta Android APK'
+            echo ''
+            echo '| field | value |'
+            echo '| --- | --- |'
+            echo "| \`client_version\` | ${CLIENT_VERSION} |"
+            echo "| \`versionCode\` | ${VERSION_CODE} |"
+            echo "| \`versionName\` | \`${VERSION_NAME}\` |"
+            echo "| source commit | \`${GITHUB_SHA}\` |"
+            echo "| signer certificate SHA-256 | ${signer_sha256} |"
+            echo "| APK SHA-256 | ${apk_file_sha256} |"
+            echo "| artifact | \`${ARTIFACT_NAME}\` (retained 30 days) |"
+            echo ''
+            echo 'Install: open this run'"'"'s page in a browser signed in to GitHub, download the'
+            echo 'artifact ZIP, extract it, and install `android.apk` through Android'"'"'s sideload'
+            echo 'prompt. The ZIP is not installable as downloaded, there is no permanent URL,'
+            echo 'and the artifact expires after 30 days.'
+            echo 'A published `client-beta.<n>` prerelease carries the same bytes as a'
+            echo 'permanent release asset.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the Beta APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-beta-prerelease:
+    name: Publish the Beta prerelease
+    needs: [package-beta-apk]
+    # The merge path must leave no tag and no release, so the repository write lives
+    # in a job a merge cannot run.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # `GH_TOKEN` is this job's only credential; `GH_REPO` gives every `gh` command
+    # its repository without a checkout, and this job needs no workspace.
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # This run's own artifact, by the name the packaging job declared. Never a
+      # cross-run download, so the bytes published are the bytes verified here.
+      - name: Download this run's Beta APK
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.package-beta-apk.outputs.artifact_name }}
+          path: release-assets
+
+      # `n` is the highest existing `client-beta.<digits>` tag plus one. The list is
+      # read from the API because this job has no checkout, `--paginate` reads every
+      # page, and the `sed` keeps only a bare `client-beta.<digits>` name so no other
+      # tag can contribute a number. The creation is create-only: the API refuses an
+      # existing ref with 422, and this workflow has no force, delete or update path,
+      # so two runs that compute the same `n` cannot both succeed.
+      - name: Create the immutable beta tag
+        id: tag
+        shell: bash
+        run: |
+          existing="$(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/client-beta." \
+              --jq '.[].ref' \
+            | sed -n 's#^refs/tags/client-beta\.\([0-9][0-9]*\)$#\1#p' \
+            | sort -n | tail -n 1
+          )"
+          n=$(( ${existing:-0} + 1 ))
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/client-beta.${n}" \
+            -f sha="${GITHUB_SHA}" > /dev/null
+          echo "n=${n}" >> "$GITHUB_OUTPUT"
+          echo "created client-beta.${n} at ${GITHUB_SHA}"
+
+      # The notes are generated here, because there is no checkout to hold a notes
+      # file, and they name the revision, the two numbers and the run.
+      - name: Write the beta release notes
+        shell: bash
+        env:
+          CLIENT_VERSION: ${{ needs.package-beta-apk.outputs.client_version }}
+          VERSION_CODE: ${{ needs.package-beta-apk.outputs.version_code }}
+          VERSION_NAME: ${{ needs.package-beta-apk.outputs.version_name }}
+        run: |
+          printf '%s\n' \
+            "Beta client build from ${GITHUB_SHA}." \
+            "" \
+            "- client_version ${CLIENT_VERSION}" \
+            "- versionCode ${VERSION_CODE}" \
+            "- versionName ${VERSION_NAME}" \
+            "- built by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" > notes.md
+
+      - name: Create the draft prerelease
+        shell: bash
+        env:
+          N: ${{ steps.tag.outputs.n }}
+          CLIENT_VERSION: ${{ needs.package-beta-apk.outputs.client_version }}
+          SHORT_SHA: ${{ needs.package-beta-apk.outputs.short_sha }}
+        run: |
+          TAG="client-beta.${N}"
+          gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag --draft --prerelease --latest=false \
+            --title "AnyWear Beta ${TAG} (client_version ${CLIENT_VERSION}, ${SHORT_SHA})" \
+            --notes-file notes.md
+
+      # Never overwrite an existing asset: a name collision is a signal, not
+      # something to paper over.
+      - name: Upload the verified assets
+        shell: bash
+        env:
+          N: ${{ steps.tag.outputs.n }}
+        run: |
+          TAG="client-beta.${N}"
+          gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" \
+            release-assets/android.apk \
+            release-assets/build-metadata.json
+
+      # The uploaded bytes are proved to be this run's bytes: the release asset is
+      # downloaded again and its SHA-256 compared with the local file the packaging
+      # job verified and this job uploaded.
+      - name: Prove the uploaded bytes are the verified bytes
+        shell: bash
+        env:
+          N: ${{ steps.tag.outputs.n }}
+        run: |
+          TAG="client-beta.${N}"
+          mkdir -p downloaded
+          gh release download "$TAG" --repo "${GITHUB_REPOSITORY}" --pattern android.apk --dir downloaded
+          want="$(sha256sum release-assets/android.apk | cut -d' ' -f1)"
+          got="$(sha256sum downloaded/android.apk | cut -d' ' -f1)"
+          if [ -z "$want" ] || [ "$want" != "$got" ]; then
+            echo "::error::the uploaded ${TAG} android.apk is ${got:-missing}, not the verified ${want:-missing}"
+            exit 1
+          fi
+          echo "the uploaded ${TAG} android.apk is the verified ${want}"
+
+      # Read the draft back — state, tag and asset inventory — before the flip.
+      - name: Verify the uploaded draft
+        shell: bash
+        env:
+          N: ${{ steps.tag.outputs.n }}
+        run: |
+          export TAG="client-beta.${N}"
+          gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json isDraft,isPrerelease,tagName,assets > uploaded.json
+          node -e '
+            const view = require("./uploaded.json");
+            const problems = [];
+            if (view.tagName !== process.env.TAG) problems.push(`names tag ${view.tagName}`);
+            if (view.isDraft !== true) problems.push("is not a draft");
+            if (view.isPrerelease !== true) problems.push("is not a prerelease");
+            const assets = (view.assets ?? []).map((asset) => asset.name).sort();
+            if (JSON.stringify(assets) !== JSON.stringify(["android.apk", "build-metadata.json"])) {
+              problems.push(`carries assets ${assets.join(", ")}`);
+            }
+            if (problems.length > 0) {
+              console.error(`::error::the draft ${process.env.TAG} ${problems.join("; ")}`);
+              process.exit(1);
+            }
+          '
+
+      # The one flip of this draft; `--prerelease` and `--latest=false` keep a beta
+      # publish from ever taking Latest from a formal release.
+      - name: Publish the prerelease
+        shell: bash
+        env:
+          N: ${{ steps.tag.outputs.n }}
+        run: |
+          TAG="client-beta.${N}"
+          gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --draft=false --prerelease --latest=false
+
+      # Read the published release back: it must be published, still a prerelease,
+      # still the same tag, still exactly the two assets.
+      - name: Verify the published prerelease
+        shell: bash
+        env:
+          N: ${{ steps.tag.outputs.n }}
+        run: |
+          export TAG="client-beta.${N}"
+          gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json isDraft,isPrerelease,tagName,assets > published.json
+          node -e '
+            const view = require("./published.json");
+            const problems = [];
+            if (view.tagName !== process.env.TAG) problems.push(`names tag ${view.tagName}`);
+            if (view.isDraft !== false) problems.push("is still a draft");
+            if (view.isPrerelease !== true) problems.push("is not a prerelease");
+            const assets = (view.assets ?? []).map((asset) => asset.name).sort();
+            if (JSON.stringify(assets) !== JSON.stringify(["android.apk", "build-metadata.json"])) {
+              problems.push(`carries assets ${assets.join(", ")}`);
+            }
+            if (problems.length > 0) {
+              console.error(`::error::the published ${process.env.TAG} ${problems.join("; ")}`);
+              process.exit(1);
+            }
+            console.log(`published ${process.env.TAG}: prerelease, not latest, two assets`);
+          '

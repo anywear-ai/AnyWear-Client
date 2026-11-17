@@ -31,6 +31,7 @@ import {
   assertChecksumText,
   assertCommitIsOnMain,
   assertDeclaredAssets,
+  assertLatestRelease,
   assertLightweightTag,
   assertReleaseMonotonic,
   assertReleaseNotes,
@@ -315,14 +316,14 @@ test('the four preflight states classify absent, draft, complete and gapped rele
     { state: 'draft', complete: false, missing: [], extra: [] },
   );
   assert.deepEqual(
-    classifyReleaseState({ tag, release: { isDraft: false, isPrerelease: true, tagName: tag, assets: complete }, declaredPlatforms: platforms }),
+    classifyReleaseState({ tag, release: { isDraft: false, isPrerelease: false, tagName: tag, assets: complete }, declaredPlatforms: platforms }),
     { state: 'published', complete: true, missing: [], extra: [] },
   );
 
   const missingOne = complete.filter((asset) => !asset.name.includes('-macos-'));
   const gapped = classifyReleaseState({
     tag,
-    release: { isDraft: false, isPrerelease: true, tagName: tag, assets: missingOne },
+    release: { isDraft: false, isPrerelease: false, tagName: tag, assets: missingOne },
     declaredPlatforms: platforms,
   });
   assert.equal(gapped.state, 'published');
@@ -331,7 +332,7 @@ test('the four preflight states classify absent, draft, complete and gapped rele
 
   const extra = classifyReleaseState({
     tag,
-    release: { isDraft: false, isPrerelease: true, tagName: tag, assets: [...complete, { name: 'stray.exe' }] },
+    release: { isDraft: false, isPrerelease: false, tagName: tag, assets: [...complete, { name: 'stray.exe' }] },
     declaredPlatforms: platforms,
   });
   assert.equal(extra.complete, false);
@@ -367,7 +368,7 @@ test('the state reader verifies a published release’s own checksums and adopts
 
   const published = runtime({
     status: 0,
-    stdout: JSON.stringify({ isDraft: false, isPrerelease: true, tagName: tag, assets: complete }),
+    stdout: JSON.stringify({ isDraft: false, isPrerelease: false, tagName: tag, assets: complete }),
     stderr: '',
   });
   assert.equal(readReleaseState({ repo: 'anywear-ai/AnyWear-Client', tag, declaredPlatforms: platforms, ...published }).state, 'published');
@@ -375,7 +376,7 @@ test('the state reader verifies a published release’s own checksums and adopts
 
   const mismatch = runtime({
     status: 0,
-    stdout: JSON.stringify({ isDraft: false, isPrerelease: true, tagName: tag, assets: complete }),
+    stdout: JSON.stringify({ isDraft: false, isPrerelease: false, tagName: tag, assets: complete }),
     stderr: '',
   });
   mismatch.verifyChecksums = () => {
@@ -388,7 +389,7 @@ test('the state reader verifies a published release’s own checksums and adopts
 
   const gapped = runtime({
     status: 0,
-    stdout: JSON.stringify({ isDraft: false, isPrerelease: true, tagName: tag, assets: complete.slice(0, 2) }),
+    stdout: JSON.stringify({ isDraft: false, isPrerelease: false, tagName: tag, assets: complete.slice(0, 2) }),
     stderr: '',
   });
   assert.throws(
@@ -747,7 +748,7 @@ test('the release readback must match the declared inventory before and after th
   }));
   assert.doesNotThrow(() => assertReleaseView({
     tag,
-    view: { tagName: tag, isDraft: false, isPrerelease: true, assets: assets.map((name) => ({ name })) },
+    view: { tagName: tag, isDraft: false, isPrerelease: false, assets: assets.map((name) => ({ name })) },
     expect: 'published',
     declaredPlatforms: platforms,
     checksums,
@@ -756,7 +757,7 @@ test('the release readback must match the declared inventory before and after th
   assert.throws(
     () => assertReleaseView({
       tag,
-      view: { tagName: tag, isDraft: false, isPrerelease: true, assets: assets.filter((name) => !name.includes('-macos-')).map((name) => ({ name })) },
+      view: { tagName: tag, isDraft: false, isPrerelease: false, assets: assets.filter((name) => !name.includes('-macos-')).map((name) => ({ name })) },
       expect: 'published',
       declaredPlatforms: platforms,
       checksums,
@@ -766,7 +767,7 @@ test('the release readback must match the declared inventory before and after th
   assert.throws(
     () => assertReleaseView({
       tag,
-      view: { tagName: tag, isDraft: false, isPrerelease: true, assets: [...assets, 'stray.exe'].map((name) => ({ name })) },
+      view: { tagName: tag, isDraft: false, isPrerelease: false, assets: [...assets, 'stray.exe'].map((name) => ({ name })) },
       expect: 'published',
       declaredPlatforms: platforms,
       checksums,
@@ -776,7 +777,7 @@ test('the release readback must match the declared inventory before and after th
   assert.throws(
     () => assertReleaseView({
       tag: 'client-v0.2.0',
-      view: { tagName: tag, isDraft: false, isPrerelease: true, assets: assets.map((name) => ({ name })) },
+      view: { tagName: tag, isDraft: false, isPrerelease: false, assets: assets.map((name) => ({ name })) },
       expect: 'published',
       declaredPlatforms: platforms,
       checksums,
@@ -793,6 +794,53 @@ test('the release readback must match the declared inventory before and after th
     }),
     /still a draft after the flip/,
   );
+  // #322: the formal channel is a non-pre-release, so a release still flagged a
+  // prerelease after the flip is refused rather than accepted.
+  assert.throws(
+    () => assertReleaseView({
+      tag,
+      view: { tagName: tag, isDraft: false, isPrerelease: true, assets: assets.map((name) => ({ name })) },
+      expect: 'published',
+      declaredPlatforms: platforms,
+      checksums,
+    }),
+    /the release is still marked as a prerelease after the flip/,
+  );
+});
+
+// #322: the published read-back proves the repository's Latest names the tag, and
+// that the release it names is neither a draft nor a prerelease. Each refusal is
+// pinned, so the proof cannot degrade to a tag-string comparison in the workflow.
+test('#322: the repository Latest release must name the tag and be a non-pre-release', () => {
+  assert.deepEqual(assertLatestRelease({ tag: 'client-v0.1.0', latest: { tag_name: 'client-v0.1.0', draft: false, prerelease: false } }), {
+    tag: 'client-v0.1.0',
+  });
+  assert.throws(
+    () => assertLatestRelease({ tag: 'client-v0.1.0', latest: { tag_name: 'client-v0.0.9', draft: false, prerelease: false } }),
+    /Latest release names tag `client-v0\.0\.9`, not `client-v0\.1\.0`/,
+  );
+  assert.throws(
+    () => assertLatestRelease({ tag: 'client-v0.1.0', latest: { tag_name: 'client-v0.1.0', draft: true, prerelease: false } }),
+    /Latest release is still a draft/,
+  );
+  assert.throws(
+    () => assertLatestRelease({ tag: 'client-v0.1.0', latest: { tag_name: 'client-v0.1.0', draft: false, prerelease: true } }),
+    /Latest release is still marked as a prerelease/,
+  );
+});
+
+test('#322: the latest CLI subcommand reads the release and refuses a wrong one', () => {
+  const root = mkdtempSync(join(tmpdir(), 'client-latest-'));
+  const view = join(root, 'latest-release.json');
+  writeFileSync(view, JSON.stringify({ tag_name: 'client-v0.1.0', draft: false, prerelease: false }));
+  const accepted = runCli(['latest', '--tag', 'client-v0.1.0', '--view', view]);
+  assert.equal(accepted.status, 0, accepted.output);
+  assert.match(accepted.output, /the repository's Latest release names client-v0\.1\.0/);
+
+  const refused = runCli(['latest', '--tag', 'client-v0.2.0', '--view', view]);
+  assert.equal(refused.status, 1, refused.output);
+  assert.match(refused.output, /::error::the published release `client-v0\.2\.0` does not hold the repository's Latest/);
+  assert.match(refused.output, /names tag `client-v0\.1\.0`/);
 });
 
 test('the CLI verify command is green on the landed revision and red without the release notes', () => {

@@ -636,6 +636,24 @@ function assetNamesOf(view) {
 }
 
 /**
+ * #322: the repository's `releases/latest` names the tag, and that release is
+ * published rather than a draft or a prerelease. The endpoint is computed by
+ * GitHub, so this is checked after the bounded read; it fails with the one fact
+ * that is wrong, so a lagging endpoint is distinguishable from a wrong flag.
+ */
+export function assertLatestRelease({ tag, latest }) {
+  const violations = [];
+  if (latest === null || typeof latest !== 'object') violations.push('the repository reported no Latest release');
+  if (latest?.tag_name !== tag) violations.push(`the repository's Latest release names tag \`${latest?.tag_name ?? 'none'}\`, not \`${tag}\``);
+  if (latest?.draft !== false) violations.push('the repository\'s Latest release is still a draft');
+  if (latest?.prerelease !== false) violations.push('the repository\'s Latest release is still marked as a prerelease');
+  if (violations.length > 0) {
+    throw new ClientReleaseError(`the published release \`${tag}\` does not hold the repository's Latest: ${violations.join('; ')}`);
+  }
+  return { tag };
+}
+
+/**
  * Refuses a release readback that is not in the state `expect` names, does not
  * name the tag, or whose asset set differs from the checksum list and the
  * declared platform set.
@@ -647,7 +665,7 @@ export function assertReleaseView({ tag, view, expect, declaredPlatforms: platfo
     if (view.isDraft !== true) violations.push('the release is not a draft before the flip');
   } else if (expect === 'published') {
     if (view.isDraft !== false) violations.push('the release is still a draft after the flip');
-    if (view.isPrerelease !== true) violations.push('the release is not marked as a prerelease after the flip');
+    if (view.isPrerelease !== false) violations.push('the release is still marked as a prerelease after the flip');
   } else {
     throw new ClientReleaseError(`\`${expect}\` is not a release state; expected draft or published`);
   }
@@ -900,8 +918,15 @@ export async function main({
         log(`the ${expect} release ${tag} matches the declared platform and checksum inventory`);
         return 0;
       }
+      case 'latest': {
+        const tag = requireOption(options, 'tag');
+        const latest = JSON.parse(readFileSync(resolve(commandRoot, requireOption(options, 'view')), 'utf8'));
+        assertLatestRelease({ tag, latest });
+        log(`the repository's Latest release names ${tag}`);
+        return 0;
+      }
       default:
-        throw new ClientReleaseError(`unknown command \`${command ?? ''}\`; expected verify, preflight, state, assets, checksums or inventory`);
+        throw new ClientReleaseError(`unknown command \`${command ?? ''}\`; expected verify, preflight, state, assets, checksums, inventory or latest`);
     }
   } catch (failure) {
     error(failure instanceof Error ? `::error::${failure.message}` : `::error::${String(failure)}`);

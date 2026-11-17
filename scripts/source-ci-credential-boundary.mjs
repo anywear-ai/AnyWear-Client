@@ -52,37 +52,45 @@ export const tokenSites = [
 const specificationSite = tokenSites.find((site) => site.readsSpecification);
 
 /**
- * #278: the nine signing secrets, each closed to the one platform job that reads
- * it. GitHub scopes a repository secret to the repository, not to a job, so this
- * table is the source-level boundary: a reference from another job (or from any
- * other workflow) fails `pnpm run test:run` instead of widening what a tag run can
- * read. The workflow that may carry them is named once, so the closed table cannot
- * be satisfied by a same-named job in a different workflow.
+ * #278/#322: the nine signing secrets, each closed to the `workflow:job` sites that
+ * may read it. GitHub scopes a repository secret to the repository, not to a job, so
+ * this table is the source-level boundary: a reference from anywhere else fails
+ * `pnpm run test:run` instead of widening what a tag run or a merge run can read.
+ * The site key carries the workflow, so a same-named job in another workflow cannot
+ * alias an admitted one. The four `ANDROID_*` secrets are admitted at exactly two
+ * sites: the tag path's `package-android` and the Beta path's `package-beta-apk`.
  */
 export const signingSites = {
-  'package-windows': ['WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD'],
-  'package-macos': ['APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_API_KEY_P8'],
-  'package-android': ['ANDROID_KEY_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD'],
+  'client-release.yml:package-windows': ['WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD'],
+  'client-release.yml:package-macos': ['APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_API_KEY_P8'],
+  'client-release.yml:package-android': ['ANDROID_KEY_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD'],
+  'client-beta-apk.yml:package-beta-apk': ['ANDROID_KEY_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD'],
 };
 
-/** The only workflow whose jobs may reference a signing secret. */
-export const signingWorkflow = 'client-release.yml';
+/** The only workflows whose jobs may reference a signing secret. */
+export const signingWorkflows = ['client-release.yml', 'client-beta-apk.yml'];
 
 /**
- * #278: the write permissions a job-level `permissions:` block may grant, each
- * closed to the named job that holds it. `contents: read` is allowed on any job;
- * `release.yml:deploy` already holds `id-token: write` for its AWS boundary and is
- * named here rather than exempted implicitly.
+ * #278/#322: the write permissions a job-level `permissions:` block may grant, each
+ * closed to the named `workflow:job` that holds it. `contents: read` is allowed on
+ * any job; `release.yml:deploy` already holds `id-token: write` for its AWS boundary
+ * and is named here rather than exempted implicitly. The Beta APK workflow's
+ * dispatch-only publish job is the one further `contents: write` holder, and no job
+ * that runs on a merge holds it.
  */
 export const jobPermissionSites = {
   'client-release.yml:publish': ['contents: write'],
+  'client-beta-apk.yml:publish-beta-prerelease': ['contents: write'],
   'client-release.yml:assemble': ['id-token: write', 'attestations: write'],
   'release.yml:deploy': ['id-token: write'],
 };
 
-/** Every signing secret name, and the job each is closed to. */
+/** Every signing secret name, and the closed set of sites each may be read at. */
 export const signingSecretSites = new Map(
-  Object.entries(signingSites).flatMap(([job, names]) => names.map((name) => [name, job])),
+  [...new Set(Object.values(signingSites).flat())].map((name) => [
+    name,
+    new Set(Object.entries(signingSites).filter(([, names]) => names.includes(name)).map(([site]) => site)),
+  ]),
 );
 
 export const sourceCiCredentialBoundary = {
@@ -765,12 +773,12 @@ function cloudCommandOf(line) {
 }
 
 /**
- * The packaging-entry boundary of one parsed workflow: `client-release.yml` holds
- * no GitHub Environment, no cloud principal and no cloud CLI.
+ * The packaging-entry boundary of one parsed workflow: a packaging entry holds no
+ * GitHub Environment, no cloud principal and no cloud CLI.
  *
- * This is keyed to the one packaging entry by the caller. It is not a general rule
- * for the repository: `release.yml` is the web-publication entry and legitimately
- * assumes its own AWS role.
+ * This is keyed to the closed set of packaging entries by the caller. It is not a
+ * general rule for the repository: `release.yml` is the web-publication entry and
+ * legitimately assumes its own AWS role.
  */
 function packagingEntryViolations(document) {
   const { workflow, steps } = document;
@@ -853,12 +861,13 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
   const declaredSpecification = submoduleRepositories.get(sourceCiCredentialBoundary.specificationPath);
   const specificationOwner = declaredSpecification ? declaredSpecification.replace(/\/.*$/, '') : undefined;
 
-  /** A signing secret's only permitted site: the named job of the named workflow. */
+  /** A signing secret's only permitted sites: the named jobs of the named workflows. */
   const signingViolation = (file, job, secret, location) => {
-    const siteJob = signingSecretSites.get(secret);
-    if (siteJob === undefined) return undefined;
-    if (file === signingWorkflow && job === siteJob) return undefined;
-    return `${location} reads \`secrets.${secret}\`, which only \`${signingWorkflow}:${siteJob}\` may reference; signing is isolated per platform`;
+    const sites = signingSecretSites.get(secret);
+    if (sites === undefined) return undefined;
+    if (sites.has(`${file}:${job}`)) return undefined;
+    const closed = [...sites].sort().map((site) => `\`${site}\``).join(' and ');
+    return `${location} reads \`secrets.${secret}\`, which only ${closed} may reference; signing is isolated per site`;
   };
 
   /** A secret read outside both the App-token boundary and the signing table. */
@@ -872,9 +881,18 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
     if (permission === 'contents: read') return undefined;
     const sites = Object.entries(jobPermissionSites)
       .filter(([, permissions]) => permissions.includes(permission))
-      .map(([site]) => site);
+      .map(([site]) => site)
+      .sort();
     if (sites.length === 0) {
-      return `job \`${job}\` grants \`${permission}\`, which is not a reviewed job permission; only \`contents: write\` (\`client-release.yml:publish\`), \`id-token: write\` (\`client-release.yml:assemble\`, \`release.yml:deploy\`) and \`attestations: write\` (\`client-release.yml:assemble\`) are allowed`;
+      // Built from the table, so the message names every admitted holder and cannot
+      // drift when one is added.
+      const admitted = [...new Set(Object.values(jobPermissionSites).flat())]
+        .map((name) => `\`${name}\` (${Object.entries(jobPermissionSites)
+          .filter(([, permissions]) => permissions.includes(name))
+          .map(([site]) => `\`${site}\``)
+          .join(', ')})`)
+        .join(', ');
+      return `job \`${job}\` grants \`${permission}\`, which is not a reviewed job permission; only ${admitted} are allowed`;
     }
     if (!sites.includes(`${file}:${job}`)) {
       return `job \`${job}\` grants \`${permission}\`, which only ${sites.map((site) => `\`${site}\``).join(' and ')} may hold`;
@@ -956,15 +974,17 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
     }
   }
 
-  // The packaging entry is `client-release.yml` only. The confinement is the rule,
-  // not a convenience: `release.yml` is the web-publication entry, declares its own
-  // `environment:` and assumes its own AWS role, so a scan widened to every
+  // The packaging entries are the closed two-workflow set. The confinement is the
+  // rule, not a convenience: `release.yml` is the web-publication entry, declares
+  // its own `environment:` and assumes its own AWS role, so a scan widened to every
   // workflow would report that correct tree as a violation.
-  const signingDocument = documents.find((document) => document.workflow.file === signingWorkflow);
-  if (signingDocument === undefined) {
-    violations.push(violation(signingWorkflow, 1, '`client-release.yml` was not parsed; the packaging-entry boundary is unverified'));
-  } else {
-    violations.push(...packagingEntryViolations(signingDocument));
+  for (const file of signingWorkflows) {
+    const signingDocument = documents.find((document) => document.workflow.file === file);
+    if (signingDocument === undefined) {
+      violations.push(violation(file, 1, `\`${file}\` was not parsed; the packaging-entry boundary is unverified`));
+    } else {
+      violations.push(...packagingEntryViolations(signingDocument));
+    }
   }
 
   const tokenSteps = steps.filter((step) => tokenStepPattern.test(step.uses));

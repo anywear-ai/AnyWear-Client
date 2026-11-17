@@ -57,7 +57,8 @@ const REPOSITORY_SCOPED = {
     'APPLE_CERTIFICATE_PASSWORD',
     'APPLE_API_KEY_P8',
     // Repository-scoped: the Android upload keystore (base64), its password, key
-    // alias and key password; read only by `package-android` in `client-release.yml`.
+    // alias and key password; read only by `client-release.yml:package-android` and
+    // `client-beta-apk.yml:package-beta-apk`.
     'ANDROID_KEY_BASE64',
     'ANDROID_KEYSTORE_PASSWORD',
     'ANDROID_KEY_ALIAS',
@@ -224,9 +225,9 @@ test('the reviewed Beta interface is literal workflow env, not repository config
   }
 });
 
-test('the automatic entry stays automatic and the publication entry stays the only dispatch surface', () => {
+test('the automatic entry stays automatic and the two named entries are the dispatch surfaces', () => {
   const dispatchSurfaces = workflowFiles.filter((file) => /^ {2}workflow_dispatch:$/m.test(read(file)));
-  assert.deepEqual(dispatchSurfaces, ['release.yml']);
+  assert.deepEqual(dispatchSurfaces, ['client-beta-apk.yml', 'release.yml']);
 
   const check = read('check.yml');
   assert.doesNotMatch(check, /workflow_dispatch/);
@@ -251,11 +252,13 @@ test('the automatic entry stays automatic and the publication entry stays the on
   assert.match(push, /^ {4}paths-ignore:\n {6}- '\*\*\/\*\.md'$/m);
 });
 
-// #278: the nine signing secrets are repository-scoped, and each is read by one
-// platform job only. GitHub does not scope a repository secret to a job at runtime,
-// so this source allowlist is the review-time boundary: an unreviewed reference in
-// another job fails `pnpm run test:run` instead of silently widening the blast
-// radius at the next tag.
+// #278/#322: the nine signing secrets are repository-scoped, and each is read by
+// its named site only — one platform job for the nine desktop and Android names,
+// and two named Android sites for the four `ANDROID_*` secrets, because the merge
+// Beta path packages Android too. GitHub does not scope a repository secret to a
+// job at runtime, so this source allowlist is the review-time boundary: an
+// unreviewed reference in another job fails `pnpm run test:run` instead of silently
+// widening the blast radius at the next tag or merge.
 const SIGNING_SECRET_SITES = {
   WINDOWS_CERTIFICATE: 'package-windows',
   WINDOWS_CERTIFICATE_PASSWORD: 'package-windows',

@@ -438,8 +438,11 @@ jobs:
             echo "storeType=$store_type"
           } > src-tauri/gen/android/keystore.properties
 
-      # The Android versionCode is derived from the monotonic protocol version, so
-      # an installed package always increases; `X.Y.Z` names the tag, not the code.
+      # The Android versionCode is derived from the monotonic protocol version, so an
+      # installed package always increases *within the release channel*; the merge
+      # Beta channel (`client-beta-apk.yml`) sits above every release code, so a
+      # release never installs over a Beta build without the runbook's uninstall
+      # step. `X.Y.Z` names the tag, not the code.
       - name: Derive the Android versionCode from client_version
         id: version-code
         shell: bash
@@ -837,10 +840,12 @@ jobs:
           gh release download "$TAG" --repo anywear-ai/AnyWear-Client --dir downloaded
           ( cd downloaded && sha256sum -c SHA256SUMS )
 
-      # The one flip of the draft; no release edit runs before this step.
-      - name: Publish the prerelease
+      # The one flip of the draft; no release edit runs before this step. The
+      # formal channel publishes as a non-pre-release and holds the repository's
+      # Latest, and every verification the release depends on has already run.
+      - name: Publish the release
         shell: bash
-        run: gh release edit "$TAG" --repo anywear-ai/AnyWear-Client --draft=false --prerelease --latest=false
+        run: gh release edit "$TAG" --repo anywear-ai/AnyWear-Client --draft=false --prerelease=false --latest=true
 
       # `isImmutable` is not asserted: reading it needs administrator permission,
       # and immutability is an administrative prerequisite recorded in the
@@ -850,3 +855,21 @@ jobs:
         run: |
           gh release view "$TAG" --repo anywear-ai/AnyWear-Client --json isDraft,isPrerelease,tagName,assets > published-release.json
           node scripts/assert-client-release.mjs inventory --tag "$TAG" --view published-release.json --expect published --platforms "$DECLARED_PLATFORMS" --checksums release/SHA256SUMS
+          # `releases/latest` is computed by GitHub, so a bounded retry absorbs the
+          # moment between the flip and the endpoint reflecting it.
+          latest_tag=""
+          for attempt in 1 2 3 4 5; do
+            if latest="$(gh api "repos/anywear-ai/AnyWear-Client/releases/latest" 2>/dev/null)"; then
+              printf '%s' "$latest" > latest-release.json
+              latest_tag="$(node -p "JSON.parse(require('fs').readFileSync('latest-release.json','utf8')).tag_name ?? ''")"
+              if [ "$latest_tag" = "$TAG" ]; then
+                break
+              fi
+            fi
+            sleep 3
+          done
+          if [ "$latest_tag" != "$TAG" ]; then
+            echo "::error::the repository's Latest release names \`${latest_tag:-none}\`, not \`$TAG\`; the flip did not take Latest"
+            exit 1
+          fi
+          node scripts/assert-client-release.mjs latest --tag "$TAG" --view latest-release.json

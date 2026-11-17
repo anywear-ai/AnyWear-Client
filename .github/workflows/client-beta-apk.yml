@@ -7,10 +7,11 @@ name: Build Beta Android APK
 # same verified bytes and may publish them as one immutable `client-beta.<n>`
 # prerelease, which is never Latest and never a formal release tag.
 #
-# The two jobs keep every release write off the merge path: `package-beta-apk`
-# holds only the workflow-level `contents: read` and runs on both events, while
-# `publish-beta-prerelease` holds `contents: write`, runs only for a dispatch, and
-# is the only job in this workflow that can create a tag or a release.
+# The three jobs keep every release write off the merge path: `credential-boundary`
+# is the shared three-step source gate (#293), `package-beta-apk` holds only the
+# workflow-level `contents: read`, runs on both events and waits for that gate, and
+# `publish-beta-prerelease` holds `contents: write`, runs only for a dispatch, and is
+# the only job in this workflow that can create a tag or a release.
 #
 # Signing is isolated: `package-beta-apk` is the one site in this workflow that
 # reads the four `ANDROID_*` secrets, and `scripts/source-ci-credential-boundary.mjs`
@@ -50,8 +51,30 @@ env:
   BETA_COGNITO_CLIENT_ID: '4jp37atfitq59hmjo404342int'
 
 jobs:
+  # #293: the same gate `check.yml` and `client-release.yml` declare. It runs the
+  # boundary's own test with `node --test` — no install, no secret — and declares no
+  # `needs:`, `if:`, `secrets.` or `environment:`, so it can be neither skipped nor
+  # widened. `package-beta-apk` names it in `needs:`.
+  credential-boundary:
+    name: Credential Boundary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the Client
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run the credential-boundary guard
+        run: node --test scripts/source-ci-credential-boundary.node-test.mjs
+
   package-beta-apk:
     name: Package the Beta APK
+    needs: [credential-boundary]
     runs-on: ubuntu-latest
     # No job-level `permissions:`: the workflow-level `contents: read` is the whole
     # grant, so a merge can never hold a release write.

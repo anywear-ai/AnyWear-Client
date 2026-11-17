@@ -13,6 +13,28 @@ permissions:
   contents: read
 
 jobs:
+  # #293: the gate every signing site waits for. It runs the credential boundary's
+  # own test with `node --test` — no install, no `pnpm run` — so it reads no
+  # repository content and no secret, and it declares no `needs:`, `if:`, `secrets.`
+  # or `environment:`, which is what keeps it unskippable. Its `Credential Boundary`
+  # check is the required status check the `main` ruleset pins.
+  credential-boundary:
+    name: Credential Boundary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the Client
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run the credential-boundary guard
+        run: node --test scripts/source-ci-credential-boundary.node-test.mjs
+
   build:
     name: Build
     uses: ./.github/workflows/build.yml

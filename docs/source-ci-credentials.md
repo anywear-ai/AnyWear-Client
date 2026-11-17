@@ -145,11 +145,26 @@ Nothing else is a secret. `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
 interface constants in `release.yml`. The macOS ephemeral keychain password is
 generated per run with `openssl rand -hex 32` and is never configured.
 
-The boundary is source-level and enforced at review time, because GitHub scopes a
-repository secret to the repository, not to a job: any job that references a secret
-receives it. `scripts/source-ci-credential-boundary.mjs` therefore exports a closed
-`signingSites` table — a `workflow:job` key → the secret names that site may
-reference, four keys across `client-release.yml` and `client-beta-apk.yml` — and fails `pnpm run test:run` when:
+The boundary has two enforcement sites, and each binds only the actors it can bind.
+**In source**, because GitHub scopes a repository secret to the repository, not to a
+job — any job that references a secret receives it —
+`scripts/source-ci-credential-boundary.mjs` exports a closed `signingSites` table — a
+`workflow:job` key → the secret names that site may reference, four keys across
+`client-release.yml` and `client-beta-apk.yml` — and now also pins the ordering: every
+site in that table must name the `credential-boundary` job in `needs:`, and each of
+`check.yml`, `client-release.yml` and `client-beta-apk.yml` must declare that job with
+exactly its three steps and no `needs:`, `if:`, `secrets.` or `environment:`, so no
+signing site starts before the guard job — which re-runs this file's own test — has
+passed. **On the platform**, a repository ruleset on `main` requires one approving
+review that is dismissed on a new push, refuses force-push and deletion, and requires
+the guard's `Credential Boundary` check as a required status check. The limit is the
+same for both: they bind actors who cannot change the requirement. A repository
+administrator or organisation owner can disable the rule or act under its bypass
+list, and no GitHub mechanism requires an approving review on a tag, so the tag
+ruleset restricts *who may create, move or delete* `refs/tags/client-v*` rather than
+requiring a review of it. `AnyWear-Service` is deliberately outside this control by
+the recorded decision on #293, so a reader should not infer that every repository
+carries it. The table's rules fail `pnpm run test:run` when:
 
 - a signing name appears in any job other than its four named `workflow:job` sites,
   in a `with:` or an `env:` value — Tauri reads `APPLE_*` and the Windows

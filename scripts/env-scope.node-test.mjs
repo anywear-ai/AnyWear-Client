@@ -281,10 +281,11 @@ test('#278: each signing secret is read only by its designated platform job', ()
     assert.deepEqual(holders, [site], `${secret} may be read only by ${site}`);
   }
 
-  // The other four jobs are denied every signing name in source; `preflight` in
-  // particular never reads a secret, so missing credentials cannot fail it.
+  // Every job outside the three signing sites is denied every signing name in
+  // source; `preflight` in particular never reads a secret, so missing credentials
+  // cannot fail it. The `credential-boundary` gate (#293) is denied by the same rule.
   const denied = jobs.filter((job) => !designatedJobs.has(job.name));
-  assert.deepEqual(denied.map((job) => job.name), ['preflight', 'verify', 'assemble', 'publish']);
+  assert.deepEqual(denied.map((job) => job.name), ['credential-boundary', 'preflight', 'verify', 'assemble', 'publish']);
   for (const job of denied) {
     assert.doesNotMatch(job.section, /secrets\./, `${job.name} must not reference any secret`);
   }

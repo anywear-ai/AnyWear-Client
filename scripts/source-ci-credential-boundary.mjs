@@ -71,6 +71,31 @@ export const signingSites = {
 export const signingWorkflows = ['client-release.yml', 'client-beta-apk.yml'];
 
 /**
+ * #293: the one gate job the entry workflows carry. It runs this file's own test
+ * with `node --test` and nothing else — no install, no `pnpm run` — so it reads no
+ * repository content and reaches no secret. Its `name:` is the check-run name a
+ * repository ruleset pins as a required status check on `main`, and its three steps
+ * are re-read from every workflow below, so deleting, dropping or widening one fails
+ * `pnpm run test:run` rather than only the review.
+ */
+export const credentialBoundaryJob = {
+  id: 'credential-boundary',
+  name: 'Credential Boundary',
+  steps: [
+    { uses: 'actions/checkout@v4', with: { 'persist-credentials': 'false' } },
+    { uses: 'actions/setup-node@v4', with: { 'node-version': '24' } },
+    { run: ['node --test scripts/source-ci-credential-boundary.node-test.mjs'] },
+  ],
+};
+
+/**
+ * #293: the entry workflows that must each declare the gate job. `check.yml` is the
+ * automatic check, and the two packaging entries are where signing happens; the
+ * three are the workflows a repository ruleset's required check can cover.
+ */
+export const credentialBoundaryWorkflows = ['check.yml', 'client-release.yml', 'client-beta-apk.yml'];
+
+/**
  * #278/#322: the write permissions a job-level `permissions:` block may grant, each
  * closed to the named `workflow:job` that holds it. `contents: read` is allowed on
  * any job; `release.yml:deploy` already holds `id-token: write` for its AWS boundary
@@ -377,6 +402,40 @@ function entryValues(entries) {
   return pairs;
 }
 
+/** A quoted scalar without its quotes, or the value unchanged. */
+function unquote(text) {
+  return text.replace(/^['"]|['"]$/g, '');
+}
+
+/**
+ * A job's `needs:` dependency list and the line that declares it. The flow form
+ * `[a, b]`, the block sequence form and the single-scalar form are the shapes this
+ * repository's workflows use; the ordering rule that reads this list is the reason
+ * the list is recorded at all.
+ */
+function needsOf(entry) {
+  if (entry.value !== undefined) {
+    const inline = entry.value.trim();
+    if (!inline.startsWith('[')) return { number: entry.number, jobs: inline === '' ? [] : [unquote(inline)] };
+    return {
+      number: entry.number,
+      jobs: inline
+        .replace(/^\[/, '')
+        .replace(/\]$/, '')
+        .split(',')
+        .map((name) => unquote(name.trim()))
+        .filter((name) => name !== ''),
+    };
+  }
+  return {
+    number: entry.number,
+    jobs: (entry.block ?? [])
+      .filter((line) => line.text.startsWith('-'))
+      .map((line) => unquote(line.text.replace(/^-\s*/, '').trim()))
+      .filter((name) => name !== ''),
+  };
+}
+
 /** Lines of the block belonging to the entry at `start` of `block`. */
 function entryLines(block, start) {
   const indent = block[start].indent;
@@ -495,6 +554,13 @@ export function parseWorkflow(text, file) {
       const permissionsEntry = jobEntries.find((jobEntry) => jobEntry.key === 'permissions');
       const jobEnvEntry = jobEntries.find((jobEntry) => jobEntry.key === 'env');
       const environmentEntry = jobEntries.find((jobEntry) => jobEntry.key === 'environment');
+      // #293: the ordering edge and the condition are recorded for the gate rule. A
+      // signing site must name the guard job in `needs:`, and the guard job itself may
+      // declare neither. `body` keeps every line of the job body, so the gate rule
+      // finds a `secrets.` reference wherever it is written, not only in the `with:`
+      // and `env:` maps the repository-wide scan reads.
+      const needsEntry = jobEntries.find((jobEntry) => jobEntry.key === 'needs');
+      const conditionEntry = jobEntries.find((jobEntry) => jobEntry.key === 'if');
       workflow.jobs.push({
         id: job.key,
         number: job.number,
@@ -511,6 +577,9 @@ export function parseWorkflow(text, file) {
         env: jobEnvEntry ? entryValues(entriesAt(jobEnvEntry.block ?? [], 0, 6)) : undefined,
         envNumber: jobEnvEntry?.number,
         environment: environmentEntry ? { number: environmentEntry.number, value: environmentEntry.value ?? '' } : undefined,
+        needs: needsEntry ? needsOf(needsEntry) : undefined,
+        condition: conditionEntry ? { number: conditionEntry.number, value: conditionEntry.value ?? '' } : undefined,
+        body: job.block ?? [],
       });
       if (usesEntry) {
         const secrets = jobEntries.find((jobEntry) => jobEntry.key === 'secrets');
@@ -841,6 +910,116 @@ function packagingEntryViolations(document) {
   return violations;
 }
 
+/** The canonical shape of one parsed step: `uses` plus its `with`/`env`, or its `run:` lines. */
+function stepSignatureOf(step) {
+  const entries = (map) => [...(map ?? new Map())].sort(([left], [right]) => left.localeCompare(right));
+  return step.uses === ''
+    ? JSON.stringify(['run', (step.run ?? []).map((line) => line.text)])
+    : JSON.stringify(['uses', step.uses, entries(step.with), entries(step.env)]);
+}
+
+/** The same shape for one of the gate job's declared steps. */
+function expectedStepSignature(expected) {
+  return expected.uses === undefined
+    ? JSON.stringify(['run', expected.run])
+    : JSON.stringify(['uses', expected.uses, Object.entries(expected.with ?? {}), []]);
+}
+
+/** A declared gate step, for a message that names what should be there. */
+function describeExpectedStep(expected) {
+  if (expected.uses === undefined) return `\`run: ${expected.run.join(' ')}\``;
+  const withs = Object.entries(expected.with ?? {}).map(([key, value]) => `\`${key}: ${value}\``);
+  return withs.length === 0 ? `\`uses: ${expected.uses}\`` : `\`uses: ${expected.uses}\` with ${withs.join(' and ')}`;
+}
+
+/** A parsed step, for a message that names what was found instead. */
+function describeParsedStep(step) {
+  if (step.uses === '') return `\`run: ${(step.run ?? []).map((line) => line.text).join('; ')}\``;
+  const withs = [...(step.with ?? new Map())].map(([key, value]) => `\`${key}: ${value}\``);
+  const env = [...(step.env ?? new Map())].map(([key, value]) => `\`${key}: ${value}\``);
+  const described = withs.length === 0
+    ? `\`uses: ${step.uses}\``
+    : `\`uses: ${step.uses}\` with ${withs.join(' and ')}`;
+  return env.length === 0 ? described : `${described} and env ${env.join(' and ')}`;
+}
+
+/**
+ * #293: the gate job and the ordering that makes it a gate.
+ *
+ * `credential-boundary` runs this file's own test with `node --test`, so it needs no
+ * install and reads no secret. It declares no `needs:`, `if:`, secret or
+ * `environment:`, which is what keeps it unskippable and un-widenable; every site in
+ * `signingSites` names it in `needs:`, so no signing site starts before the closed
+ * signing table has been re-checked. Deleting the job, dropping or adding one of its
+ * three steps, or adding a dependency, condition, secret or environment fails here.
+ */
+function credentialBoundaryViolations(documents) {
+  const violations = [];
+  const guard = credentialBoundaryJob;
+  const refusal = 'the gate job holds no `needs:`, `if:`, `secrets.` or `environment:`, so it cannot be skipped or widened';
+
+  // (a) Every signing site waits for the gate. A workflow or job the signing rules
+  // already report as absent is left to them, so one defect is one message.
+  for (const site of Object.keys(signingSites)) {
+    const separator = site.indexOf(':');
+    const file = site.slice(0, separator);
+    const jobId = site.slice(separator + 1);
+    const job = documents
+      .find((document) => document.workflow.file === file)
+      ?.workflow.jobs.find((candidate) => candidate.id === jobId);
+    if (job === undefined) continue;
+    const needs = job.needs?.jobs ?? [];
+    if (needs.includes(guard.id)) continue;
+    violations.push(violation(file, job.number, needs.length === 0
+      ? `job \`${job.id}\` declares no \`needs:\`; every signing site must name \`${guard.id}\`, so none starts before the gate job has passed`
+      : `job \`${job.id}\` has \`needs: [${needs.join(', ')}]\`, which omits \`${guard.id}\`; no signing site starts before the gate job has passed`));
+  }
+
+  // (b) Each entry workflow declares the gate job, exactly as declared here.
+  for (const file of credentialBoundaryWorkflows) {
+    // A workflow that was not parsed at all is the packaging rules' finding for the
+    // two packaging entries; this rule governs the documents it is given.
+    const document = documents.find((candidate) => candidate.workflow.file === file);
+    if (document === undefined) continue;
+    const job = document.workflow.jobs.find((candidate) => candidate.id === guard.id);
+    if (job === undefined) {
+      violations.push(violation(file, 1, `the \`${guard.id}\` job is missing; \`${file}\` must declare the gate job, so deleting it fails the boundary rather than removing its ordering rule`));
+      continue;
+    }
+
+    for (const [declaration, entry] of [
+      ['`needs:`', job.needs],
+      ['`if:`', job.condition],
+      ['`environment:`', job.environment],
+    ]) {
+      if (entry === undefined) continue;
+      violations.push(violation(file, entry.number, `job \`${guard.id}\` declares ${declaration}; ${refusal}`));
+    }
+
+    // The job body is read line by line, so a `secrets.` reference is found in a
+    // `run:` body or a step name too, not only in the maps the repository-wide scan
+    // already governs.
+    for (const line of job.body) {
+      for (const secret of secretReferences(line.text)) {
+        violations.push(violation(file, line.number, `job \`${guard.id}\` reads \`secrets.${secret}\`; ${refusal}`));
+      }
+    }
+
+    const steps = document.steps.filter((step) => step.job === guard.id);
+    if (steps.length !== guard.steps.length) {
+      violations.push(violation(file, job.number, `job \`${guard.id}\` declares ${steps.length} step(s); it must declare exactly ${guard.steps.length} — ${guard.steps.map(describeExpectedStep).join(', ')} — so a dropped or widened step fails the boundary`));
+      continue;
+    }
+    for (const [index, expected] of guard.steps.entries()) {
+      const step = steps[index];
+      if (stepSignatureOf(step) === expectedStepSignature(expected)) continue;
+      violations.push(violation(file, step.number, `step ${index + 1} of job \`${guard.id}\` must be ${describeExpectedStep(expected)}, found ${describeParsedStep(step)}; the gate runs exactly these three steps`));
+    }
+  }
+
+  return violations;
+}
+
 const boundarySecret = `\${{ secrets.${sourceCiCredentialBoundary.secret} }}`;
 
 /**
@@ -986,6 +1165,11 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
       violations.push(...packagingEntryViolations(signingDocument));
     }
   }
+
+  // #293: the gate job every entry carries, and the `needs:` edges that make it one.
+  // It is a closed set of three workflow files, so the guard cannot be moved into a
+  // workflow the rules do not read.
+  violations.push(...credentialBoundaryViolations(documents));
 
   const tokenSteps = steps.filter((step) => tokenStepPattern.test(step.uses));
   if (tokenSteps.length === 0) {

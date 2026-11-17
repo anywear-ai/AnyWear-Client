@@ -1,14 +1,17 @@
 # Beta web publication
 
-AnyWear-Client exposes two workflow entries: the automatic
-[`check.yml`](../.github/workflows/check.yml) and the publication entry
-[`release.yml`](../.github/workflows/release.yml), which runs on a merge to `main`
-and on a manual dispatch. `release.yml` is the only publication surface. Its
-manual `operation` input currently offers exactly one value, `deploy`, and the job
-sequence inside it is `build` → `verify` → `deploy` → `record` → `handoff`.
+AnyWear-Client exposes four workflow entries: `check.yml`, `release.yml`,
+`client-release.yml` and `client-beta-apk.yml`; the [README](../README.md#workflow-entries)
+carries their trigger, manual and purpose table. This runbook covers two of them: the
+automatic check [`check.yml`](../.github/workflows/check.yml) and the Beta web
+publication entry [`release.yml`](../.github/workflows/release.yml). `release.yml`
+runs on a merge to `main` and on a manual dispatch and is the repository's Beta web
+publication surface. Its manual `operation` input currently offers exactly one
+value, `deploy`, and the job sequence inside it is
+`build` → `verify` → `deploy` → `record` → `handoff`.
 
-`build.yml`, `test.yml` and `browser.yml` are `workflow_call` implementations of
-`check.yml`. They are not entries and have no dispatch surface.
+`build.yml`, `test.yml`, `browser.yml` and `tauri-smoke.yml` are `workflow_call`
+implementations of `check.yml`. They are not entries and have no dispatch surface.
 
 | Entry | Trigger | Manual | Purpose |
 | --- | --- | --- | --- |

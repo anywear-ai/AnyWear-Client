@@ -9,10 +9,10 @@ permission:
 | `build.yml` → `build` | `AnyWear-Service-API` | `contents: read` | Fetches the published OpenAPI specification the generated client comes from |
 | `release.yml` → `handoff` | `AnyWear-E2E` | `actions: write` | Dispatches the post-publication `smoke` run |
 
-The tagged binary publication adds nine repository-scoped signing secrets — private
-key material and the passwords and alias that accompany it — and no external GitHub
-App token. Each is read by exactly one platform job in `client-release.yml`
-(§ [Signing secrets](#signing-secrets)).
+The two packaging entries add nine repository-scoped signing secrets — private key
+material and the passwords and alias that accompany it — and no external GitHub App
+token. The four `ANDROID_*` secrets are read at two `workflow:job` sites, one per
+packaging workflow; the other five at one job each in `client-release.yml` (§ [Signing secrets](#signing-secrets)).
 
 This note records what each credential may reach, why, and what happens when one is
 unavailable.
@@ -106,27 +106,27 @@ generated token, the default credential everywhere else — still describe
 
 ## Signing secrets
 
-`.github/workflows/client-release.yml` publishes signed platform binaries. It
-holds nine repository-scoped secrets — private key material and the passwords and
-alias that accompany it — and each is read by exactly one job:
+`.github/workflows/client-release.yml` publishes signed platform binaries and
+`.github/workflows/client-beta-apk.yml` publishes a signed Beta APK. The nine
+repository-scoped secrets are read at these sites:
 
-| Secret | Platform | Form | Only referencing job |
+| Secret | Platform | Form | Only referencing `workflow:job` sites |
 | --- | --- | --- | --- |
-| `WINDOWS_CERTIFICATE` | Windows | base64-encoded OV code-signing `.pfx` (not an admitted mechanism; see below) | `package-windows` |
-| `WINDOWS_CERTIFICATE_PASSWORD` | Windows | `.pfx` export password | `package-windows` |
-| `APPLE_CERTIFICATE` | macOS | base64-encoded Developer ID Application `.p12` | `package-macos` |
-| `APPLE_CERTIFICATE_PASSWORD` | macOS | `.p12` password | `package-macos` |
-| `APPLE_API_KEY_P8` | macOS | base64-encoded App Store Connect API `.p8` | `package-macos` |
-| `ANDROID_KEY_BASE64` | Android | base64-encoded upload keystore | `package-android` |
-| `ANDROID_KEYSTORE_PASSWORD` | Android | keystore password | `package-android` |
-| `ANDROID_KEY_ALIAS` | Android | key alias | `package-android` |
-| `ANDROID_KEY_PASSWORD` | Android | key password | `package-android` |
+| `WINDOWS_CERTIFICATE` | Windows | base64-encoded OV code-signing `.pfx` (not an admitted mechanism; see below) | `client-release.yml:package-windows` |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Windows | `.pfx` export password | `client-release.yml:package-windows` |
+| `APPLE_CERTIFICATE` | macOS | base64-encoded Developer ID Application `.p12` | `client-release.yml:package-macos` |
+| `APPLE_CERTIFICATE_PASSWORD` | macOS | `.p12` password | `client-release.yml:package-macos` |
+| `APPLE_API_KEY_P8` | macOS | base64-encoded App Store Connect API `.p8` | `client-release.yml:package-macos` |
+| `ANDROID_KEY_BASE64` | Android | base64-encoded upload keystore | `client-release.yml:package-android` and `client-beta-apk.yml:package-beta-apk` |
+| `ANDROID_KEYSTORE_PASSWORD` | Android | keystore password | `client-release.yml:package-android` and `client-beta-apk.yml:package-beta-apk` |
+| `ANDROID_KEY_ALIAS` | Android | key alias | `client-release.yml:package-android` and `client-beta-apk.yml:package-beta-apk` |
+| `ANDROID_KEY_PASSWORD` | Android | key password | `client-release.yml:package-android` and `client-beta-apk.yml:package-beta-apk` |
 
 These nine are the signing class defined by
 [ADR-0004](https://github.com/anywear-ai/AnyWear-Meta/blob/main/architecture/ADR/0004-oidc-ssm-cross-repo-secrets.md)
-§5. Each is consumed by a packaging job inside the release run, never by a running
-service, so each is a repository-scoped GitHub secret and not an AWS Secrets Manager
-value.
+§5. Each is consumed by a packaging job in one of two runs — the tag release run or
+the merge-triggered Beta APK run — never by a running service, so each is a
+repository-scoped GitHub secret and not an AWS Secrets Manager value.
 [ADR-0036](https://github.com/anywear-ai/AnyWear-Meta/blob/main/architecture/ADR/0036-client-release-pipeline.md#5-repository-scoped-signing-secrets-public-constants-and-windows-ov-signing)
 §5 is the placement decision; this note records the names, forms and jobs.
 
@@ -148,38 +148,38 @@ generated per run with `openssl rand -hex 32` and is never configured.
 The boundary is source-level and enforced at review time, because GitHub scopes a
 repository secret to the repository, not to a job: any job that references a secret
 receives it. `scripts/source-ci-credential-boundary.mjs` therefore exports a closed
-`signingSites` table (job → the names that job may reference) and fails
-`pnpm run test:run` when:
+`signingSites` table — a `workflow:job` key → the secret names that site may
+reference, four keys across `client-release.yml` and `client-beta-apk.yml` — and fails `pnpm run test:run` when:
 
-- a signing name appears in any job other than its designated platform job, in
-  either a `with:` or an `env:` value — Tauri reads `APPLE_*` and the Windows
-  certificate through the environment, so `env:` is scanned like `with:`;
-- a signing name appears in any workflow other than `client-release.yml`;
+- a signing name appears in any job other than its four named `workflow:job` sites,
+  in a `with:` or an `env:` value — Tauri reads `APPLE_*` and the Windows
+  certificate through the environment, so `env:` is scanned like `with:` — and the
+  site key carries its workflow, so a same-named job elsewhere is refused;
 - a job declares a write permission outside the named job that holds it: only
-  `client-release.yml:publish` holds `contents: write`, only
-  `client-release.yml:assemble` holds `id-token: write` and `attestations: write`,
-  and `release.yml:deploy` keeps the `id-token: write` it already had;
-- a job declares a job-level `environment:` — the packaging entry holds no GitHub
+  `client-release.yml:publish` and `client-beta-apk.yml:publish-beta-prerelease`
+  hold `contents: write`; only `client-release.yml:assemble` holds `id-token: write`
+  and `attestations: write`, and `release.yml:deploy` keeps its `id-token: write`;
+- a job declares a job-level `environment:` — the packaging entries hold no GitHub
   Environment, so no job may declare one;
 - a step `uses:` names a cloud-credential action (`aws-actions/`, `azure/`,
   `google-github-actions/`, or `hashicorp/vault-action`), a job-level `uses:`
   appears at all, or a step `with:` passes a cloud-credential input — the packaging
-  entry holds no cloud principal; adopting a cloud signing mechanism amends
+  entries hold no cloud principal; adopting a cloud signing mechanism amends
   ADR-0036 §5 and the guard's signing table in the same delivery;
 - a `vars.` reference is role-shaped (a name with `ROLE` or `ARN` as a whole
   segment), a computed `vars[...]` name cannot be resolved, or a recorded value
-  contains an `arn:aws…:` value — the packaging entry names no cloud role or
+  contains an `arn:aws…:` value — the packaging entries name no cloud role or
   principal;
 - a `run:` body invokes a cloud CLI (`aws`, `gcloud`, `az`, `sam`, `cdk`,
   `terraform`, `pulumi`, `eksctl`), directly or behind a bare `sudo`, `pnpm exec`
   or `npx` wrapper token (not a wrapper carrying its own options, such as
   `sudo -E aws …`, `npx --yes aws …` or `pnpm exec --silent aws …`, and not an
   `env FOO=1 aws …` prefix), or after `&` or inside `$()` where the substitution
-  closes on the same body line — the packaging entry runs no cloud CLI.
+  closes on the same body line — the packaging entries run no cloud CLI.
 
-These four packaging-entry rules read `client-release.yml` only. `release.yml` is
-the web-publication entry: it declares its own `environment:` and assumes its own
-AWS role, so none of the four applies to it.
+These four packaging-entry rules read both packaging workflows, `client-release.yml`
+and `client-beta-apk.yml`; `release.yml` is the web-publication entry, which declares
+its own `environment:` and assumes its own AWS role, so none of the four applies.
 
 `tokenSites` stays at exactly two: the tagged binary publication mints no App
 token, dispatches nothing and runs no cloud CLI. `preflight` references no secret at

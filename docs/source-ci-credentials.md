@@ -33,7 +33,7 @@ therefore checks the specification out separately, with the App token:
 | --- | --- |
 | `Checkout` | The Client repository, with the default `GITHUB_TOKEN`, no submodules |
 | `Generate API specification token` | Mints the App token, scoped to one repository and one permission |
-| `Checkout API specification` | Fetches `${{ github.repository_owner }}/AnyWear-Service-API` at the revision `.gitmodules` records, into `api/` |
+| `Checkout API specification` | Fetches `${{ github.repository_owner }}/AnyWear-Service-API` at the full commit SHA its own `ref:` pins, into `api/`; `.gitmodules` supplies only `path` and `url` and cannot carry a commit, so the revision comes from the workflow, not from that file |
 
 `rust-check`, `test` and `browser` read no repository content: `cargo check` compiles
 `src-tauri`, `pnpm run test:run` and `pnpm run test:browser` read the committed

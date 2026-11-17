@@ -55,12 +55,17 @@ Ensure you have the following installed:
 
 ### Workflow entries
 
-Client exposes three workflow entries, one per trigger class. `check.yml` runs
-automatically on push and pull request to `main`. `release.yml` is the Beta web
-publication entry — it runs on a merge to `main` and on a manual dispatch,
-offering the single `operation: deploy` and three optional interface overrides.
-`client-release.yml` is the tagged client binary publication entry: it is started
-only by a lightweight `client-vX.Y.Z` tag and has no manual dispatch surface.
+Client exposes four workflow entries, two of which — `release.yml` and
+`client-beta-apk.yml` — carry a manual dispatch surface, so the entries are not one
+per trigger class. `check.yml` is the automatic check: it runs on push and pull
+request to `main`. `release.yml` is the Beta web publication entry — it runs on a
+merge to `main` and on a manual dispatch, offering the single `operation: deploy`
+and three optional interface overrides. `client-release.yml` is the tagged client
+binary publication entry: only a lightweight `client-vX.Y.Z` tag starts it, and it
+has no manual dispatch surface. `client-beta-apk.yml` is the merge-triggered Beta
+Android entry: it builds and signs a Beta APK, verifies its signature, and uploads
+it as the run's own 30-day artifact, creating no tag and no release on a merge; its
+manual dispatch may publish that run's bytes as one `client-beta.<n>` prerelease.
 `build.yml`, `test.yml`, `browser.yml` and `tauri-smoke.yml` are `workflow_call`
 implementations, not entries.
 
@@ -68,7 +73,8 @@ implementations, not entries.
 | --- | --- | --- | --- |
 | [`check.yml`](.github/workflows/check.yml) | push / pull request to `main` | no | Build, unit tests, mocked browser integration |
 | [`release.yml`](.github/workflows/release.yml) | push to `main`; `workflow_dispatch` (`operation: deploy`) | yes | Build, verify, deploy and record the Beta web client, then dispatch the E2E smoke |
-| [`client-release.yml`](.github/workflows/client-release.yml) | push of a lightweight `client-vX.Y.Z` tag | no | Build, sign and verify the Windows/macOS/Android binaries, assemble `SHA256SUMS` with one attestation, and publish an immutable prerelease |
+| [`client-release.yml`](.github/workflows/client-release.yml) | push of a lightweight `client-vX.Y.Z` tag | no | Build, sign and verify the Windows/macOS/Android binaries, assemble `SHA256SUMS` with one attestation, and publish the formal `client-vX.Y.Z` release as an immutable non-pre-release that holds Latest |
+| [`client-beta-apk.yml`](.github/workflows/client-beta-apk.yml) | push to `main`; `workflow_dispatch` (no inputs) | yes | Build, sign and verify a Beta APK as the run's own 30-day artifact; a dispatch may publish that run's bytes as one `client-beta.<n>` prerelease, never a `client-v*` tag or a formal release |
 
 ### Beta web publication
 
@@ -88,9 +94,9 @@ release's committed notes live under [`docs/client-release-notes/`](docs/client-
 
 See the [CI credentials](docs/source-ci-credentials.md) note for the two App
 credentials the workflows hold — the source-CI specification token and the release
-handoff token — the repositories each may reach, the nine repository-scoped
-signing secrets and the one job allowed to read each, and what happens when one is
-unavailable.
+handoff token — the repositories each may reach, the nine repository-scoped signing
+secrets (the four `ANDROID_*` names are read by both packaging workflows, the other
+five by one job each), and what happens when one is unavailable.
 
 ## 🏗️ Project Structure
 

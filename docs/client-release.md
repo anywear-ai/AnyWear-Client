@@ -210,17 +210,20 @@ runs. They are prerequisites for a signed, immutable release:
    assets then cannot be moved, replaced or deleted, and GitHub records its own
    release attestation. The pipeline cannot read this setting (it needs repository
    administration), so enabling it is checked here, out of band, once.
-2. **Repository-scoped secrets for the declared platforms.** The workflow holds
-   nine signing secrets: `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`,
-   `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY_P8`,
-   `ANDROID_KEY_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
-   `ANDROID_KEY_PASSWORD`. The declared set decides which are configured: this
-   Beta's `android` set needs the four `ANDROID_*`, and only a release that
-   declares `windows` or `macos` requires the rest. Which store holds a credential
-   follows what consumes it, not how sensitive it is: a credential that publishes
-   into AWS is a publishing credential, while a credential that signs bytes is a
-   signing credential and stays in repository-scoped secrets, because a packaging
-   job inside the release run consumes it. Each is read by one platform job; see
+2. **Repository-scoped secrets for the declared platforms.** The repository holds
+   nine signing secrets across the two packaging workflows:
+   `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`, `APPLE_CERTIFICATE`,
+   `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY_P8`, `ANDROID_KEY_BASE64`,
+   `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. The
+   declared set decides which are configured: this Beta's `android` set needs the
+   four `ANDROID_*`, and only a release that declares `windows` or `macos` requires
+   the rest. Which store holds a credential follows what consumes it, not how
+   sensitive it is: a credential that publishes into AWS is a publishing credential,
+   while a credential that signs bytes is a signing credential and stays in
+   repository-scoped secrets, because a packaging job in the tag release run or the
+   merge-triggered Beta APK run consumes it. The other five are each read by one
+   platform job; the four `ANDROID_*` are read by `package-android` in the tag run
+   and by `package-beta-apk` in the Beta run; see
    [CI credentials](source-ci-credentials.md#signing-secrets).
 3. **Credentials for the declared platforms.** This Beta declares `android`: its
    upload keystore is generated once with `keytool` and stored base64-encoded in the

@@ -1221,8 +1221,9 @@ test('#294: the packaging-entry assertions are keyed to the packaging workflows,
 // #293: the guard job is self-enforcing. Each of the three entry workflows carries
 // the same three-step `credential-boundary` job, and every signing site names it in
 // `needs:`. Every fixture below splices the checked-in text, so a deleted job, a
-// dropped or widened step, an added `secrets.` read and a removed ordering edge each
-// fail the validator rather than only the review.
+// dropped or widened step, an added `secrets.` read, a removed ordering edge, a
+// neutralising step key and a renamed reported check each fail the validator rather
+// than only the review.
 
 /** The `credential-boundary` job's text in one checked-in workflow. */
 function guardJobText(text) {
@@ -1373,6 +1374,73 @@ test('#293: a secret, a dropped step, a condition or a dependency in the gate jo
   const dependencyLine = lineOf(dependent.text, '    needs: [build]\n    name: Credential Boundary');
   assert.deepEqual(validateSourceCiCredentialBoundary(dependent.workflows), [
     `check.yml:${dependencyLine} job \`credential-boundary\` declares \`needs:\`; the gate job holds no \`needs:\`, \`if:\`, \`secrets.\` or \`environment:\`, so it cannot be skipped or widened`,
+  ]);
+});
+
+// #293: the reported check name and the gate steps' own keys. GitHub reports a job's
+// `name:` as the check name, and a ruleset pins that string, so a rename must fail
+// here even when all three workflows agree. A `continue-on-error:` or a step-level
+// `if:` would leave `Credential Boundary` green after a failed boundary test, so both
+// are refused in either form — and the fixtures splice text, which is what proves the
+// parser records the key rather than the validator comparing values it was handed.
+test('#293: the gate job reports the one pinned check name in every entry workflow', async () => {
+  assert.equal(credentialBoundaryJob.name, 'Credential Boundary');
+
+  const { documents } = await repositoryWorkflows();
+  for (const file of credentialBoundaryWorkflows) {
+    const declared = documentOf(documents, file).workflow.jobs.find((job) => job.id === credentialBoundaryJob.id);
+    assert.ok(declared, `expected the gate job in ${file}`);
+    assert.equal(declared.name?.value, 'Credential Boundary', `${file} reports the pinned check name`);
+  }
+
+  const renamed = await splicedSigningWorkflow(
+    (source) => spliceFirst(source, '    name: Credential Boundary\n', '    name: Credential Gate\n'),
+    credentialBoundaryWorkflows[0],
+  );
+  assert.deepEqual(validateSourceCiCredentialBoundary(renamed.workflows), [
+    `check.yml:${lineOf(renamed.text, '    name: Credential Gate')} job \`credential-boundary\` declares \`name: Credential Gate\`; the reported check name must be \`Credential Boundary\`, which is the string a ruleset pins as a required status check`,
+  ]);
+
+  const unnamed = await splicedSigningWorkflow(
+    (source) => spliceFirst(source, '    name: Credential Boundary\n', ''),
+    credentialBoundaryWorkflows[0],
+  );
+  assert.deepEqual(validateSourceCiCredentialBoundary(unnamed.workflows), [
+    `check.yml:${lineOf(unnamed.text, '  credential-boundary:\n')} job \`credential-boundary\` declares no \`name:\`; the reported check name must be \`Credential Boundary\`, which is the string a ruleset pins as a required status check`,
+  ]);
+});
+
+test('#293: a neutralising key on a step of the gate job is refused in either form', async () => {
+  // The gate's third step is the `run:` that executes this file's own test, so it is
+  // the step a neutralising key would silence.
+  const guardRun = '        run: node --test scripts/source-ci-credential-boundary.node-test.mjs\n';
+  for (const [addition, key] of [
+    ['        continue-on-error: true\n', 'continue-on-error'],
+    ['        continue-on-error:\n          value: true\n', 'continue-on-error'],
+    ['        if: false\n', 'if'],
+    ['        if:\n          value: false\n', 'if'],
+  ]) {
+    const { workflows, text } = await splicedSigningWorkflow(
+      (source) => insertAfter(source, guardRun, addition),
+      credentialBoundaryWorkflows[0],
+    );
+    assert.deepEqual(validateSourceCiCredentialBoundary(workflows), [
+      `check.yml:${lineOf(text, addition)} step 3 of job \`credential-boundary\` declares \`${key}:\`; the gate job's steps hold no \`continue-on-error:\` or \`if:\`, so a failed boundary test cannot leave \`Credential Boundary\` green`,
+    ], `expected \`${key}:\` written as ${addition.includes('\n          ') ? 'a block' : 'a scalar'} to be refused`);
+  }
+
+  // The same key on the step's `- ` line is the same entry as one written below it,
+  // so the first-line source of a step is read too.
+  const firstLine = await splicedSigningWorkflow(
+    (source) => spliceFirst(
+      source,
+      '      - name: Run the credential-boundary guard\n',
+      '      - if: false\n        name: Run the credential-boundary guard\n',
+    ),
+    credentialBoundaryWorkflows[0],
+  );
+  assert.deepEqual(validateSourceCiCredentialBoundary(firstLine.workflows), [
+    `check.yml:${lineOf(firstLine.text, '      - if: false')} step 3 of job \`credential-boundary\` declares \`if:\`; the gate job's steps hold no \`continue-on-error:\` or \`if:\`, so a failed boundary test cannot leave \`Credential Boundary\` green`,
   ]);
 });
 

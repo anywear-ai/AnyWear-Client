@@ -150,17 +150,43 @@ The boundary has two enforcement sites, and each binds only the actors it can bi
 job — any job that references a secret receives it —
 `scripts/source-ci-credential-boundary.mjs` exports a closed `signingSites` table — a
 `workflow:job` key → the secret names that site may reference, four keys across
-`client-release.yml` and `client-beta-apk.yml` — and now also pins the ordering: every
-site in that table must name the `credential-boundary` job in `needs:`, and each of
-`check.yml`, `client-release.yml` and `client-beta-apk.yml` must declare that job with
-exactly its three steps and no `needs:`, `if:`, `secrets.` or `environment:`, so no
-signing site starts before the guard job — which re-runs this file's own test — has
-passed. **On the platform**, a repository ruleset on `main` requires one approving
-review that is dismissed on a new push, refuses force-push and deletion, and requires
-the guard's `Credential Boundary` check as a required status check. The limit is the
-same for both: they bind actors who cannot change the requirement. A repository
-administrator or organisation owner can disable the rule or act under its bypass
-list, and no GitHub mechanism requires an approving review on a tag, so the tag
+`client-release.yml` and `client-beta-apk.yml` — and now also pins the ordering and
+the shape: every site in that table must name the `credential-boundary` job in
+`needs:`, and each of `check.yml`, `client-release.yml` and `client-beta-apk.yml`
+must declare that job with exactly its three steps, under the reported check name
+`Credential Boundary` that a required-check entry pins, with no `needs:`, `if:`,
+`secrets.` or `environment:` on the job and no `if:` or `continue-on-error:` on any
+of its steps — so no signing site starts before the guard job, which re-runs this
+file's own test, has passed, and a failed boundary test cannot leave that check
+green.
+
+**On the platform**, the control is the #293 operator action that a repository
+administrator or organisation owner applies, not a fact in force: three branch
+rulesets, one on `refs/heads/main` in `AnyWear-Client`, `AnyWear-E2E` and
+`AnyWear-Infra`, each requiring one approving review dismissed on a new push and
+the latest push to be approved by someone other than the pusher
+(`require_last_push_approval: true`), and refusing force-push and deletion; plus a
+`refs/tags/client-v*` tag ruleset. The checklist and the exact request bodies live
+on `anywear-ai/AnyWear#293` under `### Execution plan` steps 4–6, and this identity
+cannot perform them: ADR-0035 denies `anywear-agent[bot]` `Administration`. The
+required-check entry is the last of those steps, and it pins `Credential Boundary`
+only once the guard job is on `main`, which is after this pull request merges.
+
+A non-administrator checks the platform half with reads that need no
+`Administration` grant: `gh api /repos/anywear-ai/{repo}/rules/branches/main` for
+each of `AnyWear-Client`, `AnyWear-E2E` and `AnyWear-Infra`;
+`gh api /repos/anywear-ai/AnyWear-Client/rulesets` and
+`gh api /repos/anywear-ai/AnyWear-Client/rulesets/{ruleset_id}`;
+`gh api /repos/anywear-ai/AnyWear-Client/tags/protection`; and
+`gh api /repos/anywear-ai/AnyWear-Client/commits/{sha}/check-runs` for the check
+name the ruleset pins. An empty answer is the finding, not a missing read: at this
+commit the first answers `[]` for each of the three repositories, `rulesets`
+answers `[]`, and `tags/protection` answers `404`, which is the evidence that only
+the source half is in force.
+
+The limit is the same for both: they bind actors who cannot change the requirement. A
+repository administrator or organisation owner can disable the rule or act under its
+bypass list, and no GitHub mechanism requires an approving review on a tag, so the tag
 ruleset restricts *who may create, move or delete* `refs/tags/client-v*` rather than
 requiring a review of it. `AnyWear-Service` is deliberately outside this control by
 the recorded decision on #293, so a reader should not infer that every repository

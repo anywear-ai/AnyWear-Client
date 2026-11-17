@@ -23,10 +23,14 @@ runner with its own secrets.
 ```mermaid
 flowchart LR
     T["git push origin client-vX.Y.Z"] --> PF["preflight<br/>tag, main, monotonic, state, declared platforms"]
+    T --> CB["credential-boundary<br/>the guard every signing job waits for"]
     PF --> V["verify<br/>test:run + test:browser"]
     PF --> W["package-windows<br/>only when declared"]
     PF --> M["package-macos<br/>only when declared"]
     PF --> A["package-android<br/>only when the configuration declares android"]
+    CB --> W
+    CB --> M
+    CB --> A
     V --> AS["assemble<br/>names + SHA256SUMS + attestation"]
     W --> AS
     M --> AS

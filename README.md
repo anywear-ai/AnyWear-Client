@@ -86,7 +86,7 @@ by `release.yml`.
 ### Client binary publication
 
 See the [Client release runbook](docs/client-release.md) for the lightweight tag
-contract, the seven-job pipeline, the nine platform signing secrets, download and
+contract, the eight-job pipeline, the nine platform signing secrets, download and
 attestation verification, the withdrawal classes and the rollback rule. Each
 release's committed notes live under [`docs/client-release-notes/`](docs/client-release-notes/).
 

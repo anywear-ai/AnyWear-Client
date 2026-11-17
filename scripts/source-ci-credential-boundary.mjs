@@ -491,14 +491,33 @@ function stepFields(step) {
 }
 
 /**
+ * #293: every key a step declares, with the line it is declared on, from the `- `
+ * line and from the step's option lines alike. An entry counts whether it is written
+ * as a scalar (`if: false`) or as a block key (`continue-on-error:` with a nested
+ * block), because either form reaches the job; `stepFields` keeps scalars only, so a
+ * rule that reads the fields alone would miss the block form.
+ */
+function stepDeclarations(step) {
+  const declarations = new Map();
+  for (const entries of [
+    entriesAt([step.first], 0, step.first.indent),
+    entriesAt(step.options, 0, step.first.indent + 2),
+  ]) {
+    for (const entry of entries) declarations.set(entry.key, { number: entry.number, value: entry.value });
+  }
+  return declarations;
+}
+
+/**
  * Reads the parts of a workflow file the credential boundary governs: the
- * workflow-level `permissions` block and `env:` values, each job's `environment:`
- * declaration and `env:` values, each step's `uses`/`with`/`env`/`run:` body, the
- * secrets a caller job maps into the workflow it calls, and the secrets a
- * `workflow_call` workflow declares. A job that declares neither `steps:` nor a
- * job-level `uses:` raises, because its steps cannot be read. Only the flow-style
- * subset this repository's workflows use is supported; anything else raises, so an
- * unreadable contract fails the check rather than passing silently.
+ * workflow-level `permissions` block and `env:` values, each job's `needs:`, `if:`,
+ * `name:` and `environment:` declarations and its `env:` values, each step's
+ * `uses`/`with`/`env`/`run:` body and every key it declares, the secrets a caller job
+ * maps into the workflow it calls, and the secrets a `workflow_call` workflow
+ * declares. A job that declares neither `steps:` nor a job-level `uses:` raises,
+ * because its steps cannot be read. Only the flow-style subset this repository's
+ * workflows use is supported; anything else raises, so an unreadable contract fails
+ * the check rather than passing silently.
  */
 export function parseWorkflow(text, file) {
   const lines = text
@@ -561,6 +580,10 @@ export function parseWorkflow(text, file) {
       // and `env:` maps the repository-wide scan reads.
       const needsEntry = jobEntries.find((jobEntry) => jobEntry.key === 'needs');
       const conditionEntry = jobEntries.find((jobEntry) => jobEntry.key === 'if');
+      // #293: the reported name. A ruleset pins the `name:` GitHub reports for the
+      // gate job, so the declared value is recorded and compared against the one the
+      // guard exports, rather than trusted to stay in step across three files.
+      const nameEntry = jobEntries.find((jobEntry) => jobEntry.key === 'name');
       workflow.jobs.push({
         id: job.key,
         number: job.number,
@@ -579,6 +602,7 @@ export function parseWorkflow(text, file) {
         environment: environmentEntry ? { number: environmentEntry.number, value: environmentEntry.value ?? '' } : undefined,
         needs: needsEntry ? needsOf(needsEntry) : undefined,
         condition: conditionEntry ? { number: conditionEntry.number, value: conditionEntry.value ?? '' } : undefined,
+        name: nameEntry ? { number: nameEntry.number, value: nameEntry.value ?? '' } : undefined,
         body: job.block ?? [],
       });
       if (usesEntry) {
@@ -628,6 +652,9 @@ export function parseWorkflow(text, file) {
           // The `run:` body is recorded line by line, so a cloud CLI is scanned
           // where it is invoked rather than anywhere the word happens to appear.
           run,
+          // #293: every key the step declares, scalar or block, with its line, so a
+          // `continue-on-error:` or step-level `if:` is refused in either form.
+          declarations: stepDeclarations(step),
         });
       }
     }
@@ -952,6 +979,10 @@ function describeParsedStep(step) {
  * `signingSites` names it in `needs:`, so no signing site starts before the closed
  * signing table has been re-checked. Deleting the job, dropping or adding one of its
  * three steps, or adding a dependency, condition, secret or environment fails here.
+ * The job is also re-read under its reported `name:`, because that string is what a
+ * ruleset pins as the required status check, and none of its steps may declare
+ * `continue-on-error:` or `if:`, because either would make a failed boundary test
+ * report a green check.
  */
 function credentialBoundaryViolations(documents) {
   const violations = [];
@@ -996,6 +1027,16 @@ function credentialBoundaryViolations(documents) {
       violations.push(violation(file, entry.number, `job \`${guard.id}\` declares ${declaration}; ${refusal}`));
     }
 
+    // #293: the check GitHub reports is the job's `name:`, and that string is what a
+    // ruleset pins as a required status check. Comparing it against the exported name
+    // keeps a rename in all three workflows visible here too, so the string an
+    // operator pins cannot change silently.
+    if (job.name === undefined) {
+      violations.push(violation(file, job.number, `job \`${guard.id}\` declares no \`name:\`; the reported check name must be \`${guard.name}\`, which is the string a ruleset pins as a required status check`));
+    } else if (job.name.value !== guard.name) {
+      violations.push(violation(file, job.name.number, `job \`${guard.id}\` declares \`name: ${job.name.value}\`; the reported check name must be \`${guard.name}\`, which is the string a ruleset pins as a required status check`));
+    }
+
     // The job body is read line by line, so a `secrets.` reference is found in a
     // `run:` body or a step name too, not only in the maps the repository-wide scan
     // already governs.
@@ -1014,6 +1055,18 @@ function credentialBoundaryViolations(documents) {
       const step = steps[index];
       if (stepSignatureOf(step) === expectedStepSignature(expected)) continue;
       violations.push(violation(file, step.number, `step ${index + 1} of job \`${guard.id}\` must be ${describeExpectedStep(expected)}, found ${describeParsedStep(step)}; the gate runs exactly these three steps`));
+    }
+
+    // #293: no step of the gate may neutralise its own result. `stepSignatureOf` reads
+    // only `uses`/`with`/`env`/`run`, so `continue-on-error: true` — or a step-level
+    // `if:` — on the `run:` step would leave `Credential Boundary` green after a
+    // failed boundary test. Both keys are refused in either form, scalar or block.
+    for (const [index, step] of steps.entries()) {
+      for (const key of ['continue-on-error', 'if']) {
+        const declared = (step.declarations ?? new Map()).get(key);
+        if (declared === undefined) continue;
+        violations.push(violation(file, declared.number, `step ${index + 1} of job \`${guard.id}\` declares \`${key}:\`; the gate job's steps hold no \`continue-on-error:\` or \`if:\`, so a failed boundary test cannot leave \`${guard.name}\` green`));
+      }
     }
   }
 

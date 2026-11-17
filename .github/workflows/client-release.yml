@@ -1,9 +1,13 @@
 name: Publish Client Release
 
 # #278: the Client binary publication entry. A lightweight `client-vX.Y.Z` tag
-# starts it and nothing else does; there is no manual dispatch surface. The seven
-# jobs separate identity, verification, per-platform signing, assembly and the
-# one release write, so no job holds both a signing key and a release write:
+# starts it and nothing else does; there is no manual dispatch surface. The eight
+# jobs separate the credential guard, identity, verification, per-platform signing,
+# assembly and the one release write, so no job holds both a signing key and a
+# release write. `credential-boundary` (#293) is the shared three-step source guard
+# every entry runs: it declares no `needs:`, `if:`, secret or `environment:`, and
+# the three packaging legs name it in `needs:`, so none of them starts before it has
+# passed.
 #
 #   preflight        tag identity and the four-state release check; reads no secret.
 #                    It is the only reader of `client-release-platforms.json`, the
@@ -51,6 +55,27 @@ env:
   WINDOWS_TIMESTAMP_URL: 'http://timestamp.digicert.com'
 
 jobs:
+  # #293: the same gate `check.yml` declares. It runs the boundary's own test with
+  # `node --test` — no install, no secret — and declares no `needs:`, `if:`,
+  # `secrets.` or `environment:`, so it can be neither skipped nor widened. The
+  # three packaging legs below name it in `needs:`.
+  credential-boundary:
+    name: Credential Boundary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the Client
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run the credential-boundary guard
+        run: node --test scripts/source-ci-credential-boundary.node-test.mjs
+
   preflight:
     name: Preflight the release tag
     runs-on: ubuntu-latest
@@ -146,7 +171,7 @@ jobs:
 
   package-windows:
     name: Package Windows x64
-    needs: [preflight]
+    needs: [preflight, credential-boundary]
     # The configuration decides this leg: a platform it does not declare is
     # skipped, not failed, so its credentials are never required. Windows is
     # undeclared for the Beta (the signing mechanism is deferred, ADR-0036 §5) and
@@ -248,7 +273,7 @@ jobs:
 
   package-macos:
     name: Package macOS universal
-    needs: [preflight]
+    needs: [preflight, credential-boundary]
     # Same gate as every platform leg: only a declared `macos` runs, and an
     # undeclared macOS costs nothing.
     if: needs.preflight.outputs.state != 'published' && needs.preflight.outputs.macos == 'true'
@@ -355,7 +380,7 @@ jobs:
 
   package-android:
     name: Package Android
-    needs: [preflight]
+    needs: [preflight, credential-boundary]
     # `android` is a declaration in `client-release-platforms.json`; `preflight`
     # refuses that declaration when the tagged commit has no `src-tauri/gen/android`
     # project. An undeclared android is skipped, not failed.

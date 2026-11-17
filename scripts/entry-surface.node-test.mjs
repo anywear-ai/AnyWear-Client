@@ -222,7 +222,7 @@ test('the repository exposes exactly four entries, in a closed trigger map', () 
 // here, not by their triggers.
 test('#322: client-beta-apk.yml is the merge-triggered Android publication with an optional prerelease publish', () => {
   const workflow = read(mergeAndroidEntry);
-  assert.deepEqual(jobNames(workflow), ['package-beta-apk', 'publish-beta-prerelease']);
+  assert.deepEqual(jobNames(workflow), ['credential-boundary', 'package-beta-apk', 'publish-beta-prerelease']);
   assert.deepEqual(triggers(workflow).sort(), ['push', 'workflow_dispatch']);
   assert.doesNotMatch(onSection(workflow), /^ {2}pull_request:/m, 'the APK build is not a pull-request check');
   assert.doesNotMatch(onSection(workflow), /tags:/, 'a tag push never starts the Beta build');
@@ -506,7 +506,7 @@ test('the only activation switch in any workflow is ENABLE_BETA_MUTATION', () =>
 
 test('check.yml wires the four called workflows and maps the App secret only on build', () => {
   const check = read(automaticEntry);
-  assert.deepEqual(jobNames(check), ['build', 'test', 'tauri-smoke', 'browser']);
+  assert.deepEqual(jobNames(check), ['credential-boundary', 'build', 'test', 'tauri-smoke', 'browser']);
 
   const build = jobSection(check, 'build');
   const unitTest = jobSection(check, 'test');
@@ -720,12 +720,12 @@ function jobPermissions(section) {
 }
 
 // #278: the Client binary publication entry. The contract below is the issue's
-// acceptance list read as source: a tag-only trigger, seven jobs in order, one
-// release write and one attestation site, no cloud credential, every install
-// locked, sibling platform jobs, fail-closed credentials naming the missing
-// secret, signature verification on each platform, one checksum-derived
-// attestation, and a draft-then-flip publication that never clobbers and never
-// deletes a release.
+// acceptance list read as source: a tag-only trigger, eight jobs in order (#293 adds
+// the shared `credential-boundary` gate), one release write and one attestation site,
+// no cloud credential, every install locked, sibling platform jobs, fail-closed
+// credentials naming the missing secret, signature verification on each platform, one
+// checksum-derived attestation, and a draft-then-flip publication that never clobbers
+// and never deletes a release.
 test('#278: client-release.yml is the tag-only binary publication entry', () => {
   const workflow = read(tagEntry);
   assert.deepEqual(triggers(workflow), ['push']);
@@ -734,6 +734,7 @@ test('#278: client-release.yml is the tag-only binary publication entry', () => 
   // GitHub does not evaluate path filters on a tag push, so none may be declared.
   assert.doesNotMatch(workflow, /paths-ignore/);
   assert.deepEqual(jobNames(workflow), [
+    'credential-boundary',
     'preflight',
     'verify',
     'package-windows',
@@ -795,7 +796,7 @@ test('#278: client-release.yml keeps the three platform jobs independent', () =>
   const platformJobs = ['package-windows', 'package-macos', 'package-android'];
   for (const name of platformJobs) {
     const section = jobSection(workflow, name);
-    assert.match(section, /^ {4}needs: \[preflight\]$/m, `${name} depends on preflight only`);
+    assert.match(section, /^ {4}needs: \[preflight, credential-boundary\]$/m, `${name} depends on preflight and the gate`);
     assert.doesNotMatch(section, /^ {4}strategy:/m, `${name} is a job, not a matrix member`);
     for (const other of platformJobs.filter((candidate) => candidate !== name)) {
       assert.ok(!section.includes(other), `${name} must not reference ${other}`);
@@ -893,7 +894,7 @@ test('#278: client-release.yml verifies every signature before assembly', () => 
 
 test('#278: client-release.yml carries the Android job contract', () => {
   const android = jobSection(read(tagEntry), 'package-android');
-  assert.match(android, /^ {4}needs: \[preflight\]$/m);
+  assert.match(android, /^ {4}needs: \[preflight, credential-boundary\]$/m);
   assert.match(android, /needs\.preflight\.outputs\.android == 'true'/);
   assert.match(android, /pnpm exec tauri android build --apk --aab/);
   assert.match(android, /apksigner verify --print-certs/);

@@ -308,12 +308,16 @@ test.describe('Wardrobe Auto-Tagging (mocked Client integration)', () => {
     await page.getByText('My T-Shirt', { exact: true }).click();
     const retagButton = page.getByRole('button', { name: 'Re-tag', exact: true });
     await expect(retagButton).toBeEnabled();
-    const messages: string[] = [];
-    page.on('dialog', async dialog => { messages.push(dialog.message()); await dialog.accept(); });
     await retagButton.click();
     await expect(page.getByRole('heading', { name: 'Item Details' })).not.toBeVisible();
     await expect(page.getByText('Analyzing...', { exact: true })).toBeVisible();
-    expect(messages).toEqual(['Re-tagging started. Check back shortly.']);
+    // The sentence now outlives the dialog that asked for the re-tag: it is the
+    // page's own status notice, not a host script dialog. The filter keeps the
+    // locator strict when the signed-in shell is also showing its own profile
+    // status notice.
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Re-tagging started. Check back shortly.' }),
+    ).toBeVisible();
     expect(state.mutations).toEqual([{ method: 'POST', path: `/wardrobe/items/${ITEM_ID}/retag`, body: undefined }]);
   });
 

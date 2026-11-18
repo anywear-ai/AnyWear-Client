@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import '@testing-library/jest-dom/vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor, act, within } from '@testing-library/react';
 
 vi.mock('../../api/endpoints/wardrobe/wardrobe', () => ({
   usePatchWardrobeItemsId: vi.fn(),
@@ -100,9 +100,57 @@ function makeItem(overrides: Partial<GetWardrobe200Item> = {}): GetWardrobe200It
   };
 }
 
-function renderModal(item: GetWardrobe200Item) {
-  return render(<ItemDetailsModal item={item} isOpen onClose={vi.fn()} onSuccess={vi.fn()} />);
+/** The props every render of this dialog needs; each test overrides only the callbacks it asserts. */
+interface ModalOptions {
+  onClose?: () => void;
+  onSuccess?: () => void;
+  onDeleted?: (outcome: 'deleted' | 'already-gone') => void;
+  onRetagStarted?: () => void;
 }
+
+function modalElement(item: GetWardrobe200Item | null, isOpen: boolean, options: ModalOptions = {}) {
+  return (
+    <ItemDetailsModal
+      item={item}
+      isOpen={isOpen}
+      onClose={options.onClose ?? vi.fn()}
+      onSuccess={options.onSuccess ?? vi.fn()}
+      onDeleted={options.onDeleted ?? vi.fn()}
+      onRetagStarted={options.onRetagStarted ?? vi.fn()}
+    />
+  );
+}
+
+function renderModal(item: GetWardrobe200Item, options: ModalOptions = {}) {
+  return render(modalElement(item, true, options));
+}
+
+/** The in-place delete question, scoped so its two answers are unambiguous. */
+function deleteQuestion() {
+  return screen.getByRole('group', { name: 'Delete this item?' });
+}
+
+/** The dialog's own Delete control, which the question replaces while it is open. */
+function deleteControl() {
+  return screen.getByRole('button', { name: 'Delete' });
+}
+
+/** A 409 body that names an outfit the Service says still holds the item. */
+function referencedBody(dependentResources: { resource: string; count?: number }[], hint?: string) {
+  return {
+    error: 'RESOURCE_REFERENCED',
+    message: 'The wardrobe item is still referenced by other resources',
+    details: {
+      reason: 'DEPENDENT_RESOURCES_EXIST',
+      dependent_resources: dependentResources,
+      action: 'delete_dependents_first',
+      hint: hint ?? 'Remove the item from the outfit that lists it, then delete it',
+    },
+  };
+}
+
+const S1 =
+  'Nothing was deleted: this item is still in 1 outfit. Remove it from that outfit, or delete the outfit. An outfit cannot be saved with no items, so if this is its only item, delete it.';
 
 describe('ItemDetailsModal', () => {
   beforeEach(() => {
@@ -116,7 +164,6 @@ describe('ItemDetailsModal', () => {
     vi.mocked(prepareImageForUpload).mockImplementation(
       async (file: File) => new File([file], file.name, { type: 'image/jpeg' }),
     );
-    vi.spyOn(window, 'alert').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -165,7 +212,6 @@ describe('ItemDetailsModal', () => {
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(HEIC_UNSUPPORTED_MESSAGE);
     expect(postMock).not.toHaveBeenCalled();
-    expect(window.alert).not.toHaveBeenCalled();
   });
 
   it('renders the Add image tile and prepares the file before reserving as JPEG', async () => {
@@ -344,16 +390,225 @@ describe('ItemDetailsModal', () => {
   });
 
   it('locks nothing while closed or without an item', () => {
-    const { rerender } = render(
-      <ItemDetailsModal item={makeItem()} isOpen={false} onClose={vi.fn()} onSuccess={vi.fn()} />,
-    );
+    const { rerender } = render(modalElement(makeItem(), false));
     expect(document.body.style.overflow).toBe('');
 
-    rerender(<ItemDetailsModal item={null} isOpen onClose={vi.fn()} onSuccess={vi.fn()} />);
+    rerender(modalElement(null, true));
     expect(document.body.style.overflow).toBe('');
   });
 
-  describe('the failure alerts around a latched refusal', () => {
+  describe('the in-place delete confirmation', () => {
+    function stubDelete(settles: (id: string) => Promise<unknown>) {
+      const deleteItem = vi.fn((variables: { id: string }) => settles(variables.id));
+      vi.mocked(useDeleteWardrobeItemsId).mockReturnValue({ mutateAsync: deleteItem, isPending: false } as any);
+      return deleteItem;
+    }
+
+    async function openQuestionAndConfirm() {
+      fireEvent.click(deleteControl());
+      fireEvent.click(within(deleteQuestion()).getByRole('button', { name: 'Delete' }));
+    }
+
+    it('renders the question in place of the Delete control without sending anything', () => {
+      const deleteItem = stubDelete(async () => ({}));
+      renderModal(makeItem());
+
+      expect(screen.queryByText('Delete this item? This cannot be undone.')).toBeNull();
+
+      fireEvent.click(deleteControl());
+
+      const question = deleteQuestion();
+      expect(within(question).getByText('Delete this item? This cannot be undone.')).toBeInTheDocument();
+      // The dialog's other actions keep their places while the question is up;
+      // the question brings its own Cancel beside its Delete.
+      const dialog = screen.getByRole('dialog', { name: 'Item Details' });
+      for (const name of ['Save Changes', 'Re-tag']) {
+        expect(within(dialog).getByRole('button', { name })).toBeInTheDocument();
+      }
+      expect(within(dialog).getAllByRole('button', { name: 'Cancel' })).toHaveLength(2);
+      expect(deleteItem).not.toHaveBeenCalled();
+      expect(screen.getByRole('dialog', { name: 'Item Details' })).toBeInTheDocument();
+    });
+
+    it('sends nothing on Cancel and returns focus to the Delete control', () => {
+      const deleteItem = stubDelete(async () => ({}));
+      renderModal(makeItem());
+
+      fireEvent.click(deleteControl());
+      fireEvent.click(within(deleteQuestion()).getByRole('button', { name: 'Cancel' }));
+
+      expect(deleteItem).not.toHaveBeenCalled();
+      expect(screen.queryByRole('group', { name: 'Delete this item?' })).toBeNull();
+      // Declining restores the control the question replaced.
+      expect(document.activeElement).toBe(deleteControl());
+    });
+
+    it('sends exactly one DELETE with the item id and reports the deletion', async () => {
+      const deleteItem = stubDelete(async () => ({}));
+      const onDeleted = vi.fn();
+      renderModal(makeItem(), { onDeleted });
+
+      openQuestionAndConfirm();
+
+      await waitFor(() => expect(onDeleted).toHaveBeenCalledWith('deleted'));
+      expect(deleteItem).toHaveBeenCalledTimes(1);
+      expect(deleteItem).toHaveBeenCalledWith({ id: 'item-1' });
+    });
+
+    it('shows Deleting... with an inert Cancel, backdrop and Escape while the request is out', async () => {
+      let settle!: () => void;
+      const pending = new Promise<void>((resolve) => { settle = resolve; });
+      let pendingFlag = false;
+      const deleteItem = vi.fn(async () => {
+        pendingFlag = true;
+        await pending;
+      });
+      const onClose = vi.fn();
+      const onDeleted = vi.fn();
+      vi.mocked(useDeleteWardrobeItemsId).mockImplementation(
+        () => ({ mutateAsync: deleteItem, isPending: pendingFlag }) as any,
+      );
+      const options = { onClose, onDeleted };
+      const { container, rerender } = render(modalElement(makeItem(), true, options));
+
+      fireEvent.click(deleteControl());
+      fireEvent.click(within(deleteQuestion()).getByRole('button', { name: 'Delete' }));
+      await waitFor(() => expect(deleteItem).toHaveBeenCalledTimes(1));
+
+      // The mutation reports its pending state on the next render, as the real hook does.
+      rerender(modalElement(makeItem(), true, options));
+
+      const affirmative = screen.getByRole('button', { name: 'Deleting...' });
+      expect(affirmative).toBeDisabled();
+      expect(within(deleteQuestion()).getByRole('button', { name: 'Cancel' })).toBeDisabled();
+
+      // Every exit is inert for that window: no second DELETE and no close.
+      fireEvent.keyDown(document, { key: 'Escape' });
+      const backdrop = Array.from(container.querySelectorAll<HTMLElement>('div'))
+        .find((element) => element.classList.contains('bg-gray-500/75'))!;
+      fireEvent.click(backdrop);
+      fireEvent.click(within(deleteQuestion()).getByRole('button', { name: 'Cancel' }));
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(deleteItem).toHaveBeenCalledTimes(1);
+      expect(deleteQuestion()).toBeInTheDocument();
+
+      pendingFlag = false;
+      await act(async () => {
+        settle();
+        await pending;
+      });
+      await waitFor(() => expect(onDeleted).toHaveBeenCalledWith('deleted'));
+      expect(deleteItem).toHaveBeenCalledTimes(1);
+    });
+
+    it('renders S1 inside the question and keeps the dialog open when an outfit still holds the item', async () => {
+      stubDelete(async () => {
+        throw { response: { status: 409, data: referencedBody([{ resource: 'outfit', count: 1 }]) } };
+      });
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      renderModal(makeItem());
+
+      openQuestionAndConfirm();
+
+      const alert = await waitFor(() => within(deleteQuestion()).getByRole('alert'));
+      expect(alert).toHaveTextContent(S1);
+      expect(screen.getByRole('dialog', { name: 'Item Details' })).toBeInTheDocument();
+      expect(deleteQuestion()).toBeInTheDocument();
+    });
+
+    const failureCases: Array<[string, unknown, string]> = [
+      [
+        'S2 for a 409 naming three outfits',
+        { response: { status: 409, data: referencedBody([{ resource: 'outfit', count: 3 }]) } },
+        'Nothing was deleted: this item is still in 3 outfits. Remove it from those outfits, or delete them. An outfit cannot be saved with no items, so an outfit holding only this item has to be deleted.',
+      ],
+      [
+        'S3 for a 409 naming an outfit with no count',
+        { response: { status: 409, data: referencedBody([{ resource: 'outfit' }]) } },
+        'Nothing was deleted: this item is still in one or more outfits. Remove it from those outfits, or delete them. An outfit cannot be saved with no items, so an outfit holding only this item has to be deleted.',
+      ],
+      [
+        'S4 for a 409 naming another resource',
+        { response: { status: 409, data: referencedBody([{ resource: 'outfit_generation', count: 2 }], 'Delete the try-on first.') } },
+        'Delete the try-on first.',
+      ],
+      [
+        'S6 for a 503',
+        { response: { status: 503, data: {} } },
+        'Could not delete this item (server error 503). Try again.',
+      ],
+      [
+        'S7 for a request that never reached the Service',
+        { isAxiosError: true, request: {}, message: 'Network Error' },
+        'Could not reach the server. Check your connection and try again.',
+      ],
+    ];
+
+    it.each(failureCases)('renders %s in the question', async (_label, rejection, expected) => {
+      stubDelete(async () => { throw rejection; });
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      renderModal(makeItem());
+
+      openQuestionAndConfirm();
+
+      const alert = await waitFor(() => within(deleteQuestion()).getByRole('alert'));
+      expect(alert).toHaveTextContent(expected);
+      expect(screen.getByRole('dialog', { name: 'Item Details' })).toBeInTheDocument();
+    });
+
+    it('reports a 404 as already gone to its caller instead of painting a failure', async () => {
+      stubDelete(async () => {
+        throw { response: { status: 404, data: { error: 'NOT_FOUND', message: 'Wardrobe item not found' } } };
+      });
+      const onDeleted = vi.fn();
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      renderModal(makeItem(), { onDeleted });
+
+      openQuestionAndConfirm();
+
+      await waitFor(() => expect(onDeleted).toHaveBeenCalledWith('already-gone'));
+      expect(within(deleteQuestion()).queryByRole('alert')).toBeNull();
+    });
+
+    it('keeps both answers inside the dialog single Tab trap and wraps from the last stop', () => {
+      stubDelete(async () => ({}));
+      renderModal(makeItem());
+
+      fireEvent.click(deleteControl());
+
+      const question = deleteQuestion();
+      const cancel = within(question).getByRole('button', { name: 'Cancel' });
+      const affirmative = within(question).getByRole('button', { name: 'Delete' });
+
+      // The question focuses its Cancel first, and both answers are focus stops.
+      expect(document.activeElement).toBe(cancel);
+      affirmative.focus();
+      expect(document.activeElement).toBe(affirmative);
+
+      // The dialog's Cancel is the trap's last stop; forward Tab returns to the
+      // panel's Close control, so both answers sit inside one trap.
+      const dialog = screen.getByRole('dialog', { name: 'Item Details' });
+      const dialogCancels = within(dialog).getAllByRole('button', { name: 'Cancel' });
+      const dialogCancel = dialogCancels[dialogCancels.length - 1];
+      dialogCancel.focus();
+      expect(fireEvent.keyDown(document, { key: 'Tab' })).toBe(false);
+      expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'Close' }));
+    });
+
+    it('leaves Escape closing the whole dialog, because the question adds no handler', () => {
+      stubDelete(async () => ({}));
+      const onClose = vi.fn();
+      renderModal(makeItem(), { onClose });
+
+      fireEvent.click(deleteControl());
+      fireEvent.keyDown(document, { key: 'Escape' });
+
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('the failure sentences around a latched refusal', () => {
     beforeEach(() => {
       useClientVersionRefusalStore.setState({ refusal: null });
     });
@@ -376,9 +631,13 @@ describe('ItemDetailsModal', () => {
       vi.mocked(usePatchWardrobeItemsId).mockReturnValue({ mutateAsync: updateItem, isPending: false } as any);
       vi.mocked(useDeleteWardrobeItemsId).mockReturnValue({ mutateAsync: deleteItem, isPending: false } as any);
       vi.mocked(usePostWardrobeItemsItemIdRetag).mockReturnValue({ mutateAsync: retagItem, isPending: false } as any);
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
       vi.spyOn(console, 'error').mockImplementation(() => undefined);
       return { updateItem, deleteItem, retagItem };
+    }
+
+    /** Every sentence currently painted in a `role="alert"`, in document order. */
+    function alertText(): string {
+      return screen.queryAllByRole('alert').map((element) => element.textContent ?? '').join(' ');
     }
 
     async function driveEveryFailure() {
@@ -387,27 +646,89 @@ describe('ItemDetailsModal', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Re-tag' }));
       await waitFor(() => expect(mocked.retagItem).toHaveBeenCalledTimes(1));
-      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+      fireEvent.click(deleteControl());
+      fireEvent.click(within(deleteQuestion()).getByRole('button', { name: 'Delete' }));
       await waitFor(() => expect(mocked.deleteItem).toHaveBeenCalledTimes(1));
       fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
       await waitFor(() => expect(mocked.updateItem).toHaveBeenCalledTimes(1));
     }
 
-    it('still raises the three alerts while nothing is refused', async () => {
-      await driveEveryFailure();
+    it('renders the three failure sentences while nothing is refused', async () => {
+      const mocked = stubFailures();
+      renderModal(makeItem());
 
-      await waitFor(() => expect(window.alert).toHaveBeenCalledTimes(3));
-      expect(window.alert).toHaveBeenCalledWith('Failed to start re-tagging');
-      expect(window.alert).toHaveBeenCalledWith('Failed to delete item');
-      expect(window.alert).toHaveBeenCalledWith('Failed to update item');
+      fireEvent.click(screen.getByRole('button', { name: 'Re-tag' }));
+      await waitFor(() => expect(mocked.retagItem).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(alertText()).toContain('Failed to start re-tagging'));
+
+      fireEvent.click(deleteControl());
+      fireEvent.click(within(deleteQuestion()).getByRole('button', { name: 'Delete' }));
+      await waitFor(() => expect(mocked.deleteItem).toHaveBeenCalledTimes(1));
+      // A rejection with no status is a request that never reached the Service.
+      await waitFor(() => expect(alertText()).toContain('Could not reach the server. Check your connection and try again.'));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+      await waitFor(() => expect(mocked.updateItem).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(alertText()).toContain('Failed to update item'));
+      // The delete sentence from the step before is still inside the question.
+      expect(deleteQuestion()).toHaveTextContent('Could not reach the server. Check your connection and try again.');
     });
 
-    it('raises no alert once the Client version refusal is latched', async () => {
+    it('writes no sentence once the Client version refusal is latched', async () => {
       latchRefusal();
 
       await driveEveryFailure();
 
-      expect(window.alert).not.toHaveBeenCalled();
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.queryByText('Failed to start re-tagging')).toBeNull();
+      expect(screen.queryByText('Failed to update item')).toBeNull();
+    });
+  });
+
+  describe('the update and re-tag sentences', () => {
+    it('prints the update failure above the action row and keeps the person edits', async () => {
+      const updateItem = vi.fn().mockRejectedValue(new Error('failed'));
+      vi.mocked(usePatchWardrobeItemsId).mockReturnValue({ mutateAsync: updateItem, isPending: false } as any);
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      renderModal(makeItem());
+
+      fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), { target: { value: 'Renamed Hoodie' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent('Failed to update item');
+      // Above the action row, not inside it.
+      expect(alert.nextElementSibling).toContainElement(screen.getByRole('button', { name: 'Save Changes' }));
+      expect(screen.getByRole('textbox', { name: 'Name' })).toHaveValue('Renamed Hoodie');
+      expect(screen.getByRole('dialog', { name: 'Item Details' })).toBeInTheDocument();
+    });
+
+    it('prints the re-tag failure above the action row', async () => {
+      const retagItem = vi.fn().mockRejectedValue(new Error('failed'));
+      vi.mocked(usePostWardrobeItemsItemIdRetag).mockReturnValue({ mutateAsync: retagItem, isPending: false } as any);
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      renderModal(makeItem());
+
+      fireEvent.click(screen.getByRole('button', { name: 'Re-tag' }));
+
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent('Failed to start re-tagging');
+      expect(screen.getByRole('dialog', { name: 'Item Details' })).toBeInTheDocument();
+    });
+
+    it('reports a started re-tag to its caller so the message outlives the dialog', async () => {
+      const retagItem = vi.fn().mockResolvedValue({});
+      const onRetagStarted = vi.fn();
+      const onSuccess = vi.fn();
+      vi.mocked(usePostWardrobeItemsItemIdRetag).mockReturnValue({ mutateAsync: retagItem, isPending: false } as any);
+      renderModal(makeItem(), { onRetagStarted, onSuccess });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Re-tag' }));
+
+      await waitFor(() => expect(onRetagStarted).toHaveBeenCalledTimes(1));
+      // N1 belongs to the page notice now, not to this dialog's own close path.
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(screen.queryByRole('alert')).toBeNull();
     });
   });
   describe('in the desktop client', () => {

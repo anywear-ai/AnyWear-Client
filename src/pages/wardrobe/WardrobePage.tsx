@@ -6,14 +6,17 @@ import AddItemModal from './AddItemModal';
 import CreateOutfitModal from './CreateOutfitModal';
 import ItemDetailsModal from './ItemDetailsModal';
 import GenerateLookDialog from './GenerateLookDialog';
+import DeleteItemDialog from './DeleteItemDialog';
 import CachedImage from '../../components/CachedImage';
 import OutfitLookBadge from '../../components/OutfitLookBadge';
 import { getOutfitLookImage } from '../../lib/image-utils';
 import { outfitHasActiveGeneration, outfitLookRefetchInterval, type OutfitLookState } from '../../lib/outfit-look';
 import { getErrorMessage } from '../../lib/errors';
+import { describeWardrobeItemDeleteFailure, ITEM_ALREADY_GONE_MESSAGE } from '../../lib/wardrobeItemDeleteFailure';
 import { connectSse } from '../../lib/sse';
 import { mergeWardrobeStatus } from '../../lib/status-arbitration';
 import { useWardrobeList } from '../../hooks/useWardrobeList';
+import { isClientVersionRefused } from '../../store/clientVersionRefusalStore';
 import { GetWardrobe200Item } from '../../api/model/getWardrobe200Item';
 import { GetWardrobeParams } from '../../api/model/getWardrobeParams';
 import { GetOutfits200OutfitsItem } from '../../api/model/getOutfits200OutfitsItem';
@@ -99,6 +102,37 @@ function cleanupNoticeText(retainedObjectKeys: number): string {
   return `Outfit deleted. ${retainedObjectKeys} image${retainedObjectKeys === 1 ? ' is' : 's are'} still being cleaned up in the background.`;
 }
 
+/** The message a started re-tag leaves in the page notice after its dialog closes. */
+const RETAG_STARTED_TEXT = 'Re-tagging started. Check back shortly.';
+
+/**
+ * Everything the page states in its one `role="status"` notice: an outfit delete
+ * that still owes image cleanup, a re-tag that outlives the dialog that started
+ * it, and a delete whose row was already gone.
+ */
+type PageNotice =
+  | { kind: 'outfit-cleanup'; retainedObjectKeys: number }
+  | { kind: 'retag-started' }
+  | { kind: 'item-already-gone' };
+
+function noticeText(notice: PageNotice): string {
+  switch (notice.kind) {
+    case 'outfit-cleanup':
+      return cleanupNoticeText(notice.retainedObjectKeys);
+    case 'retag-started':
+      return RETAG_STARTED_TEXT;
+    case 'item-already-gone':
+      return ITEM_ALREADY_GONE_MESSAGE;
+  }
+}
+
+/** The item a grid card asked about, held from the click until the delete settles. */
+interface DeleteTarget {
+  id: string;
+  name?: string | null;
+  category?: string | null;
+}
+
 export default function WardrobePage() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isOutfitModalOpen, setIsOutfitModalOpen] = useState(false);
@@ -111,9 +145,20 @@ export default function WardrobePage() {
   // Held from the confirm click until the request and its refreshes settle, so
   // the confirmation cannot start a second charge while the first one starts.
   const [isStartingLook, setIsStartingLook] = useState(false);
-  // A delete whose rows are gone while the Service still owes stored-image
-  // cleanup: the outfit is deleted, so this is a notice outside the dialog.
-  const [cleanupNotice, setCleanupNotice] = useState<{ retainedObjectKeys: number } | null>(null);
+  // The grid card's whole delete path: the item the panel asks about, the
+  // sentence a refused delete leaves beside its control, and where focus lands
+  // once the panel has closed.
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [deleteFailure, setDeleteFailure] = useState<string | null>(null);
+  // Set by a delete that took the card with it; the effect below moves focus to
+  // the grid region once the panel has actually left the document.
+  const restoreFocusToList = useRef(false);
+  // The page's one notice, outside every dialog: an outfit whose rows are gone
+  // while the Service still owes stored-image cleanup, a re-tag that outlives
+  // the dialog that started it, and a row that was already gone.
+  const [notice, setNotice] = useState<PageNotice | null>(null);
+
+  const listRegionRef = useRef<HTMLDivElement>(null);
 
   const queryClient = useQueryClient();
 
@@ -126,7 +171,9 @@ export default function WardrobePage() {
   } = useWardrobeList(filters);
 
   const { data: categoriesResponse } = useGetWardrobeCategories();
-  const { mutate: deleteItem } = useDeleteWardrobeItemsId();
+  // The delete is awaited in the panel's handler: the outcome has to be known to
+  // decide whether the card leaves and where the sentence goes.
+  const { mutateAsync: deleteItem, isPending: isDeleting } = useDeleteWardrobeItemsId();
   const { data: outfitsResponse } = useGetOutfits({
     query: {
       // Poll only while an outfit has a Pending or Processing generation; the
@@ -205,17 +252,89 @@ export default function WardrobePage() {
     };
   }, [hasInFlightItem, applyStatusFrame, notifyStreamState]);
 
-  const handleDelete = (id: string, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
-    if (window.confirm('Are you sure you want to delete this item?')) {
-      deleteItem({ id }, {
-        onSuccess: () => {
-          if (selectedItem?.id === id) setSelectedItem(null);
-          refetch();
-        },
-      });
-    }
+  /**
+   * Every cached wardrobe list drops the row in the same commit as the panel
+   * closing, so the card leaves before the refresh lands. A filtered list is
+   * trimmed the same way; the categories response is not a list and is left as
+   * it is.
+   */
+  const removeItemFromLists = useCallback((id: string) => {
+    queryClient.setQueriesData<GetWardrobe200Item[]>({ queryKey: ['/wardrobe'] }, (cached) => {
+      if (!Array.isArray(cached)) return cached;
+      const next = cached.filter((item) => item.id !== id);
+      return next.length === cached.length ? cached : next;
+    });
+  }, [queryClient]);
+
+  /**
+   * Closes the panel after a delete that took the row with it and asks the focus
+   * effect to move focus to the grid region, because the card that opened the
+   * confirmation is gone.
+   */
+  const settleDeletedItem = (id: string, nextNotice?: PageNotice) => {
+    if (selectedItem?.id === id) setSelectedItem(null);
+    restoreFocusToList.current = true;
+    setDeleteTarget(null);
+    setDeleteFailure(null);
+    if (nextNotice) setNotice(nextNotice);
   };
+
+  const openDeleteConfirmation = (item: GetWardrobe200Item, event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    // The opener is the panel's focus-return target after a decline, so it is
+    // focused here rather than left to the engine's click-focus behaviour, which
+    // differs between the shells.
+    event.currentTarget.focus();
+    setDeleteFailure(null);
+    setDeleteTarget({ id: item.id, name: item.name, category: item.category });
+  };
+
+  const cancelDeleteConfirmation = () => {
+    setDeleteTarget(null);
+    setDeleteFailure(null);
+  };
+
+  const confirmDeleteItem = async () => {
+    if (!deleteTarget || isDeleting) return;
+    const { id } = deleteTarget;
+    setDeleteFailure(null);
+
+    try {
+      await deleteItem({ id });
+    } catch (error) {
+      console.error('Failed to delete item:', error);
+      // The terminal refusal owns the whole screen; nothing is written over it.
+      if (isClientVersionRefused()) return;
+      const failure = describeWardrobeItemDeleteFailure(error);
+      if (!failure.gone) {
+        // The item stays and its own sentence sits beside the control that sent
+        // the request, so the person can retry or cancel.
+        setDeleteFailure(failure.message);
+        void refetch();
+        return;
+      }
+      // A 404 means the row is already gone: it is a removal, not a failure.
+      removeItemFromLists(id);
+      settleDeletedItem(id, { kind: 'item-already-gone' });
+      void refetch();
+      return;
+    }
+
+    removeItemFromLists(id);
+    settleDeletedItem(id);
+    void refetch();
+  };
+
+  // A confirmed delete takes the card that opened the confirmation with it — and
+  // the details dialog when that surface asked — so focus moves to the grid
+  // region that now holds the remaining cards instead of falling back to the
+  // body. The flag is a ref because it records only that one of those surfaces
+  // closed under a settled delete; it is not rendered state.
+  useEffect(() => {
+    if (!restoreFocusToList.current) return;
+    restoreFocusToList.current = false;
+    listRegionRef.current?.focus();
+  }, [deleteTarget, selectedItem]);
 
   const handleCategoryFilter = (category: string) => {
     if (category === 'all') {
@@ -323,77 +442,83 @@ export default function WardrobePage() {
         </div>
       )}
 
-      {isLoading ? (
-        <div className="text-center py-12">Loading...</div>
-      ) : wardrobeData.length === 0 ? (
-        <div className="text-center py-16 px-6 bg-white border border-gray-200 rounded-xl">
-          <p className="text-gray-600">Your wardrobe is empty. Tap "Add Item" to get started.</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 sm:gap-4">
-          {(wardrobeData as GetWardrobe200Item[]).map((item) => {
-            const color = getColorFromAttributes(item.styleAttributes);
-            const material = getMaterialFromAttributes(item.styleAttributes);
-            const statusBadge = getTagStatusBadge(item.taggingStatus);
-            const isProcessing = isInFlightItem(item);
-            const primaryImage = item.images.find((image) => image.isPrimary) ?? item.images[0];
+      {/* The focus target a confirmed delete moves to: the region that holds
+          whatever cards remain, including the empty state. It is programmatically
+          focusable only, so it adds no tab stop. */}
+      <div ref={listRegionRef} tabIndex={-1} aria-label="Wardrobe items" role="region" className="focus:outline-none">
+        {isLoading ? (
+          <div className="text-center py-12">Loading...</div>
+        ) : wardrobeData.length === 0 ? (
+          <div className="text-center py-16 px-6 bg-white border border-gray-200 rounded-xl">
+            <p className="text-gray-600">Your wardrobe is empty. Tap "Add Item" to get started.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 sm:gap-4">
+            {(wardrobeData as GetWardrobe200Item[]).map((item) => {
+              const color = getColorFromAttributes(item.styleAttributes);
+              const material = getMaterialFromAttributes(item.styleAttributes);
+              const statusBadge = getTagStatusBadge(item.taggingStatus);
+              const isProcessing = isInFlightItem(item);
+              const primaryImage = item.images.find((image) => image.isPrimary) ?? item.images[0];
 
-            return (
-              <article
-                key={item.id}
-                className="relative group overflow-hidden rounded-xl border border-gray-200 bg-white transition-shadow hover:shadow-md"
-              >
-                <button
-                  type="button"
-                  disabled={isProcessing}
-                  aria-label={`View ${item.name || item.category || 'wardrobe item'} details`}
-                  onClick={() => setSelectedItem(item)}
-                  className="block w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-600 disabled:cursor-default"
+              return (
+                <article
+                  key={item.id}
+                  className="relative group overflow-hidden rounded-xl border border-gray-200 bg-white transition-shadow hover:shadow-md"
                 >
-                  <div className="aspect-[4/5] bg-gray-100">
-                    {primaryImage?.url ? (
-                      <CachedImage
-                        src={primaryImage.url}
-                        cacheKey={primaryImage.imageId}
-                        alt={item.category || 'Wardrobe item'}
-                        className="h-full w-full object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-full w-full items-center justify-center text-sm text-gray-400">No Image</div>
-                    )}
-                  </div>
-                  <div className="min-h-20 p-3">
-                    <div className="flex items-start justify-between gap-2">
-                      <h3 className="min-w-0 truncate text-sm font-medium text-gray-900">{item.name || item.category || 'Unknown'}</h3>
-                      {statusBadge}
+                  <button
+                    type="button"
+                    disabled={isProcessing}
+                    aria-label={`View ${item.name || item.category || 'wardrobe item'} details`}
+                    onClick={() => setSelectedItem(item)}
+                    className="block w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-600 disabled:cursor-default"
+                  >
+                    <div className="aspect-[4/5] bg-gray-100">
+                      {primaryImage?.url ? (
+                        <CachedImage
+                          src={primaryImage.url}
+                          cacheKey={primaryImage.imageId}
+                          alt={item.category || 'Wardrobe item'}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-sm text-gray-400">No Image</div>
+                      )}
                     </div>
-                    {(color || material) && <p className="mt-1 text-xs text-gray-500">{[color, material].filter(Boolean).join(' • ')}</p>}
-                  </div>
-                </button>
-                <button
-                  onClick={(e) => item.id && handleDelete(item.id, e)}
-                  aria-label={`Delete ${item.name || item.category || 'wardrobe item'}`}
-                  className="absolute right-2 top-2 rounded-full bg-white/95 p-2 text-red-700 shadow-sm opacity-100 transition-opacity hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
-                >
-                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </article>
-            );
-          })}
-        </div>
-      )}
+                    <div className="min-h-20 p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <h3 className="min-w-0 truncate text-sm font-medium text-gray-900">{item.name || item.category || 'Unknown'}</h3>
+                        {statusBadge}
+                      </div>
+                      {(color || material) && <p className="mt-1 text-xs text-gray-500">{[color, material].filter(Boolean).join(' • ')}</p>}
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => openDeleteConfirmation(item, e)}
+                    aria-label={`Delete ${item.name || item.category || 'wardrobe item'}`}
+                    className="absolute right-2 top-2 rounded-full bg-white/95 p-2 text-red-700 shadow-sm opacity-100 transition-opacity hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+                  >
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
-      {cleanupNotice && (
+      {notice && (
         <div
           role="status"
           className="mt-8 flex items-center justify-between gap-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3"
         >
-          <p className="text-sm text-green-800">{cleanupNoticeText(cleanupNotice.retainedObjectKeys)}</p>
+          <p className="text-sm text-green-800">{noticeText(notice)}</p>
           <button
             type="button"
-            onClick={() => setCleanupNotice(null)}
+            onClick={() => setNotice(null)}
             className="rounded-lg px-2 py-1 text-sm font-medium text-green-800 hover:bg-green-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
           >
             Dismiss
@@ -525,10 +650,20 @@ export default function WardrobePage() {
           onClose={handleOutfitModalClose}
           onSuccess={() => queryClient.invalidateQueries({ queryKey: ['/outfits'] })}
           onSaved={openGenerateLook}
-          onNotice={setCleanupNotice}
+          onNotice={(cleanup) => setNotice({ kind: 'outfit-cleanup', retainedObjectKeys: cleanup.retainedObjectKeys })}
           outfit={selectedOutfit ?? undefined}
         />
       )}
+
+      <DeleteItemDialog
+        isOpen={deleteTarget !== null}
+        itemName={deleteTarget?.name}
+        itemCategory={deleteTarget?.category}
+        isSubmitting={isDeleting}
+        failureMessage={deleteFailure}
+        onCancel={cancelDeleteConfirmation}
+        onConfirm={confirmDeleteItem}
+      />
 
       {selectedItem && (
         <ItemDetailsModal
@@ -538,6 +673,22 @@ export default function WardrobePage() {
           onSuccess={() => {
             setSelectedItem(null);
             refetch();
+          }}
+          onDeleted={(outcome) => {
+            // The dialog's own delete removed the row: it leaves every cached
+            // list here, the dialog closes, and focus moves to what remains.
+            removeItemFromLists(selectedItem.id);
+            setSelectedItem(null);
+            restoreFocusToList.current = true;
+            if (outcome === 'already-gone') setNotice({ kind: 'item-already-gone' });
+            void refetch();
+          }}
+          onRetagStarted={() => {
+            // The message now outlives the dialog that asked for the re-tag; the
+            // card picks up `Analyzing...` from the refreshed list.
+            setSelectedItem(null);
+            setNotice({ kind: 'retag-started' });
+            void refetch();
           }}
         />
       )}

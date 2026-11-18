@@ -38,6 +38,19 @@ const addItemModal = vi.hoisted(() => ({
   props: null as AddItemModalMockProps | null,
 }));
 
+interface ItemDetailsModalMockProps {
+  item: GetWardrobe200Item;
+  isOpen: boolean;
+  onClose?: () => void;
+  onSuccess?: () => void;
+  onDeleted?: (outcome: 'deleted' | 'already-gone') => void;
+  onRetagStarted?: () => void;
+}
+
+const itemDetailsModal = vi.hoisted(() => ({
+  props: null as ItemDetailsModalMockProps | null,
+}));
+
 interface SseConnectionMock {
   path: string;
   onEvent: (data: TaggingStatusResponse) => void;
@@ -101,7 +114,14 @@ vi.mock('./AddItemModal', () => ({
     return null;
   },
 }));
-vi.mock('./ItemDetailsModal', () => ({ default: () => null }));
+vi.mock('./ItemDetailsModal', () => ({
+  default: (props: ItemDetailsModalMockProps) => {
+    // Record the real props so the tests can drive the page's own wiring for the
+    // delete and re-tag outcomes instead of relying on this stand-in.
+    itemDetailsModal.props = props;
+    return null;
+  },
+}));
 vi.mock('./CreateOutfitModal', async () => {
   const { default: useAccessibleDialog } = await import('../../hooks/useAccessibleDialog');
 
@@ -147,6 +167,8 @@ const customInstanceMock = vi.mocked(customInstance);
 let wardrobeItems: GetWardrobe200Item[] = [];
 /** When set, the next wardrobe reads answer through it instead of `wardrobeItems`. */
 let wardrobeHandler: ((items: GetWardrobe200Item[]) => Promise<GetWardrobe200Item[]>) | null = null;
+/** The mocked `DELETE /wardrobe/items/{id}`; a test replaces it with its own outcome. */
+let deleteHandler: (config: Record<string, any>) => Promise<unknown> = () => Promise.resolve({});
 let defaultCategories: string[] = [];
 
 function outfit(overrides: Record<string, unknown> = {}) {
@@ -208,6 +230,30 @@ function wardrobeRequests(): Array<Record<string, any>> {
     .filter((config) => config.method === 'GET' && config.url === '/wardrobe');
 }
 
+/** Every `DELETE /wardrobe/items/{id}` the page's confirmation issued. */
+function deleteRequests(): Array<Record<string, any>> {
+  return customInstanceMock.mock.calls
+    .map(([config]) => config as unknown as Record<string, any>)
+    .filter((config) => config.method === 'DELETE');
+}
+
+/** The card control that opens the delete confirmation for the named item. */
+function deleteControlFor(itemName: string) {
+  return screen.getByRole('button', { name: `Delete ${itemName}` });
+}
+
+/**
+ * Opens the page's delete confirmation from a card, with focus already on the
+ * control that asks — which is where a keyboard or pointer user leaves it and
+ * where a declined confirmation returns it.
+ */
+function openDeleteConfirmation(itemName = 'Coat') {
+  const control = deleteControlFor(itemName);
+  control.focus();
+  fireEvent.click(control);
+  return screen.getByRole('dialog', { name: 'Delete this item?' });
+}
+
 function wardrobeCache(): GetWardrobe200Item[] | undefined {
   return queryClients[queryClients.length - 1]?.getQueryData<GetWardrobe200Item[]>(getGetWardrobeQueryKey({}));
 }
@@ -250,6 +296,18 @@ function openAddItemDialog() {
   return props!;
 }
 
+/**
+ * Opens the mocked item details dialog so the page's own delete and re-tag
+ * wiring can be invoked.
+ */
+function openItemDetailsDialog(itemName = 'Coat') {
+  fireEvent.click(screen.getByRole('button', { name: `View ${itemName} details` }));
+  const props = itemDetailsModal.props;
+  expect(props?.onDeleted).toBeTypeOf('function');
+  expect(props?.onRetagStarted).toBeTypeOf('function');
+  return props!;
+}
+
 async function flush() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -272,11 +330,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   createOutfitModal.props = null;
   addItemModal.props = null;
+  itemDetailsModal.props = null;
   sseStreams.connections.splice(0);
   sseStreams.autoOpen = true;
   queryClients.splice(0).forEach((client) => client.clear());
   wardrobeItems = [];
   wardrobeHandler = null;
+  deleteHandler = () => Promise.resolve({});
   defaultCategories = [];
   generateLook.mockReset();
   generateLook.mockResolvedValue({ generation_id: 'gen-2', outfit_id: 'outfit-1' });
@@ -290,6 +350,9 @@ beforeEach(() => {
     }
     if (config.method === 'GET' && config.url === '/wardrobe/categories') {
       return Promise.resolve({ categories: defaultCategories });
+    }
+    if (config.method === 'DELETE' && typeof config.url === 'string' && config.url.startsWith('/wardrobe/items/')) {
+      return deleteHandler(config);
     }
     return Promise.resolve(undefined);
   }) as any);
@@ -1196,5 +1259,305 @@ describe('WardrobePage list reads after confirmations', () => {
     expect(reads).toBe(2);
     expect(wardrobeRequests()).toHaveLength(3);
     wardrobeHandler = null;
+  });
+});
+
+describe('WardrobePage item delete confirmation', () => {
+  /** The Service's `DELETE /wardrobe/items/{id}` 409 body. */
+  function referencedBody(dependentResources: { resource: string; count?: number }[], hint?: string) {
+    return {
+      error: 'RESOURCE_REFERENCED',
+      message: 'The wardrobe item is still referenced by other resources',
+      details: {
+        reason: 'DEPENDENT_RESOURCES_EXIST',
+        dependent_resources: dependentResources,
+        action: 'delete_dependents_first',
+        hint: hint ?? 'Remove the item from the outfit that lists it, then delete it',
+      },
+    };
+  }
+
+  const S1 =
+    'Nothing was deleted: this item is still in 1 outfit. Remove it from that outfit, or delete the outfit. An outfit cannot be saved with no items, so if this is its only item, delete it.';
+  const S5 = 'This item is no longer in your wardrobe, so it was removed from this list.';
+
+  beforeEach(() => {
+    wardrobeItems = [wardrobeItem()];
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  });
+
+  it('asks in a panel the page renders, naming the item, and sends nothing yet', () => {
+    renderPage({ seed: [wardrobeItem()] });
+
+    const panel = openDeleteConfirmation();
+
+    expect(panel).toHaveTextContent('Coat will be removed from your wardrobe. This cannot be undone.');
+    expect(within(panel).getByRole('button', { name: 'Delete item' })).toBeInTheDocument();
+    expect(deleteRequests()).toEqual([]);
+  });
+
+  it('names the item by its category when it has no name', () => {
+    wardrobeItems = [wardrobeItem({ name: null })];
+    renderPage({ seed: [wardrobeItem({ name: null })] });
+
+    const panel = openDeleteConfirmation('Outerwear');
+
+    expect(panel).toHaveTextContent('Outerwear will be removed from your wardrobe. This cannot be undone.');
+  });
+
+  it('leaves the axios instance without a DELETE when the confirmation is declined', () => {
+    renderPage({ seed: [wardrobeItem()] });
+
+    const panel = openDeleteConfirmation();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Cancel' }));
+
+    expect(screen.queryByRole('dialog', { name: 'Delete this item?' })).toBeNull();
+    expect(deleteRequests()).toEqual([]);
+    expect(wardrobeCache()?.map((item) => item.id)).toEqual(['item-1']);
+  });
+
+  it('calls DELETE /wardrobe/items/{id} exactly once when the confirmation is accepted', async () => {
+    deleteHandler = () => {
+      wardrobeItems = [];
+      return Promise.resolve({});
+    };
+    renderPage({ seed: [wardrobeItem()] });
+
+    const panel = openDeleteConfirmation();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
+
+    await waitFor(() => expect(deleteRequests()).toHaveLength(1));
+    expect(deleteRequests()[0]).toMatchObject({ method: 'DELETE', url: '/wardrobe/items/item-1' });
+  });
+
+  it('reads Deleting... with every exit inert while the request is out', async () => {
+    let release!: () => void;
+    const settled = new Promise<void>((resolve) => { release = resolve; });
+    deleteHandler = () => {
+      wardrobeItems = [];
+      return settled;
+    };
+    renderPage({ seed: [wardrobeItem()] });
+
+    const panel = openDeleteConfirmation();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
+
+    const affirmative = await screen.findByRole('button', { name: 'Deleting...' });
+    expect(affirmative).toBeDisabled();
+    const stillOpen = screen.getByRole('dialog', { name: 'Delete this item?' });
+    expect(within(stillOpen).getByRole('button', { name: 'Cancel' })).toBeDisabled();
+
+    // No exit closes the panel or sends a second request in that window.
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.click(screen.getByTestId('delete-item-dialog-backdrop'));
+    fireEvent.click(within(stillOpen).getByRole('button', { name: 'Cancel' }));
+
+    expect(screen.getByRole('dialog', { name: 'Delete this item?' })).toBeInTheDocument();
+    expect(deleteRequests()).toHaveLength(1);
+
+    await act(async () => {
+      release();
+      await settled;
+    });
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Delete Coat' })).toBeNull());
+    expect(deleteRequests()).toHaveLength(1);
+  });
+
+  it('renders S1 for an outfit refusal and keeps the card', async () => {
+    deleteHandler = () => Promise.reject({
+      response: { status: 409, data: referencedBody([{ resource: 'outfit', count: 1 }]) },
+    });
+    renderPage({ seed: [wardrobeItem()] });
+
+    const panel = openDeleteConfirmation();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
+
+    const alert = await waitFor(() => screen.getByRole('alert'));
+    expect(alert).toHaveTextContent(S1);
+    // The panel stays up with its sentence, and the item stays in the grid and
+    // in every cached list.
+    expect(screen.getByRole('dialog', { name: 'Delete this item?' })).toBeInTheDocument();
+    expect(deleteControlFor('Coat')).toBeInTheDocument();
+    expect(wardrobeCache()?.map((item) => item.id)).toEqual(['item-1']);
+  });
+
+  const failureCases: Array<[string, unknown, string]> = [
+    [
+      'S2 for a 409 naming three outfits',
+      { response: { status: 409, data: referencedBody([{ resource: 'outfit', count: 3 }]) } },
+      'Nothing was deleted: this item is still in 3 outfits. Remove it from those outfits, or delete them. An outfit cannot be saved with no items, so an outfit holding only this item has to be deleted.',
+    ],
+    [
+      'S3 for a 409 naming an outfit with no count',
+      { response: { status: 409, data: referencedBody([{ resource: 'outfit' }]) } },
+      'Nothing was deleted: this item is still in one or more outfits. Remove it from those outfits, or delete them. An outfit cannot be saved with no items, so an outfit holding only this item has to be deleted.',
+    ],
+    [
+      'S4 for a 409 naming another resource',
+      { response: { status: 409, data: referencedBody([{ resource: 'outfit_generation', count: 2 }], 'Delete the try-on first.') } },
+      'Delete the try-on first.',
+    ],
+    [
+      'S6 for a 503',
+      { response: { status: 503, data: {} } },
+      'Could not delete this item (server error 503). Try again.',
+    ],
+    [
+      'S7 for a request that never reached the Service',
+      { isAxiosError: true, request: {}, message: 'Network Error' },
+      'Could not reach the server. Check your connection and try again.',
+    ],
+  ];
+
+  it.each(failureCases)('renders %s in the panel and keeps the card', async (_label, rejection, expected) => {
+    deleteHandler = () => Promise.reject(rejection);
+    renderPage({ seed: [wardrobeItem()] });
+
+    const panel = openDeleteConfirmation();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
+
+    const alert = await waitFor(() => screen.getByRole('alert'));
+    expect(alert).toHaveTextContent(expected);
+    expect(deleteControlFor('Coat')).toBeInTheDocument();
+  });
+
+  it('removes the card and states S5 in the page notice for a 404', async () => {
+    deleteHandler = () => {
+      wardrobeItems = [];
+      return Promise.reject({ response: { status: 404, data: { error: 'NOT_FOUND', message: 'Wardrobe item not found' } } });
+    };
+    renderPage({ seed: [wardrobeItem()] });
+
+    const panel = openDeleteConfirmation();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete this item?' })).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Delete Coat' })).toBeNull();
+    const notice = await screen.findByRole('status');
+    expect(notice).toHaveTextContent(S5);
+    expect(notice).not.toHaveTextContent('outfit');
+  });
+
+  it('removes the card without a reload after a successful delete', async () => {
+    deleteHandler = () => {
+      wardrobeItems = [];
+      return Promise.resolve({});
+    };
+    const hrefBefore = window.location.href;
+    renderPage({ seed: [wardrobeItem()] });
+    expect(wardrobeRequests()).toHaveLength(0);
+
+    const panel = openDeleteConfirmation();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Delete Coat' })).toBeNull());
+    // The row leaves every cached wardrobe list and one merged read follows.
+    expect(wardrobeCache()).toEqual([]);
+    await waitFor(() => expect(wardrobeRequests()).toHaveLength(1));
+    expect(window.location.href).toBe(hrefBefore);
+  });
+
+  it('wraps Tab inside the panel and focuses Cancel first', () => {
+    renderPage({ seed: [wardrobeItem()] });
+
+    const panel = openDeleteConfirmation();
+    const cancel = within(panel).getByRole('button', { name: 'Cancel' });
+    const confirm = within(panel).getByRole('button', { name: 'Delete item' });
+
+    expect(document.activeElement).toBe(cancel);
+
+    confirm.focus();
+    expect(fireEvent.keyDown(document, { key: 'Tab' })).toBe(false);
+    expect(document.activeElement).toBe(cancel);
+  });
+
+  it('declines on Escape and returns focus to the card control that asked', () => {
+    renderPage({ seed: [wardrobeItem()] });
+
+    const control = deleteControlFor('Coat');
+    control.focus();
+    fireEvent.click(control);
+    expect(document.activeElement).not.toBe(control);
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(screen.queryByRole('dialog', { name: 'Delete this item?' })).toBeNull();
+    expect(document.activeElement).toBe(control);
+    expect(deleteRequests()).toEqual([]);
+  });
+
+  it('locks the body while the panel is open and releases it on close', () => {
+    renderPage({ seed: [wardrobeItem()] });
+    expect(document.body.style.overflow).toBe('');
+
+    const panel = openDeleteConfirmation();
+    expect(document.body.style.overflow).toBe('hidden');
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Cancel' }));
+    expect(document.body.style.overflow).toBe('');
+  });
+
+  it('moves focus to the grid region after a confirmed delete', async () => {
+    deleteHandler = () => {
+      wardrobeItems = [];
+      return Promise.resolve({});
+    };
+    renderPage({ seed: [wardrobeItem()] });
+
+    const panel = openDeleteConfirmation();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Delete Coat' })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole('region', { name: 'Wardrobe items' }),
+    ));
+  });
+});
+
+describe('WardrobePage outcomes of the item details dialog', () => {
+  const S5 = 'This item is no longer in your wardrobe, so it was removed from this list.';
+
+  beforeEach(() => {
+    wardrobeItems = [wardrobeItem()];
+  });
+
+  it('states a started re-tag in the page notice, which outlives the dialog that asked', async () => {
+    renderPage({ seed: [wardrobeItem()] });
+
+    const props = openItemDetailsDialog();
+    act(() => props.onRetagStarted?.());
+
+    const notice = screen.getByRole('status');
+    expect(notice).toHaveTextContent('Re-tagging started. Check back shortly.');
+    // The page re-reads the list so the card picks up the item's new status.
+    await waitFor(() => expect(wardrobeRequests()).toHaveLength(1));
+  });
+
+  it('removes the card and states S5 for a delete whose row was already gone', async () => {
+    wardrobeItems = [];
+    renderPage({ seed: [wardrobeItem()] });
+
+    const props = openItemDetailsDialog();
+    act(() => props.onDeleted?.('already-gone'));
+
+    expect(screen.queryByRole('button', { name: 'Delete Coat' })).toBeNull();
+    expect(wardrobeCache()).toEqual([]);
+    expect(screen.getByRole('status')).toHaveTextContent(S5);
+    expect(screen.getByRole('status')).not.toHaveTextContent('outfit');
+  });
+
+  it('removes the card with no notice and moves focus to the grid region for a successful delete', async () => {
+    wardrobeItems = [];
+    renderPage({ seed: [wardrobeItem()] });
+
+    const props = openItemDetailsDialog();
+    act(() => props.onDeleted?.('deleted'));
+
+    expect(screen.queryByRole('button', { name: 'Delete Coat' })).toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole('region', { name: 'Wardrobe items' }),
+    ));
   });
 });

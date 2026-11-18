@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { usePatchWardrobeItemsId, useDeleteWardrobeItemsId, usePostWardrobeItemsItemIdRetag } from '../../api/endpoints/wardrobe/wardrobe';
 import { GetWardrobe200Item } from '../../api/model/getWardrobe200Item';
 import type { PostWardrobeItemsIdUpload200 } from '../../api/model/postWardrobeItemsIdUpload200';
@@ -8,6 +8,7 @@ import { AXIOS_INSTANCE } from '../../api/custom-instance';
 import { resolveImageContentType, uploadImageWithSignedPost, validateImageFile } from '../../lib/imageUpload';
 import { prepareImageForUpload } from '../../lib/imagePreparation';
 import { getErrorMessage } from '../../lib/errors';
+import { describeWardrobeItemDeleteFailure } from '../../lib/wardrobeItemDeleteFailure';
 import useAccessibleDialog from '../../hooks/useAccessibleDialog';
 import { isAndroidApp } from '../../lib/platform';
 import { isClientVersionRefused } from '../../store/clientVersionRefusalStore';
@@ -19,7 +20,15 @@ interface Props {
   item: GetWardrobe200Item | null;
   isOpen: boolean;
   onClose: () => void;
+  /** An update succeeded: the dialog's caller refreshes the list. */
   onSuccess: () => void;
+  /**
+   * The delete finished. `deleted` removes the row; `already-gone` additionally
+   * states the removal in the page notice, because a `404` is not a failure.
+   */
+  onDeleted: (outcome: 'deleted' | 'already-gone') => void;
+  /** A re-tag started: its message outlives this dialog in the page notice. */
+  onRetagStarted: () => void;
 }
 
 /** One gallery entry as this editor holds it: the read's members plus its own draft flags. */
@@ -87,7 +96,7 @@ const ATTRIBUTE_FIELDS: { key: keyof StyleAttributeFields; label: string; placeh
 
 const VIEW_OPTIONS = ['', 'front', 'back', 'side', 'detail', 'tag'];
 
-export default function ItemDetailsModal({ item, isOpen, onClose, onSuccess }: Props) {
+export default function ItemDetailsModal({ item, isOpen, onClose, onSuccess, onDeleted, onRetagStarted }: Props) {
   if (!isOpen || !item) return null;
 
   return (
@@ -96,6 +105,8 @@ export default function ItemDetailsModal({ item, isOpen, onClose, onSuccess }: P
       item={item}
       onClose={onClose}
       onSuccess={onSuccess}
+      onDeleted={onDeleted}
+      onRetagStarted={onRetagStarted}
     />
   );
 }
@@ -104,10 +115,11 @@ interface ItemDetailsEditorProps {
   item: GetWardrobe200Item;
   onClose: () => void;
   onSuccess: () => void;
+  onDeleted: (outcome: 'deleted' | 'already-gone') => void;
+  onRetagStarted: () => void;
 }
 
-function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps) {
-  const dialogRef = useAccessibleDialog(onClose);
+function ItemDetailsEditor({ item, onClose, onSuccess, onDeleted, onRetagStarted }: ItemDetailsEditorProps) {
   const [name, setName] = useState(item.name || '');
   const [category, setCategory] = useState(item.category || '');
   const [attrs, setAttrs] = useState<StyleAttributeFields>(() => parseStyleAttributes(item.styleAttributes));
@@ -121,12 +133,32 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [isAddingImage, setIsAddingImage] = useState(false);
   const [addImageError, setAddImageError] = useState<string | null>(null);
+  // The in-place delete question, the sentence a refused delete leaves inside it,
+  // and the update/re-tag failure the action row prints above itself.
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+  const [deleteFailure, setDeleteFailure] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  // Set by a decline: the Delete control the question replaced takes focus back
+  // once it is in the document again.
+  const restoreDeleteFocus = useRef(false);
+  const deleteButtonRef = useRef<HTMLButtonElement>(null);
+  const cancelDeleteRef = useRef<HTMLButtonElement>(null);
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
   const { mutateAsync: updateItem, isPending: isUpdating } = usePatchWardrobeItemsId();
   const { mutateAsync: deleteItem, isPending: isDeleting } = useDeleteWardrobeItemsId();
   const { mutateAsync: retagItem, isPending: isRetagging } = usePostWardrobeItemsItemIdRetag();
+
+  // Every close path — Escape, the backdrop, the close control and Cancel — runs
+  // through this guard, so a delete that is still out keeps the question it
+  // started from and its outcome always has somewhere to land.
+  const requestClose = () => {
+    if (isDeleting) return;
+    onClose();
+  };
+
+  const dialogRef = useAccessibleDialog(requestClose);
 
   const currentImage = images[selectedImageIndex];
 
@@ -140,6 +172,7 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
       if (v) styleAttributes[k] = v;
     }
 
+    setActionError(null);
     try {
       await updateItem({
         id: item.id,
@@ -160,38 +193,75 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
       onSuccess();
     } catch (error) {
       console.error('Failed to update item:', error);
-      // A native alert is not unmounted with the React tree, so a failure that
-      // settles after the shell is gone would raise a dialog over the blocking
-      // screen. The guard reads the one global state; it is not a recogniser.
+      // A sentence written after the shell is replaced would paint over the
+      // blocking refusal screen. The guard reads the one global state; it is not
+      // a recogniser.
       if (isClientVersionRefused()) return;
-      alert('Failed to update item');
+      setActionError('Failed to update item');
     }
   };
 
+  const openDeleteQuestion = () => {
+    // An update or re-tag sentence above the action row describes that action,
+    // not this one, so it keeps its place until its own next attempt.
+    setDeleteFailure(null);
+    setIsConfirmingDelete(true);
+  };
+
+  const declineDelete = () => {
+    setIsConfirmingDelete(false);
+    setDeleteFailure(null);
+    // The Delete control takes the question's place back, so focus returns to it.
+    restoreDeleteFocus.current = true;
+  };
+
   const handleDelete = async () => {
-    if (!item.id || !window.confirm('Are you sure you want to delete this item?')) return;
+    if (!item.id) return;
+    setDeleteFailure(null);
     try {
       await deleteItem({ id: item.id });
-      onSuccess();
+      onDeleted('deleted');
     } catch (error) {
       console.error('Failed to delete item:', error);
       if (isClientVersionRefused()) return;
-      alert('Failed to delete item');
+      const failure = describeWardrobeItemDeleteFailure(error);
+      // A 404 is not a failure to report beside the control: the row is already
+      // gone, so the page states the removal and nothing names an outfit.
+      if (failure.gone) {
+        onDeleted('already-gone');
+        return;
+      }
+      setDeleteFailure(failure.message);
     }
   };
 
   const handleRetag = async () => {
     if (!item.id) return;
+    setActionError(null);
     try {
       await retagItem({ itemId: item.id });
-      alert('Re-tagging started. Check back shortly.');
-      onSuccess();
+      onRetagStarted();
     } catch (error) {
       console.error('Failed to re-tag item:', error);
       if (isClientVersionRefused()) return;
-      alert('Failed to start re-tagging');
+      setActionError('Failed to start re-tagging');
     }
   };
+
+  // The question focuses its Cancel first, as the recorded confirmation does;
+  // opening it is not a remount, so the dialog hook's own focus move cannot.
+  useEffect(() => {
+    if (!isConfirmingDelete) return;
+    cancelDeleteRef.current?.focus();
+  }, [isConfirmingDelete]);
+
+  // Declining re-renders the Delete control the question replaced; focus moves
+  // there once it is back in the document.
+  useEffect(() => {
+    if (!restoreDeleteFocus.current || isConfirmingDelete) return;
+    restoreDeleteFocus.current = false;
+    deleteButtonRef.current?.focus();
+  }, [isConfirmingDelete]);
 
   const handleViewChange = (index: number, value: string) => {
     setImages((prev) => {
@@ -281,11 +351,11 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
   return (
     <div className="fixed inset-0 z-10 overflow-y-auto">
       <div className="flex items-center justify-center min-h-screen px-4 pt-4 pb-20 text-center sm:p-0">
-        <div className="fixed inset-0 transition-opacity bg-gray-500/75" onClick={onClose} />
+        <div className="fixed inset-0 transition-opacity bg-gray-500/75" onClick={requestClose} />
 
         <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="item-details-title" tabIndex={-1} className="relative inline-block px-4 pt-5 pb-4 overflow-hidden text-left align-bottom transition-all transform bg-white rounded-xl shadow-xl sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
           <div className="absolute top-0 right-0 pt-4 pr-4">
-            <button onClick={onClose} className="text-gray-400 bg-white rounded-md hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+            <button onClick={requestClose} disabled={isDeleting} className="text-gray-400 bg-white rounded-md hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50">
               <span className="sr-only">Close</span>
               <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
@@ -486,6 +556,10 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
                   <p className="mt-0.5 text-xs text-gray-400">Comma-separated</p>
                 </div>
 
+                {actionError && (
+                  <p role="alert" className="mt-2 text-sm text-red-600">{actionError}</p>
+                )}
+
                 <div className="flex flex-wrap gap-2 pt-3 border-t">
                   <button type="submit" disabled={isUpdating || isProcessing}
                     className="inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
@@ -498,12 +572,37 @@ function ItemDetailsEditor({ item, onClose, onSuccess }: ItemDetailsEditorProps)
                       {isRetagging ? 'Re-tagging...' : 'Re-tag'}
                     </button>
                   )}
-                  <button type="button" disabled={isDeleting}
-                    onClick={handleDelete}
-                    className="inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-red-600 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
-                    {isDeleting ? 'Deleting...' : 'Delete'}
-                  </button>
-                  <button type="button" onClick={onClose}
+                  {isConfirmingDelete ? (
+                    // The question takes the Delete control's place, so the
+                    // dialog's Save, Re-tag and Cancel keep theirs and the
+                    // refusal prints beside the control that sent the request.
+                    <div role="group" aria-label="Delete this item?" className="flex flex-col gap-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm text-red-600">Delete this item? This cannot be undone.</span>
+                        <button ref={cancelDeleteRef} type="button"
+                          onClick={declineDelete}
+                          disabled={isDeleting}
+                          className="inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
+                          Cancel
+                        </button>
+                        <button type="button" disabled={isDeleting}
+                          onClick={handleDelete}
+                          className="inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-red-600 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
+                          {isDeleting ? 'Deleting...' : 'Delete'}
+                        </button>
+                      </div>
+                      {deleteFailure && (
+                        <p role="alert" className="text-sm text-red-700">{deleteFailure}</p>
+                      )}
+                    </div>
+                  ) : (
+                    <button ref={deleteButtonRef} type="button" disabled={isDeleting}
+                      onClick={openDeleteQuestion}
+                      className="inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-red-600 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
+                      Delete
+                    </button>
+                  )}
+                  <button type="button" onClick={requestClose}
                     className="inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500">
                     Cancel
                   </button>

@@ -82,6 +82,9 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
   const [isRunning, setIsRunning] = useState(false);
   const [boundMessage, setBoundMessage] = useState<string | null>(null);
   const [duplicateMessage, setDuplicateMessage] = useState<string | null>(null);
+  // The single-photo upload's own failure sentence, rendered beside the summary
+  // rather than raised as a host script dialog the shells differ on.
+  const [uploadFailure, setUploadFailure] = useState<string | null>(null);
   const runRef = useRef<BatchRun | null>(null);
   const onItemsCreatedRef = useRef(onItemsCreated);
   const dialogRef = useAccessibleDialog(handleClose, isOpen);
@@ -146,6 +149,9 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
     if (targets.length === 0) return;
     const latest = new Map(targets.map((photo) => [photo.id, photo]));
     setIsRunning(true);
+    // A new run replaces the previous one's sentence, so an old failure never
+    // outlives the retry that answered it.
+    setUploadFailure(null);
     const run = runBatch(targets, deps, (updated) => {
       latest.set(updated.id, updated);
       setPhotos((previous) => previous.map((photo) => (photo.id === updated.id ? updated : photo)));
@@ -161,17 +167,18 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
     if (run.cancelled) return;
 
     // One photo keeps the single-photo contract, on Retry as well: success closes
-    // the dialog through onSuccess, a failure raises the existing alert and the
-    // dialog stays open.
+    // the dialog through onSuccess, a failure states its sentence in the dialog
+    // and the dialog stays open.
     if (photos.length === 1 && targets.length === 1) {
       const settledPhoto = latest.get(targets[0].id);
       if (settledPhoto?.status === 'created') {
         onSuccess();
       } else if (settledPhoto?.status === 'failed') {
-        // The batch can settle after the shell unmounted; a native alert is not
-        // unmounted with it, so the refusal guard suppresses the dialog.
+        // The batch can settle after the shell unmounted; a sentence written then
+        // would paint over the blocking refusal screen, so the refusal guard
+        // suppresses it.
         if (isClientVersionRefused()) return;
-        alert(`Failed to upload image: ${settledPhoto.error ?? 'Unknown error'}`);
+        setUploadFailure(`Failed to upload image: ${settledPhoto.error ?? 'Unknown error'}`);
       }
     }
   };
@@ -368,6 +375,10 @@ export default function AddItemModal({ isOpen, onClose, onSuccess, items, onItem
                   )}
 
                   {summary && <p role="status" className="mt-2 text-sm text-gray-700">{summary}</p>}
+
+                  {uploadFailure && (
+                    <p role="alert" className="mt-2 text-sm text-red-600">{uploadFailure}</p>
+                  )}
 
                   {showRetry && (
                     <button

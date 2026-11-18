@@ -68,7 +68,6 @@ describe('AddItemModal', () => {
     vi.mocked(prepareImageForUpload).mockImplementation(
       async (file: File) => new File([file], file.name, { type: 'image/jpeg' }),
     );
-    vi.spyOn(window, 'alert').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -90,7 +89,7 @@ describe('AddItemModal', () => {
     fireEvent.submit(container.querySelector('form')!);
 
     await waitFor(() => {
-      expect(window.alert).toHaveBeenCalledWith(expect.stringContaining(HEIC_UNSUPPORTED_MESSAGE));
+      expect(screen.getByRole('alert')).toHaveTextContent(HEIC_UNSUPPORTED_MESSAGE);
     });
     expect(getUploadUrl).not.toHaveBeenCalled();
     expect(confirmUpload).not.toHaveBeenCalled();
@@ -379,11 +378,11 @@ describe('AddItemModal', () => {
     fireEvent.submit(container.querySelector('form')!);
 
     await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1));
-    expect(window.alert).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('raises the existing alert and keeps the dialog open when the only photo fails', async () => {
+  it('states the upload failure in the dialog and keeps it open when the only photo fails', async () => {
     getUploadUrl.mockRejectedValue(new Error('reserve failed'));
     const { container } = render(<AddItemModal isOpen onClose={onClose} onSuccess={onSuccess} />);
 
@@ -391,14 +390,14 @@ describe('AddItemModal', () => {
     fireEvent.submit(container.querySelector('form')!);
 
     await waitFor(() => {
-      expect(window.alert).toHaveBeenCalledWith('Failed to upload image: reserve failed');
+      expect(screen.getByRole('alert')).toHaveTextContent('Failed to upload image: reserve failed');
     });
     expect(onSuccess).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog', { name: 'Add Wardrobe Item' })).toBeInTheDocument();
   });
 
-  it('suppresses that alert once the Client version refusal is latched', async () => {
+  it('states no sentence once the Client version refusal is latched', async () => {
     useClientVersionRefusalStore.setState({
       refusal: { minimumClientVersion: 9, receivedClientVersion: 8, detailsReported: true },
     });
@@ -409,10 +408,10 @@ describe('AddItemModal', () => {
     fireEvent.submit(container.querySelector('form')!);
 
     // The run starts disabled and re-enables once it settles, which is after the
-    // alert decision has run.
+    // sentence decision has run.
     expect(picker(container)).toBeDisabled();
     await waitFor(() => expect(picker(container)).toBeEnabled());
-    expect(window.alert).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('starts no photo that had not started when the dialog closes mid-run', async () => {

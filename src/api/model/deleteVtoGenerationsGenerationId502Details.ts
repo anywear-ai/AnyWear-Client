@@ -6,8 +6,11 @@
  */
 
 export type DeleteVtoGenerationsGenerationId502Details = {
-  /** The open object-deletion manifest that still owes these keys. The worker reaper retries it. */
+  /** The committed object-deletion manifest that owns the retained keys. The worker reaper retries it. */
   manifest_id: string;
-  /** The stored object keys whose absence the head read did not prove. Never empty for this error. */
-  retained_object_keys: string[];
+  /**
+     * How many stored objects the manifest has not proven deleted. Read from the committed row, never zero.
+     * @minimum 1
+     */
+  retained_key_count: number;
 };

@@ -117,6 +117,7 @@ export default function VtoHistorySection({
     setFilters,
     rateGeneration,
     deleteGeneration,
+    deleteRetainedKeyCount,
     ratingFailures,
     ratingEchoResetTokens,
   } = useVtoHistory(settledStatus);
@@ -181,6 +182,19 @@ export default function VtoHistorySection({
       {blockedReason && (
         <p id={RETRY_BLOCKED_REASON_ID} role="status" className="mb-3 text-sm text-gray-600">
           {blockedReason}
+        </p>
+      )}
+
+      {/* The generation's rows are deleted; the number is how many stored image
+          files the Service has not proved gone. It is a sibling of the retry
+          blocker, never inside it: that paragraph renders only while a retry is
+          blocked, and this state is independent of it. No retry control and no
+          dismissal: the objects are owed by the Service's cleanup work, which
+          the Client cannot drive, so a retry would answer 404 and a dismiss
+          would hide the only statement of what was not confirmed. */}
+      {deleteRetainedKeyCount !== null && (
+        <p role="status" className="mb-3 text-sm text-gray-600">
+          Try-on deleted. {deleteRetainedKeyCount} image file(s) could not be confirmed deleted.
         </p>
       )}
 

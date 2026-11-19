@@ -4,6 +4,7 @@ import type { GetVtoGenerationsParams } from '../api/model/getVtoGenerationsPara
 import { keepPreviousData } from '@tanstack/react-query';
 import { applySettledVtoStatus } from '../lib/vtoHistoryStatus';
 import type { VtoSettledStatus } from '../lib/vtoHistoryStatus';
+import { retainedKeyCountFromGenerationDelete } from '../lib/vtoGenerationDeleteFailure';
 import useVtoRating from './useVtoRating';
 
 const DEFAULT_LIMIT = 12;
@@ -19,6 +20,11 @@ const DEFAULT_LIMIT = 12;
 export default function useVtoHistory(settledStatus: VtoSettledStatus | null = null) {
   const [page, setPage] = useState(1);
   const [filters, setFilters] = useState<GetVtoGenerationsParams>({ limit: DEFAULT_LIMIT });
+  // The retained-key count of the last delete that committed its rows and
+  // still owed object deletion, or null when no incomplete delete is being
+  // reported. It is one number for the list, not per row: the row it describes
+  // has already left the list.
+  const [deleteRetainedKeyCount, setDeleteRetainedKeyCount] = useState<number | null>(null);
 
   const params: GetVtoGenerationsParams = {
     ...filters,
@@ -54,11 +60,25 @@ export default function useVtoHistory(settledStatus: VtoSettledStatus | null = n
   }, [saveRating]);
 
   const deleteGeneration = useCallback((generationId: string) => {
+    // A new attempt supersedes the previous report, so a later delete can never
+    // show a count that belonged to an earlier one.
+    setDeleteRetainedKeyCount(null);
     deleteMutation.mutate(
       { generationId },
       {
         onSuccess: () => {
           refetch();
+        },
+        onError: (error: unknown) => {
+          const retainedKeyCount = retainedKeyCountFromGenerationDelete(error);
+          // Only the incomplete delete is a state the list has to show. Its
+          // rows are committed as deleted, so the cached row is stale and the
+          // list is re-read; the objects are owed by the worker's manifest and
+          // the count says how many. Every other rejection keeps the previous
+          // behaviour: nothing is shown and nothing is re-read.
+          if (retainedKeyCount === null) return;
+          refetch();
+          setDeleteRetainedKeyCount(retainedKeyCount);
         },
       }
     );
@@ -75,6 +95,7 @@ export default function useVtoHistory(settledStatus: VtoSettledStatus | null = n
     setFilters,
     rateGeneration,
     deleteGeneration,
+    deleteRetainedKeyCount,
     ratingFailures,
     ratingEchoResetTokens,
   };

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react';
 
 vi.mock('../../hooks/useVtoHistory', () => ({ default: vi.fn() }));
 
@@ -56,6 +56,7 @@ function mockHistory(overrides: Partial<ReturnType<typeof useVtoHistory>> = {}) 
     setFilters,
     rateGeneration,
     deleteGeneration,
+    deleteRetainedKeyCount: null,
     ratingFailures: {},
     ratingEchoResetTokens: {},
     ...overrides,
@@ -589,6 +590,93 @@ describe('VtoHistorySection delete confirmation focus', () => {
     expect(deleteGeneration).toHaveBeenCalledWith('gen-1');
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
     expect(document.activeElement).toBe(document.body);
+  });
+});
+
+describe('VtoHistorySection incomplete delete notice', () => {
+  const THREE_FILES = 'Try-on deleted. 3 image file(s) could not be confirmed deleted.';
+
+  beforeEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    rows = [generation()];
+    mockHistory();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('states the retained count in its own status line, a sibling of the retry blocker and with no control', () => {
+    mockHistory({ deleteRetainedKeyCount: 3 });
+    renderSection({ credits: 0 });
+
+    const blockedReason = screen.getByText('Out of daily credits. Credits reset at midnight.');
+    const notice = screen.getByText(/could not be confirmed deleted/);
+
+    expect(notice).toHaveAttribute('role', 'status');
+    expect(notice).toHaveTextContent(THREE_FILES);
+
+    // A sibling of the blocker, not a child of it: the blocker renders only
+    // while a retry is blocked, so a notice routed through it would vanish
+    // whenever retry happened to be allowed.
+    expect(notice.parentElement).toBe(blockedReason.parentElement);
+    expect(blockedReason.contains(notice)).toBe(false);
+    expect(notice.contains(blockedReason)).toBe(false);
+
+    // Its own identity, too: the blocker's id is what Retry is described-by,
+    // and the notice keeps no id of its own.
+    expect(blockedReason).toHaveAttribute('id');
+    expect(notice).not.toHaveAttribute('id');
+    expect(screen.getByRole('button', { name: 'Retry' })).toHaveAttribute(
+      'aria-describedby',
+      blockedReason.getAttribute('id') as string,
+    );
+
+    // No retry, no polling and no dismissal control: the objects are owed by
+    // the Service's cleanup work, which this surface cannot drive.
+    expect(within(notice).queryByRole('button')).toBeNull();
+    expect(within(notice).queryByRole('link')).toBeNull();
+  });
+
+  it('renders no notice when the hook reports no count, leaving the blocker as the only status line', () => {
+    mockHistory({ deleteRetainedKeyCount: null });
+    renderSection({ credits: 0 });
+
+    expect(screen.queryByText(/could not be confirmed deleted/)).toBeNull();
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Out of daily credits. Credits reset at midnight.',
+    );
+  });
+
+  it('drops the notice when the hook clears the count for a new delete attempt', () => {
+    mockHistory({ deleteRetainedKeyCount: 2 });
+    const { props, rerender } = renderSection();
+    expect(screen.getByText(/could not be confirmed deleted/)).toHaveTextContent(
+      'Try-on deleted. 2 image file(s) could not be confirmed deleted.',
+    );
+
+    mockHistory({ deleteRetainedKeyCount: null });
+    rerender(<VtoHistorySection {...props} />);
+
+    expect(screen.queryByText(/could not be confirmed deleted/)).toBeNull();
+  });
+
+  it('closes the inline delete confirmation and shows the notice when the delete is confirmed', () => {
+    mockHistory({ deleteRetainedKeyCount: 3 });
+    renderSection();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    expect(screen.getByText('Delete this try-on?')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, Delete' }));
+
+    expect(deleteGeneration).toHaveBeenCalledWith('gen-1');
+    expect(screen.queryByText('Delete this try-on?')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Yes, Delete' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+    expect(screen.getByText(/could not be confirmed deleted/)).toHaveTextContent(THREE_FILES);
   });
 });
 

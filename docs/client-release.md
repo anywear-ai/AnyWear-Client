@@ -477,7 +477,7 @@ Rollback means:
 ## Boundaries this runbook relies on
 
 - `client-release.yml` is triggered only by `push: tags: ['client-v[0-9]*']`. The
-  repository's two manual dispatch surfaces are `release.yml` (the web publication)
+  repository's two manual dispatch surfaces are `release.yml` (the Beta web handoff)
   and `client-beta-apk.yml` (the optional Beta prerelease publish); neither one can
   publish a formal client release.
 - The concurrency group `client-release-publish` serializes tags;

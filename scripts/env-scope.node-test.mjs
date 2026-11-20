@@ -32,15 +32,10 @@ const read = (name) => readFileSync(join(workflowsDirectory, name), 'utf8');
 // reference to a name must also prune it here (stale entries fail).
 const REPOSITORY_SCOPED = {
   vars: [
-    // Repository-scoped: App id used to mint the API-spec token; resolvable before any environment exists.
+    // Repository-scoped: App id used to mint the API-spec token and the Infra
+    // handoff token; resolvable before any environment exists.
     'APP_ID',
-    // Repository-scoped: Beta account asserted before any AWS call; resolvable before any environment exists.
-    'AWS_ACCOUNT_ID',
-    // Repository-scoped: Beta region asserted before any AWS call; resolvable before any environment exists.
-    'AWS_REGION',
-    // Repository-scoped: dedicated Beta publish-role ARN; resolvable before any environment exists.
-    'CLIENT_PUBLISH_ROLE_ARN',
-    // Repository-scoped: the single stage switch that gates the deploy chain; resolvable before any environment exists.
+    // Repository-scoped: the single stage switch that gates the handoff chain; resolvable before any environment exists.
     'ENABLE_BETA_MUTATION',
   ],
   secrets: [
@@ -124,14 +119,20 @@ test('every configuration reference declares a repository or environment scope',
   }
 });
 
-test('a job without an environment reads only repository-scoped configuration', () => {
-  let jobsWithEnvironment = 0;
+test('no job declares an environment, and every job reads repository-scoped configuration', () => {
+  let jobsWithoutEnvironment = 0;
   for (const file of workflowFiles) {
     for (const job of jobEntries(read(file))) {
-      if (declaresEnvironment(job.section)) {
-        jobsWithEnvironment += 1;
-        continue;
-      }
+      // #344: the Client holds no GitHub Environment at all. The web publication's
+      // `beta` environment retired with its AWS role, so the environment-scope
+      // defect class cannot reach this repository any more; what this guard still
+      // proves is that no job reads a name that would resolve empty.
+      assert.equal(
+        declaresEnvironment(job.section),
+        false,
+        `${file}:${job.name} declares \`environment:\`; the Client holds no environment`,
+      );
+      jobsWithoutEnvironment += 1;
       for (const reference of references(job.section)) {
         assert.ok(
           !ENVIRONMENT_SCOPED.includes(reference.name),
@@ -140,62 +141,45 @@ test('a job without an environment reads only repository-scoped configuration', 
       }
     }
   }
-  assert.ok(jobsWithEnvironment > 0, 'at least one job must declare an environment for this guard to be meaningful');
+  assert.ok(jobsWithoutEnvironment > 0, 'the workflows must declare jobs for this guard to be meaningful');
 });
 
-test('the publication chain keeps the publish role at repository scope until the single environment job', () => {
+test('the publication chain holds no environment, no OIDC token and no AWS role', () => {
   const release = read('release.yml');
   const jobs = Object.fromEntries(jobEntries(release).map((job) => [job.name, job.section]));
-  assert.deepEqual(Object.keys(jobs), ['build', 'verify', 'deploy', 'record', 'handoff']);
+  assert.deepEqual(Object.keys(jobs), ['build', 'verify', 'handoff']);
 
-  // One environment, one OIDC token, and only on the job that publishes.
-  const withEnvironment = Object.keys(jobs).filter((name) => declaresEnvironment(jobs[name]));
-  assert.deepEqual(withEnvironment, ['deploy'], 'only deploy may declare an environment');
-  assert.match(jobs.deploy, /^ {4}environment: beta$/m);
-
-  const withIdToken = Object.keys(jobs).filter((name) => /^ {6}id-token:/m.test(jobs[name]));
-  assert.deepEqual(withIdToken, ['deploy'], 'only deploy may declare an OIDC token');
-  assert.match(jobs.deploy, /^ {6}id-token: write$/m);
-
-  // The publishing job is where the role is assumed, and it is the only one
-  // allowed to resolve it behind an environment.
-  assert.match(jobs.deploy, /^ {10}role-to-assume: \$\{\{ vars\.CLIENT_PUBLISH_ROLE_ARN \}\}$/m);
-
-  // verify and record must keep resolving the role at repository scope: no
-  // environment, no OIDC token, and no other spelling of the name.
-  for (const name of ['verify', 'record']) {
+  // #344: the Client builds, verifies and hands off. The AWS write moved into
+  // `AnyWear-Infra`'s `publish-client`, so no job here declares an environment, mints
+  // an OIDC identity or reads a role. Each of these is a negative pin on the retired
+  // `deploy` and `record` jobs.
+  for (const name of Object.keys(jobs)) {
     assert.doesNotMatch(jobs[name], /^ {4}environment:/m, `${name} must not declare an environment`);
     assert.doesNotMatch(jobs[name], /^ {6}id-token:/m, `${name} must not declare an OIDC token`);
-    const roleExpressions = [...jobs[name].matchAll(/\$\{\{[^}]*CLIENT_PUBLISH_ROLE_ARN[^}]*\}\}/g)].map((match) => match[0]);
-    assert.ok(roleExpressions.length > 0, `${name} must keep the repository-scoped publish role reference`);
-    for (const expression of roleExpressions) {
-      assert.equal(expression, '${{ vars.CLIENT_PUBLISH_ROLE_ARN }}', `${name} must resolve the role at repository scope`);
-    }
+    assert.doesNotMatch(jobs[name], /configure-aws-credentials/, `${name} must not acquire AWS credentials`);
+    assert.doesNotMatch(jobs[name], /aws (?:sts|s3|cloudformation|ssm|cloudfront)\b/, `${name} must not run the AWS CLI`);
+    assert.doesNotMatch(jobs[name], /CLIENT_PUBLISH_ROLE_ARN|role-to-assume|arn:aws:/, `${name} must not name an AWS role or ARN`);
   }
+  assert.doesNotMatch(release, /AWS_ACCOUNT_ID|AWS_REGION/, 'no job asserts an AWS account or region any more');
 
-  // `handoff` dispatches after the record and holds nothing but a scoped name to read.
-  assert.doesNotMatch(jobs.handoff, /^ {4}environment:/m, 'handoff must not declare an environment');
-  assert.doesNotMatch(jobs.handoff, /^ {6}id-token:/m, 'handoff must not declare an OIDC token');
-  assert.doesNotMatch(jobs.handoff, /configure-aws-credentials/, 'handoff must not acquire AWS credentials');
-  assert.doesNotMatch(jobs.handoff, /CLIENT_PUBLISH_ROLE_ARN/, 'handoff must not read the publish role');
-  // The App identity it mints a token with is repository-scoped, so it resolves
-  // before any environment exists.
+  // `handoff` is the one job that reaches another repository, and it holds nothing
+  // but the App identity it mints a token with.
   assert.deepEqual(references(jobs.handoff).map((reference) => `${reference.kind}.${reference.name}`).sort(), ['secrets.APP_PRIVATE_KEY', 'vars.APP_ID']);
   assert.ok(REPOSITORY_SCOPED.vars.includes('APP_ID'), 'vars.APP_ID is configured at repository scope');
   assert.ok(REPOSITORY_SCOPED.secrets.includes('APP_PRIVATE_KEY'), 'secrets.APP_PRIVATE_KEY is configured at repository scope');
   // The values it needs to reach the receiver are workflow text, not configuration.
   // The REST path is owner-qualified; the token input below names the bare repository.
-  assert.match(jobs.handoff, /^ {6}E2E_OWNER: \$\{\{ github\.repository_owner \}\}$/m);
-  assert.match(jobs.handoff, /^ {6}E2E_REPOSITORY: AnyWear-E2E$/m);
-  assert.match(jobs.handoff, /^ {6}E2E_WORKFLOW: beta-qualification\.yml$/m);
-  assert.match(jobs.handoff, /repos\/\$\{E2E_OWNER\}\/\$\{E2E_REPOSITORY\}\/actions\/workflows\/\$\{E2E_WORKFLOW\}/);
+  assert.match(jobs.handoff, /^ {6}INFRA_OWNER: \$\{\{ github\.repository_owner \}\}$/m);
+  assert.match(jobs.handoff, /^ {6}INFRA_REPOSITORY: AnyWear-Infra$/m);
+  assert.match(jobs.handoff, /^ {6}INFRA_WORKFLOW: mutate\.yml$/m);
+  assert.match(jobs.handoff, /^ {6}CLIENT_BUNDLE_DIGEST: \$\{\{ needs\.build\.outputs\.client_bundle_digest \}\}$/m);
+  assert.match(jobs.handoff, /^ {10}repositories: AnyWear-Infra$/m);
+  assert.match(jobs.handoff, /^ {10}permission-actions: write$/m);
 
   // The chain order is explicit and survives any edit to the sections above.
   assert.doesNotMatch(jobs.build, /^ {4}needs:/m, 'build is the first job of the chain');
   assert.match(jobs.verify, /^ {4}needs: \[build\]$/m);
-  assert.match(jobs.deploy, /^ {4}needs: \[verify\]$/m);
-  assert.match(jobs.record, /^ {4}needs: \[deploy\]$/m);
-  assert.match(jobs.handoff, /^ {4}needs: \[record\]$/m);
+  assert.match(jobs.handoff, /^ {4}needs: \[build, verify\]$/m);
 });
 
 test('the reviewed Beta interface is literal workflow env, not repository configuration', () => {
@@ -215,10 +199,10 @@ test('the reviewed Beta interface is literal workflow env, not repository config
     assert.doesNotMatch(read(file), /vars\.(?:BETA_|API_BASE_URL|COGNITO_)/, `${file} must not read the interface from vars`);
   }
 
-  // build, verify and deploy read the override or the constant in the same
-  // expression, so a push and a dispatch compile the same recorded interface.
+  // build and verify read the override or the constant in the same expression, so a
+  // push and a dispatch compile and check the same recorded interface.
   const jobs = Object.fromEntries(jobEntries(release).map((job) => [job.name, job.section]));
-  for (const [job, prefix] of [['build', 'VITE'], ['verify', 'DECLARED'], ['deploy', 'DECLARED']]) {
+  for (const [job, prefix] of [['build', 'VITE'], ['verify', 'DECLARED']]) {
     assert.match(jobs[job], new RegExp(`^ {10}${prefix}_API_BASE_URL: \\$\\{\\{ inputs\\.api_base_url \\|\\| env\\.BETA_API_BASE_URL \\}\\}$`, 'm'), `${job} must read the API base URL from the input or the constant`);
     assert.match(jobs[job], new RegExp(`^ {10}${prefix}_COGNITO_USER_POOL_ID: \\$\\{\\{ inputs\\.cognito_user_pool_id \\|\\| env\\.BETA_COGNITO_USER_POOL_ID \\}\\}$`, 'm'), `${job} must read the user pool from the input or the constant`);
     assert.match(jobs[job], new RegExp(`^ {10}${prefix}_COGNITO_CLIENT_ID: \\$\\{\\{ inputs\\.cognito_client_id \\|\\| env\\.BETA_COGNITO_CLIENT_ID \\}\\}$`, 'm'), `${job} must read the client id from the input or the constant`);

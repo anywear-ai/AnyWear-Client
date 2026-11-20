@@ -2,13 +2,9 @@
 
 AnyWear-Client exposes four workflow entries: `check.yml`, `release.yml`,
 `client-release.yml` and `client-beta-apk.yml`; the [README](../README.md#workflow-entries)
-carries their trigger, manual and purpose table. This runbook covers two of them: the
-automatic check [`check.yml`](../.github/workflows/check.yml) and the Beta web
-publication entry [`release.yml`](../.github/workflows/release.yml). `release.yml`
-runs on a merge to `main` and on a manual dispatch and is the repository's Beta web
-publication surface. Its manual `operation` input currently offers exactly one
-value, `deploy`, and the job sequence inside it is
-`build` → `verify` → `deploy` → `record` → `handoff`.
+carries their trigger, manual and purpose table. This runbook covers the Beta web
+path: the automatic check [`check.yml`](../.github/workflows/check.yml) and the
+handoff entry [`release.yml`](../.github/workflows/release.yml).
 
 `build.yml`, `test.yml`, `browser.yml` and `tauri-smoke.yml` are `workflow_call`
 implementations of `check.yml`. They are not entries and have no dispatch surface.
@@ -16,7 +12,41 @@ implementations of `check.yml`. They are not entries and have no dispatch surfac
 | Entry | Trigger | Manual | Purpose |
 | --- | --- | --- | --- |
 | `check.yml` | push / pull request to `main` | no | Build, unit tests, mocked browser integration |
-| `release.yml` | push to `main`; `workflow_dispatch` (`operation: deploy`) | yes | Build, verify, deploy and record the Beta web client, then dispatch the E2E smoke |
+| `release.yml` | push to `main`; `workflow_dispatch` (`operation: deploy`) | yes | Build, verify and hand the Beta web bundle to `AnyWear-Infra`, which publishes it |
+
+## What a green Client run means
+
+A green `release.yml` run means **the bundle was handed to the writer**, not that
+Beta serves it. Under the single-writer model
+([ADR 0033](https://github.com/anywear-ai/AnyWear-Meta/blob/main/architecture/ADR/0033-deploy-chain-and-release-chain.md)
+§9) `AnyWear-Infra` is the only writer of Beta's served tuple:
+
+| Step | Who performs it |
+| --- | --- |
+| Build the assets, the build metadata and the bundle manifest | Client `build` |
+| Verify identity, declared interface, compiled assets and the manifest | Client `verify` |
+| Dispatch `AnyWear-Infra` `.github/workflows/mutate.yml` (`operation=publish-client`) and read the created run back | Client `handoff` |
+| Live-interface refusal, S3 sync, CloudFront invalidation, publication record | `AnyWear-Infra` `deploy` |
+| Post-publication `smoke` qualification, held inside the same Infra run | `AnyWear-Infra` `qualify-hold` → `AnyWear-E2E` |
+| The verdict | The Infra run, not the Client run |
+
+The Client holds **no AWS credential anywhere**: no `environment:`, no
+`id-token: write`, no role, no AWS CLI. The one credential the publication chain
+mints is an App token narrowed to `AnyWear-Infra` with `actions: write`.
+
+```mermaid
+sequenceDiagram
+    participant C as Client release.yml
+    participant I as AnyWear-Infra mutate.yml
+    participant E as AnyWear-E2E
+    C->>C: build (assets, build-metadata.json, bundle-manifest.json)
+    C->>C: verify (identity, declared interface, assets, manifest digest)
+    C->>I: dispatch operation=publish-client, client_run_id/attempt, client_bundle_digest, dispatched_by
+    I->>I: deploy — verify the bundle, refuse a drifted live interface, sync, invalidate, record
+    I->>E: smoke (trigger=deploy-smoke), held to terminal
+    C->>I: poll the run's jobs until the deploy job concludes
+    Note over C: success = handed over; skipped/failure/cancelled = handoff failed, naming the Infra run
+```
 
 ## The declared interface
 
@@ -25,20 +55,16 @@ are compiled into the bundle. The `build` job holds no AWS credential, so it
 cannot resolve them from CloudFormation or SSM. Two reviewed sources supply them:
 
 - Workflow-level `env` constants: `BETA_API_BASE_URL`,
-  `BETA_COGNITO_USER_POOL_ID` and `BETA_COGNITO_CLIENT_ID`. These are the values
-  the Beta interface served when this change was reviewed, taken from the
-  `client-publication-record-validated` artifact of the last successful
-  `release.yml` run (`41311613222`, 2026-11-01), so they are the live interface
-  rather than a re-typed guess.
+  `BETA_COGNITO_USER_POOL_ID` and `BETA_COGNITO_CLIENT_ID`.
 - The three dispatch inputs `api_base_url`, `cognito_user_pool_id` and
   `cognito_client_id`, still declared and still `required: true`, as manual-only
   overrides.
 
-`build`, `verify` and `deploy` each read `${{ inputs.<name> || env.BETA_<NAME> }}`,
-so a push needs no input and a manual dispatch behaves exactly as it did before:
-the override wins when it is supplied, and the reviewed constant is used otherwise.
-The step-level `env:` is deliberate — a job's `env:` block cannot read the `env`
-context, so the fallback is written where the expression can resolve it.
+`build` and `verify` read `${{ inputs.<name> || env.BETA_<NAME> }}`, so a push
+needs no input and a manual dispatch behaves exactly as before: the override wins
+when it is supplied, and the reviewed constant is used otherwise. The step-level
+`env:` is deliberate — a job's `env:` block cannot read the `env` context, so the
+fallback is written where the expression can resolve it.
 
 | Input | Compiled variable | Reviewed constant |
 | --- | --- | --- |
@@ -48,7 +74,7 @@ context, so the fallback is written where the expression can resolve it.
 
 The manual overrides remain part of the dispatch event rather than mutable
 configuration the run cannot see. A repository variable would let the interface
-change between dispatch and deploy without appearing in the run's record; a
+change between dispatch and handoff without appearing in the run's record; a
 required input cannot be omitted, and the value that was approved is the value the
 run carries. The reviewed constants give a merge the same property: changing one
 is a reviewed change to `release.yml`, not an owner setting made outside the
@@ -56,154 +82,144 @@ repository.
 
 `pnpm build` runs `scripts/write-build-metadata.mjs` in the same environment Vite
 compiles, so `dist/build-metadata.json` records **exactly** the values that were
-built. The file keeps `source_commit` with its previous value and meaning and
-adds the interface values under schema version 2. A missing or malformed
-interface value fails the build instead of recording metadata for an interface
-that was never compiled.
+built. A missing or malformed interface value fails the build instead of recording
+metadata for an interface that was never compiled.
+
+## The bundle manifest and the digest
+
+`build` runs `scripts/write-bundle-manifest.mjs` after `pnpm build` and before the
+`client-dist` upload, so the manifest travels inside the uploaded artifact. It
+records:
+
+| Field | Value |
+| --- | --- |
+| `schema_version` | `1` |
+| `component` | `AnyWear-Client` |
+| `source_commit` | the run's `github.sha`, which `build-metadata.json` also records |
+| `client_version` | the `client_version` from `dist/build-metadata.json` |
+| `interface` | the three values above, from the same environment the build compiled |
+| `assets` | every other built file as `{path, sha256, bytes}`, sorted by path |
+
+The manifest excludes itself, records no timestamp and is written with a fixed
+layout, so the same built tree always produces the same bytes. The SHA-256 of the
+manifest file is the `client_bundle_digest`: `build` publishes it as a job output,
+`verify` recomputes it from the downloaded artifact, and `handoff` sends it to
+Infra.
 
 ## Jobs and credentials
 
 | Job | `environment` | `id-token: write` | What it does |
 | --- | --- | --- | --- |
-| `build` | — | no | Checks out the exact source SHA, installs, builds the assets and `dist/build-metadata.json`, uploads `dist/` as an artifact |
-| `verify` | — | no | Publication identity check; recorded interface against the declared interface (dispatch override or reviewed constant); compiled assets contain the recorded values; unit tests; mocked browser tests |
-| `deploy` | `beta` | yes | The only credential boundary: OIDC assumption of the dedicated publish role, STS principal check, live interface resolution, mismatch refusal, S3 sync, CloudFront invalidation, publication record |
-| `record` | — | no | Validates the publication record, writes the step summary, uploads the validated record artifact |
-| `handoff` | — | no | Mints one App token scoped to `AnyWear-E2E` with `actions: write`, skips when this run's URL is already in a pending `beta-qualification.yml` run name, and dispatches one `smoke` |
+| `build` | — | no | Checks out the exact source SHA, installs, builds the assets, `dist/build-metadata.json` and `dist/bundle-manifest.json`, uploads `dist/` as `client-dist`, and publishes the manifest digest as its job output |
+| `verify` | — | no | Identity and declared-interface checks, the compiled assets contain the recorded values, the manifest matches `build-metadata.json` and the asset inventory it names, the manifest digest equals the published one, then `pnpm run test:run` and the mocked browser suite |
+| `handoff` | — | no | Mints one App token for `AnyWear-Infra` (`actions: write`), dispatches `mutate.yml` (`operation=publish-client`) with `return_run_details: true`, reads the created run back by id, and polls its job list until the Infra `deploy` job concludes |
 
-`deploy` runs `needs: verify`, so no role is assumed and no AWS API is called
-before verification completes. `build` and `verify` have no `environment`, no
-`id-token: write` and no AWS step. The `verify` job downloads the artifact the
-`build` job uploaded and runs the same credential-free identity check again in
-`deploy` before the first AWS call, so a tampered artifact cannot reach the
-credentialed step.
-
-`handoff` runs `needs: record`, declares no `environment`, requests no `id-token`
-and no AWS permission, and holds only `contents: read`. Its dispatch is the job's
-last step, so nothing runs after the E2E run is created.
+`handoff` runs `needs: [build, verify]`, so nothing leaves the repository before
+verification completes. It has `timeout-minutes: 160` around a 150-minute
+observation ceiling, so the ceiling fires first and the step still reports what it
+saw. It declares no `environment`, requests no `id-token` and holds no AWS
+permission; its only credential is the one App token, and its dispatch-and-observe
+step is the job's last step.
 
 The `verify` identity check pins the original repository and repository id,
 `refs/heads/main`, the two entry events (`workflow_dispatch` and a `push` to
 `main`), the exact `release.yml` workflow ref, `GITHUB_SHA` equality between
-workflow and source, the Beta account (`650880818323`) and region (`ap-east-1`),
-the dedicated `beta-client-publish-role` ARN, and the Actions run/attempt
-identity. A different value anywhere fails the run before any publication action.
+workflow and source, the Actions run/attempt identity, and the stage switch. A
+different value anywhere fails the run before the handoff.
 
-## Live-interface comparison
+## The handoff
 
-Before writing anything, `deploy` resolves the live Beta interface:
+`scripts/client-handoff.mjs` is the declared node program behind the `handoff`
+job. It sends exactly these inputs:
 
-| Value | Source |
+| Input | Value |
 | --- | --- |
-| `ClientBucketName`, `ClientDistributionId` | `AnyWearPlatformStack-beta` outputs |
-| `ApiBaseUrl` | `AnyWearPlatformStack-beta` outputs, the API distribution's domain |
-| user pool id, client id | `/anywear/beta/cognito_user_pool_id`, `/anywear/beta/cognito_client_id` |
+| `operation` | `publish-client` |
+| `delivery_trigger` | `publish` |
+| `client_run_id` | `${{ github.run_id }}` |
+| `client_run_attempt` | `${{ github.run_attempt }}` |
+| `client_bundle_digest` | the `build` job output above |
+| `dispatched_by` | this Client run's URL |
 
-The whole table is one `DescribeStacks` read of `AnyWearPlatformStack-beta` — the
-Beta `Platform` stack that owns both CloudFront distributions — plus the two SSM
-parameters; the deploy path reads no other stack.
+Then it reads the created run back:
 
-It compares each value with the interface recorded in
-`dist/build-metadata.json` and exits before `aws s3 sync` or the CloudFront
-invalidation when any value differs. The comparison is a refusal, not a
-warning: a drifted live interface needs a new published build of the new values.
+1. **Dedupe.** Before dispatching, it lists the `mutate.yml` runs that are `queued`
+   and `in_progress` and looks for this Client run's URL in their display titles —
+   the receiver renders `dispatched_by` into the run name, exactly as the retired
+   E2E dispatch relied on. A match is adopted instead of dispatching a second time,
+   so a re-run of `handoff` does not duplicate the publication. A failed listing
+   dispatches anyway and says so: a duplicate wastes a slot, a skipped one hides
+   what this Client run built.
+2. **Dispatch.** A response that names no run id is a failure, never a silent skip.
+3. **Read-back by id.** The id the dispatch returned must be the id the runs API
+   returns.
+4. **Observe the `deploy` job.** It polls the run's job list on a fixed 30-second
+   interval until the `deploy` job's conclusion is non-null, under the 150-minute
+   ceiling.
+   - `success` → the run URL and the conclusion are written to the step summary and
+     the job succeeds. It does **not** wait for Infra's `qualify-hold`; Infra owns
+     that verdict.
+   - `skipped` → the handoff fails, naming the Infra run URL: a skipped run is not a
+     publication.
+   - `failure`, `cancelled` or any other conclusion → the handoff fails, naming the
+     Infra run URL and the conclusion.
+   - No conclusion before the ceiling → the handoff fails, naming the run URL.
 
-Because a push compiles the reviewed constants, that refusal is also what makes a
-recreated stack fail closed. If `AnyWearPlatformStack-beta` is recreated, or a
-value it exposes changes, the merge run fails at the refusal naming the differing
-key and both values, and the fix is exactly one reviewed change to the `env`
-constants in `release.yml`. Nothing is written to the bucket before that check
-passes, and no unreviewed value from the live stack is ever compiled into a
-bundle.
+A failed observation reports the run it was watching, so the operator opens the
+Infra run rather than re-running the Client chain.
 
-## Publication record
+## Running a handoff
 
-After the sync and invalidation, `deploy` writes
-`publication/publication-record.json` containing the source SHA, run id and
-attempt, bucket, distribution, invalidation id, the resolved interface values and
-a timestamp, and uploads it as the `client-publication-record` artifact. The
-`record` job downloads that artifact, validates the record against the same
-repository/workflow/run identity, writes the step summary and uploads the
-validated record as `client-publication-record-validated`. `record` has no
-environment and no OIDC token; recording cannot acquire a credential.
+A merge to `main` is the ordinary entry: the chain starts from the pushed commit,
+compiles the reviewed constants, and needs no operator action. To hand a revision
+over by hand, dispatch `release.yml` from `main` with `operation: deploy` and,
+optionally, the three interface overrides.
+
+1. `build` produces the assets, the metadata and the manifest from that exact SHA,
+   and publishes the manifest digest.
+2. `verify` checks the publication identity, the declared interface, the compiled
+   assets, the manifest and the digest, then runs the unit suite and the mocked
+   browser suite.
+3. `handoff` dispatches the Infra `publish-client` run and observes its `deploy`
+   job, recording the Infra run URL and the conclusion in the step summary.
+4. Open the Infra run. It owns the live-interface refusal, the S3 sync, the
+   CloudFront invalidation, the publication record and the held post-publication
+   `smoke`. A red `smoke`, or a red `qualify-hold`, is a red Infra run and says
+   nothing about the Client run that handed the bundle over.
+
+The `beta-client-publish` concurrency group serializes Client build-and-handoff
+runs, does not cancel an active handoff, and queues up to 100 pending runs
+(`queue: max`) in wait order: a newer merge waits for the in-flight handoff instead
+of cancelling or replacing it. It is local to this repository; `AnyWear-Infra`'s
+`anywear-infra-runtime` group serializes the publication itself. A retry or
+recovery uses the ordinary entry and the same identity/interface/manifest
+verification; no new scheduling token is required.
 
 ## Repository configuration
 
-The stage switch was renamed with no compatibility fallback: `release.yml` reads
-`vars.ENABLE_BETA_MUTATION` and never `ENABLE_BETA_DEPLOY`. The repository
-variable must be renamed out of band; until it is, the `build` job's condition is
-false and every job is skipped.
+The stage switch is repository-scoped and has no compatibility fallback:
+`release.yml` reads `vars.ENABLE_BETA_MUTATION` and never `ENABLE_BETA_DEPLOY`.
+While the variable is absent or not `true`, the `build` job's condition is false
+and every job is skipped.
 
 | Beta variable | Value |
 | --- | --- |
-| `ENABLE_BETA_MUTATION` | `true` to enable publication on a merge and on a manual dispatch; `false` skips the whole chain |
-| `AWS_ACCOUNT_ID` | `650880818323` |
-| `AWS_REGION` | `ap-east-1` |
-| `CLIENT_PUBLISH_ROLE_ARN` | `arn:aws:iam::650880818323:role/beta-client-publish-role` |
+| `ENABLE_BETA_MUTATION` | `true` to enable the handoff on a merge and on a manual dispatch; `false` skips the whole chain |
+| `APP_ID` | the GitHub App id both App-token sites mint with |
 
-Infra owns the dedicated role. It needs `DescribeStacks` on
-`AnyWearPlatformStack-beta`, the Beta `Platform` stack the deploy path reads,
-`GetParameter` on the two Cognito parameters, `ListBucket` and object
-`GetObject`/`PutObject`/`DeleteObject` on the existing Client bucket, and
-`CreateInvalidation` on its distribution. It cannot deploy CDK/CFN, assume
-infrastructure deployment roles or push Service images. Missing role
-configuration fails before AWS access; there is no shared-role fallback.
+The publication credentials are no longer this repository's: `AnyWear-Infra`'s
+`beta` environment holds the AWS principal that performs the write, and the nine
+signing secrets belong to the two binary packaging workflows
+([CI credentials](source-ci-credentials.md)). The retired publish-role ARN, the
+account and region variables it was asserted against, and the old
+`CLIENT_PUBLISH_WINDOW_*` variables are read by no job here and can be removed
+during an authorized configuration reconciliation.
 
-Read back the environment's actual protection rules and branch policy before
-activation. Use supported environment protections and a `main` branch policy;
-record provider limitations and operational coordination where needed. An
-environment named `beta` alone does not prove configured protections. Source
-delivery does not provision the role or configure those protections.
+## Source versus deployed state
 
-## Running a deployment
-
-A merge to `main` is the ordinary entry: the chain starts from the pushed commit,
-compiles the reviewed constants, and needs no operator action. To publish a
-revision by hand, dispatch `release.yml` from `main` with `operation: deploy` and,
-optionally, the three interface overrides. Publication has no migration window
-token, issue-comment URL or deadline inputs. Deployment coordination belongs in
-the publication record, rather than a permanent dependency on an Issue or receipt.
-
-1. `build` produces the assets and metadata from that exact SHA, and `verify`
-   checks publication identity, the declared interface, the compiled assets, the
-   unit suite and the mocked browser suite.
-2. `deploy` resolves the live interface and refuses on any mismatch. On a match
-   it syncs the built assets, requests a CloudFront invalidation and writes the
-   publication record.
-3. `record` validates the publication record and uploads the validated copy.
-4. `handoff` dispatches one E2E `smoke` to `AnyWear-E2E`
-   (`trigger=deploy-smoke`, `worker_slot_offset=0`, `dispatched_by` equal to this
-   run's URL, and no expected commits) and prints the created run's URL. A re-run
-   of the job skips the dispatch when its own run URL is already in a queued or
-   in-progress `beta-qualification.yml` run name; a failed run listing dispatches
-   anyway and says so. A publication therefore leaves a red run only when its own
-   step failed — a red `smoke` is a red E2E run, not a red publication.
-5. Read the record artifact and step summary for the source, bucket,
-   distribution, invalidation id and resolved interface. Confirm invalidation
-   completion and observe the served `build-metadata.json` Client SHA and
-   interface values. An upload or invalidation request alone is not runtime
-   qualification; `AnyWear-E2E` qualifies the actual deployed Client, Service
-   components and Infra tuple.
-
-The `beta-client-publish` concurrency group serializes Client publication, does
-not cancel an active upload, and queues up to 100 pending runs (`queue: max`) in
-wait order: a newer merge waits for the in-flight publication instead of
-cancelling or replacing it. It is local to this repository, independently of
-Infra's deployment queue. Coordinate conflicting maintenance/deployment operations
-and verify prior jobs/cloud operations finish before changing ownership. Disabling
-the stage switch does not revoke a job's existing configuration snapshot or stop
-an already-started upload. A retry or recovery uses the ordinary deploy entry and
-the same identity/build/live-interface verification; no new scheduling token is
-required.
-
-## Migration status
-
-The [revised AnyWear #54 plan](https://github.com/git-malu/AnyWear/issues/54#issuecomment-6059823426)
-uses one explicitly authorized Beta maintenance stop, migration and restart. The
-initial Infra reconciliation retains the running Client until an independent
-Client selection is published. Old `CLIENT_PUBLISH_WINDOW_*` variables are unused
-by this workflow and can be removed during authorized configuration
-reconciliation. Role provisioning, effective old-authority retirement, actual
-independent publication and final E2E remain runtime delivery evidence, separate
-from this source change. This entry-consolidation change was neither dispatched
-nor deployed.
+This runbook documents source. It does not claim a delivered publication: the
+`publish-client` operation in `AnyWear-Infra` is a separate delivery, and the
+effective deployed trust of the AWS role that performs the write needs its own #54
+evidence before the first `publish-client` run. A Client run that hands a bundle
+over successfully still proves nothing about the served tuple until the Infra run
+concludes and its held `smoke` reports.

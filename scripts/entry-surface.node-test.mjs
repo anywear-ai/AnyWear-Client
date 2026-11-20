@@ -8,12 +8,12 @@ import { fileURLToPath } from 'node:url';
 // exactly four entries — one automatic check, one merge-triggered Android
 // publication with an optional prerelease publish (#322), one tag-triggered binary
 // publication (#278) and one publication entry that runs on a merge to `main` and on
-// a manual dispatch — two dispatch surfaces and one activation switch, and the
-// publication chain keeps the only AWS-credential job behind the credential-free
-// verify job with a credential-free record job after it and a credential-free
-// dispatch job after that. These are source assertions, read as text with no YAML
-// dependency, so the next change cannot drift the entry face without failing
-// `pnpm run test:run`.
+// a manual dispatch — two dispatch surfaces and one activation switch. #344 moved the
+// web publication's write into `AnyWear-Infra`: the Client's publication chain is
+// `build` → `verify` → `handoff`, holds no AWS credential and no GitHub Environment
+// anywhere, and hands the built bundle to the single writer. These are source
+// assertions, read as text with no YAML dependency, so the next change cannot drift
+// the entry face without failing `pnpm run test:run`.
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const workflowsDirectory = join(repositoryRoot, '.github', 'workflows');
@@ -419,8 +419,8 @@ test('a documentation-only merge starts nothing while a mixed merge starts the p
   assert.ok(!skips(['.github/workflows/release.yml']), 'a workflow change still starts the publication');
   assert.ok(!skips(['.github/scripts/assert-client-publication.mjs']), 'a script outside the list still starts the publication');
 
-  // The filter is the only trigger change: the five jobs and the dispatch menu stay.
-  assert.deepEqual(jobNames(release), ['build', 'verify', 'deploy', 'record', 'handoff']);
+  // The filter is the only trigger change: the three jobs and the dispatch menu stay.
+  assert.deepEqual(jobNames(release), ['build', 'verify', 'handoff']);
   assert.deepEqual(triggers(release), ['push', 'workflow_dispatch']);
   const operation = inputBlock(release, 'operation');
   assert.match(operation, /^ {8}type: choice$/m);
@@ -448,10 +448,14 @@ test('release.yml offers exactly one required choice operation: deploy', () => {
   assert.match(operation, /^ {8}options: \[deploy\]$/m);
 });
 
-test('only deploy holds an environment and an OIDC token, after verify, with credential-free record and handoff', () => {
+// #344: the Client builds, verifies and hands off. `AnyWear-Infra` is the single
+// writer of Beta's served tuple, so this workflow holds no AWS credential, no
+// environment and no OIDC identity anywhere, and the retired jobs are pinned out
+// rather than merely absent.
+test('#344: release.yml holds no environment, no OIDC token and no AWS credential', () => {
   const release = read(manualEntry);
   const names = jobNames(release);
-  assert.deepEqual(names, ['build', 'verify', 'deploy', 'record', 'handoff']);
+  assert.deepEqual(names, ['build', 'verify', 'handoff']);
 
   const sections = Object.fromEntries(names.map((name) => {
     const section = jobSection(release, name);
@@ -459,35 +463,74 @@ test('only deploy holds an environment and an OIDC token, after verify, with cre
     return [name, section];
   }));
 
-  // The credential boundary is a single job, and it is the last one before recording.
-  assert.deepEqual(names.filter((name) => /^ {4}environment:/m.test(sections[name])), ['deploy']);
-  assert.deepEqual(names.filter((name) => /^ {6}id-token: write$/m.test(sections[name])), ['deploy']);
-  assert.deepEqual(names.filter((name) => /configure-aws-credentials/.test(sections[name])), ['deploy']);
-  for (const name of ['build', 'verify', 'record', 'handoff']) {
+  for (const name of names) {
     assert.doesNotMatch(sections[name], /^ {4}environment:/m, `${name} must not declare an environment`);
     assert.doesNotMatch(sections[name], /id-token/, `${name} must not declare an OIDC token`);
     assert.doesNotMatch(sections[name], /configure-aws-credentials/, `${name} must not acquire AWS credentials`);
-  }
-
-  assert.match(sections.deploy, /^ {4}environment: beta$/m);
-  assert.match(sections.deploy, /^ {6}id-token: write$/m);
-  assert.match(sections.deploy, /^ {4}needs: \[verify\]$/m);
-
-  // The chain order is explicit: build -> verify -> deploy -> record -> handoff.
-  assert.doesNotMatch(sections.build, /^ {4}needs:/m, 'build is the first job of the chain');
-  assert.match(sections.verify, /^ {4}needs: \[build\]$/m);
-  assert.match(sections.record, /^ {4}needs: \[deploy\]$/m);
-  assert.match(sections.handoff, /^ {4}needs: \[record\]$/m);
-  assert.ok(names.indexOf('verify') < names.indexOf('deploy'));
-  assert.ok(names.indexOf('deploy') < names.indexOf('record'));
-  assert.ok(names.indexOf('record') < names.indexOf('handoff'));
-
-  // record and handoff record and dispatch; neither holds a permission beyond
-  // reading the repository.
-  for (const name of ['record', 'handoff']) {
+    assert.doesNotMatch(sections[name], /aws (?:sts|s3|cloudformation|ssm|cloudfront)\b/, `${name} must not run the AWS CLI`);
+    // Each job holds only the workflow-level read grant.
     const permissions = /^ {4}permissions:\n((?: {6}[a-z0-9-]+: [a-z]+(?:\n|$))+)/m.exec(sections[name])?.[1];
     assert.equal(permissions, '      contents: read\n', `${name} must hold only \`contents: read\``);
   }
+
+  // Every retired token of the AWS path is a negative pin: none may come back.
+  for (const retired of [
+    'environment: beta',
+    'CLIENT_PUBLISH_ROLE_ARN',
+    'beta-client-publish-role',
+    'configure-aws-credentials',
+    'aws sts',
+    'aws s3 sync',
+    'aws cloudformation',
+    'aws ssm',
+    'aws cloudfront',
+    'client-publication-record',
+    'client-publication-record-validated',
+    'assert-client-publication.mjs deploy',
+    'assert-client-publication.mjs record',
+    // Assembled from its parts so this guard does not itself put the retired stack
+    // name back into the workflow.
+    ['AnyWearPlatformStack', 'beta'].join('-'),
+  ]) {
+    assert.equal(release.includes(retired), false, `release.yml must not carry the retired \`${retired}\``);
+  }
+  assert.equal(release.includes('id-token'), false, 'release.yml must not mention an OIDC token at all');
+
+  // The chain order is explicit: build -> verify -> handoff.
+  assert.doesNotMatch(sections.build, /^ {4}needs:/m, 'build is the first job of the chain');
+  assert.match(sections.verify, /^ {4}needs: \[build\]$/m);
+  assert.match(sections.handoff, /^ {4}needs: \[build, verify\]$/m);
+  assert.ok(names.indexOf('verify') < names.indexOf('handoff'));
+});
+
+test('#344: build writes the bundle manifest inside the uploaded artifact and publishes its digest', () => {
+  const build = jobSection(read(manualEntry), 'build');
+  // The digest is the build job's output, so every later job reads the same value
+  // rather than recomputing one.
+  assert.match(build, /^ {4}outputs:\n {6}client_bundle_digest: \$\{\{ steps\.manifest\.outputs\.digest \}\}$/m);
+
+  const names = [...build.matchAll(/^ {6}- name: (.+)$/gm)].map((match) => match[1]);
+  const at = (name) => {
+    assert.ok(names.includes(name), `build must declare the ${name} step`);
+    return names.indexOf(name);
+  };
+  assert.ok(at('Build Beta web client') < at('Write the bundle manifest'), 'the manifest is written after the build it describes');
+  assert.ok(at('Write the bundle manifest') < at('Upload built client'), 'the manifest is inside the uploaded artifact');
+
+  const manifest = stepSection(build, 'Write the bundle manifest');
+  assert.match(manifest, /^ {8}id: manifest$/m);
+  assert.match(manifest, /^ {8}run: node scripts\/write-bundle-manifest\.mjs$/m);
+  assert.match(stepSection(build, 'Upload built client'), /^ {10}path: dist\/$/m);
+});
+
+test('#344: verify proves the digest subject before anything is handed over', () => {
+  const verify = jobSection(read(manualEntry), 'verify');
+  const validate = stepSection(verify, 'Validate the publication identity, declared interface and bundle manifest');
+  assert.match(validate, /^ {8}run: node \.github\/scripts\/assert-client-publication\.mjs verify$/m);
+  assert.match(validate, /^ {10}CLIENT_BUNDLE_DIGEST: \$\{\{ needs\.build\.outputs\.client_bundle_digest \}\}$/m);
+  assert.match(verify, /^ {8}run: pnpm run test:run$/m);
+  assert.match(verify, /^ {8}run: pnpm run test:browser$/m);
+  assert.match(verify, /^ {4}needs: \[build\]$/m);
 });
 
 test('the only activation switch in any workflow is ENABLE_BETA_MUTATION', () => {
@@ -533,34 +576,48 @@ test('check.yml wires the four called workflows and maps the App secret only on 
   assert.doesNotMatch(browser, /secrets:/);
 });
 
-// #188: the deploy job resolves the whole live interface from the Beta `Base`
-// stack, which owns both CloudFront distributions and the `ApiBaseUrl` output.
-// The retired workload stack read was denied and left the publish with no asset
-// sync, no invalidation and no publication record.
-test('#188: the deploy job reads the Beta Base stack only and resolves its interface', () => {
+// #344: #188's live-interface resolution — one `DescribeStacks` read of the Beta
+// `Base` stack plus the two SSM reads, then a refusal before the first S3 write —
+// moved with the write into `AnyWear-Infra`'s `publish-client` `deploy` job. The
+// Client keeps only the credential-free declared-interface check, so nothing here may
+// read the stack, the parameters or any S3/CloudFront location.
+test('#344: the Client no longer resolves the Beta stack, its parameters or a publication target', () => {
   const release = read(manualEntry);
-  // Assembled from its parts so this guard does not itself defeat the issue's
-  // repository-wide census that the retired stack name has zero occurrences.
-  const retiredStack = ['AnyWearWorkloadStack', 'beta'].join('-');
-  assert.ok(!release.includes(retiredStack), 'the deploy path must not name the retired stack');
-
-  const settings = stepSection(release, 'Resolve Beta deployment settings');
-  assert.deepEqual(
-    [...settings.matchAll(/--stack-name\s+(\S+)/g)].map((match) => match[1]),
-    ['AnyWearPlatformStack-beta'],
-    'the settings step reads exactly the Beta Base stack',
-  );
-  assert.match(settings, /require_output ApiBaseUrl|select\(\.OutputKey == "ApiBaseUrl"\)/);
-  assert.match(settings, /\/anywear\/beta\/cognito_user_pool_id/);
-  assert.match(settings, /\/anywear\/beta\/cognito_client_id/);
-  assert.equal([...settings.matchAll(/aws ssm get-parameter/g)].length, 2);
-  for (const output of ['bucket', 'distribution', 'api_url', 'pool_id', 'client_id']) {
-    assert.ok(
-      settings.includes(`echo "${output}=$${output}"`),
-      `${output} leaves the settings step as a step output`,
-    );
+  // Assembled from its parts so this guard does not itself put the retired stack
+  // name back into the workflow.
+  const retiredStack = ['AnyWearPlatformStack', 'beta'].join('-');
+  for (const retired of [
+    retiredStack,
+    ['AnyWearWorkloadStack', 'beta'].join('-'),
+    '/anywear/beta/cognito_user_pool_id',
+    '/anywear/beta/cognito_client_id',
+    '--stack-name',
+    'get-parameter',
+    'aws ssm',
+    'aws s3',
+    'aws cloudfront',
+    'CreateInvalidation',
+    'ClientBucketName',
+    'ClientDistributionId',
+    'ApiBaseUrl',
+  ]) {
+    assert.ok(!release.includes(retired), `the Client must not name \`${retired}\` any more`);
   }
-  assert.match(settings, /\} >> "\$GITHUB_OUTPUT"/);
+  // No job declares one of the retired AWS steps by name.
+  const retiredSteps = [
+    'Resolve Beta deployment settings',
+    'Refuse a live interface that differs from the built interface',
+    'Publish static assets',
+    'Write the publication record',
+    'Upload the publication record',
+    'Validate the publication record',
+  ];
+  for (const name of jobNames(release)) {
+    const steps = [...jobSection(release, name).matchAll(/^ {6}- name: (.+)$/gm)].map((match) => match[1]);
+    for (const retired of retiredSteps) {
+      assert.ok(!steps.includes(retired), `${name} must not carry the retired \`${retired}\` step`);
+    }
+  }
 });
 
 // #226: a merge publishes the same interface the manual dispatch used to type. The
@@ -589,105 +646,71 @@ test('#226: the reviewed Beta interface is a workflow constant the build compile
     assert.match(build, expression, `build must compile the ${constant} constant when no input is given`);
   }
 
-  const verify = stepSection(release, 'Validate publication identity and declared interface');
+  const verify = stepSection(release, 'Validate the publication identity, declared interface and bundle manifest');
   for (const [constant, input] of Object.entries(reads)) {
     const expression = new RegExp(`^ {10}DECLARED_${constant.replace('BETA_', '')}: \\$\\{\\{ inputs\\.${input} \\|\\| env\\.${constant} \\}\\}$`, 'm');
     assert.match(verify, expression, `verify must compare the same interface a push compiled`);
   }
-
-  // `deploy` re-checks the declared interface before its first AWS write.
-  assert.match(
-    jobSection(release, 'deploy'),
-    /^ {10}DECLARED_API_BASE_URL: \$\{\{ inputs\.api_base_url \|\| env\.BETA_API_BASE_URL \}\}$/m,
-  );
 
   // The interface is not repository configuration: changing a value is a reviewed
   // change to this workflow, not an owner setting the run cannot see.
   assert.doesNotMatch(release, /vars\.(?:BETA_|API_BASE_URL|COGNITO_)/);
 });
 
-test('#226: deploy still refuses a live interface that differs before the first S3 write', () => {
-  const deploy = jobSection(read(manualEntry), 'deploy');
-  const refusal = deploy.indexOf('      - name: Refuse a live interface that differs from the built interface\n');
-  const publish = deploy.indexOf('      - name: Publish static assets\n');
-  assert.ok(refusal >= 0, 'deploy must keep the live-interface refusal step');
-  assert.ok(publish >= 0, 'deploy must keep the publish step');
-  assert.ok(refusal < publish, 'the refusal must run before the first S3 write');
-  assert.match(
-    stepSection(deploy, 'Refuse a live interface that differs from the built interface'),
-    /^ {8}run: node \.github\/scripts\/assert-client-publication\.mjs deploy$/m,
-  );
-});
+// #344: the handoff is the one cross-repository step, and it is a dispatch of
+// `AnyWear-Infra`'s `mutate.yml` (`operation=publish-client`) plus a read-back of the
+// created run. One App token, one repository, one permission; the six inputs are
+// workflow text; the program that dispatches and observes is the job's last step.
+test('#344: the handoff dispatches mutate.yml on AnyWear-Infra and observes the deploy job', () => {
+  const release = read(manualEntry);
+  const handoff = jobSection(release, 'handoff');
+  assert.match(handoff, /^ {4}needs: \[build, verify\]$/m);
+  assert.match(handoff, /^ {4}timeout-minutes: 160$/m, 'the 150-minute observation ceiling fits inside the job timeout');
 
-test('#226: the handoff dispatches exactly one deploy-smoke and has no step after it', () => {
-  const handoff = jobSection(read(manualEntry), 'handoff');
+  // One App token, narrowed to the Infra repository with `actions: write` only, on an
+  // immutable pin.
+  const token = stepSection(handoff, 'Mint the AnyWear-Infra dispatch token');
+  assert.match(token, /^ {10}app-id: \$\{\{ vars\.APP_ID \}\}$/m);
+  assert.match(token, /^ {10}private-key: \$\{\{ secrets\.APP_PRIVATE_KEY \}\}$/m);
+  assert.match(token, /^ {10}repositories: AnyWear-Infra$/m);
+  assert.match(token, /^ {10}permission-actions: write$/m);
+  assert.match(token, /uses: actions\/create-github-app-token@[0-9a-f]{40} # v3\.3\.0/);
+
+  // The dispatch target and this run's identity are workflow text; the digest is the
+  // `build` job's output, so the value handed over is the one `verify` proved.
+  for (const line of [
+    'INFRA_OWNER: ${{ github.repository_owner }}',
+    'INFRA_REPOSITORY: AnyWear-Infra',
+    'INFRA_WORKFLOW: mutate.yml',
+    'CLIENT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+    'CLIENT_RUN_ID: ${{ github.run_id }}',
+    'CLIENT_RUN_ATTEMPT: ${{ github.run_attempt }}',
+    'CLIENT_BUNDLE_DIGEST: ${{ needs.build.outputs.client_bundle_digest }}',
+  ]) {
+    assert.ok(handoff.includes(`\n      ${line}\n`), `the handoff must declare \`${line}\` as job env`);
+  }
+
+  // The declared node program does the dedupe, the dispatch and the read-back, and it
+  // is the last step: nothing runs after the observation.
   assert.deepEqual(
     [...handoff.matchAll(/^ {6}- name: (.+)$/gm)].map((match) => match[1]),
     [
-      'Mint the AnyWear-E2E dispatch token',
-      'Check for a smoke run already queued for this publication',
-      'Dispatch the post-publication smoke',
+      'Checkout',
+      'Setup Node',
+      'Mint the AnyWear-Infra dispatch token',
+      'Dispatch the Infra publish-client run and read it back',
     ],
-    'the dispatch is the last step',
+    'the dispatch and observation are the last step',
   );
+  const dispatch = stepSection(handoff, 'Dispatch the Infra publish-client run and read it back');
+  assert.match(dispatch, /^ {8}run: node scripts\/client-handoff\.mjs$/m);
+  assert.match(dispatch, /^ {10}GH_TOKEN: \$\{\{ steps\.infra-token\.outputs\.token \}\}$/m);
 
-  // One App token, narrowed to the E2E repository with `actions: write` only.
-  const token = stepSection(handoff, 'Mint the AnyWear-E2E dispatch token');
-  assert.match(token, /^ {10}repositories: AnyWear-E2E$/m);
-  assert.match(token, /^ {10}permission-actions: write$/m);
-  assert.match(
-    handoff,
-    /^ {6}DISPATCHED_BY: \$\{\{ github\.server_url \}\}\/\$\{\{ github\.repository \}\}\/actions\/runs\/\$\{\{ github\.run_id \}\}$/m,
-  );
-
-  // The dedupe lists this workflow's queued and in-progress runs and skips when this
-  // run's URL already appears in one; a failed listing dispatches anyway.
-  const dedupe = stepSection(handoff, 'Check for a smoke run already queued for this publication');
-  assert.match(dedupe, /for status in queued in_progress; do/);
-  assert.match(dedupe, /repos\/\$\{E2E_OWNER\}\/\$\{E2E_REPOSITORY\}\/actions\/workflows\/\$\{E2E_WORKFLOW\}\/runs\?status=\$\{status\}/);
-  assert.match(dedupe, /Skipping the smoke dispatch/);
-  assert.match(dedupe, /dispatching the smoke anyway/);
-
-  // The payload is exactly the four fields, `dispatched_by` is this run's URL, and no
-  // expected commit is sent. `gh workflow run` cannot return the run, so the REST
-  // endpoint is called with `return_run_details`.
-  const dispatch = stepSection(handoff, 'Dispatch the post-publication smoke');
-  assert.match(dispatch, /repos\/\$\{E2E_OWNER\}\/\$\{E2E_REPOSITORY\}\/actions\/workflows\/\$\{E2E_WORKFLOW\}\/dispatches/);
-  assert.match(dispatch, /-F return_run_details=true/);
-  assert.match(dispatch, /-f 'inputs\[operation\]=smoke'/);
-  assert.match(dispatch, /-f 'inputs\[trigger\]=deploy-smoke'/);
-  assert.match(dispatch, /-f 'inputs\[worker_slot_offset\]=0'/);
-  assert.match(dispatch, /-f "inputs\[dispatched_by\]=\$\{DISPATCHED_BY\}"/);
-  assert.doesNotMatch(dispatch, /expected_/);
-
-  // #226: the dispatch response names the run it created, so the normal path verifies
-  // that run by id with one read and no polling. The run title renders after the run
-  // appears, so a check that reads it immediately failed in production for a run that
-  // existed; the title is read only inside the bounded fallback branch.
-  assert.match(dispatch, /run_id="\$\(jq -r '\.workflow_run_id \/\/ empty' <<< "\$response"\)"/);
-  assert.match(dispatch, /run_url="\$\(jq -r '\.html_url \/\/ \.run_url \/\/ empty' <<< "\$response"\)"/);
-
-  const fallbackMarker = 'Fallback only when the response carries no `workflow_run_id`';
-  const fallbackStart = dispatch.indexOf(fallbackMarker);
-  assert.ok(fallbackStart > 0, 'the dispatch step must keep the fallback branch for a response carrying no run id');
-
-  const byId = dispatch.slice(0, fallbackStart);
-  assert.match(byId, /^ {10}if \[ -n "\$run_id" \]; then$/m, 'the by-id path is the normal path, taken when the response carries the id');
-  assert.match(byId, /actions\/runs\/\$\{run_id\}" --jq '\.id'/);
-  assert.match(byId, /\[ "\$created_id" != "\$run_id" \]/, 'the created run id must equal the dispatched id');
-  assert.doesNotMatch(byId, /display_title/, 'the normal path must not read the run title');
-  assert.doesNotMatch(byId, /sleep/, 'the normal path must not poll');
-
-  // The fallback is a bounded poll: a finite attempt count, a wait between attempts,
-  // and a failure only after the attempts are exhausted.
-  const fallback = dispatch.slice(fallbackStart);
-  assert.match(fallback, /display_title/, 'only the fallback reads the run title');
-  assert.match(fallback, /attempts=\d+/);
-  assert.match(fallback, /for attempt in \$\(seq 1 "\$attempts"\)/);
-  assert.match(fallback, /sleep "\$wait_seconds"/);
-  assert.match(fallback, /if \[ "\$attempt" -lt "\$attempts" \]/);
-  assert.match(fallback, /\[ -z "\$run_url" \]/);
-  assert.match(fallback, /appeared in \$\{attempts\} attempts/);
+  // The retired E2E dispatch is a negative pin: this repository dispatches no
+  // qualification and names no E2E workflow any more.
+  for (const retired of ['beta-qualification.yml', 'AnyWear-E2E', 'deploy-smoke', 'worker_slot_offset', 'expected_service_commit', 'display_title', 'gh api --paginate']) {
+    assert.equal(release.includes(retired), false, `release.yml must not carry the retired \`${retired}\``);
+  }
 });
 
 // #226: `verify` runs `pnpm run test:run`, which includes the ambient case in

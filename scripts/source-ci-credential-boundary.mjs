@@ -4,7 +4,7 @@
 // job, for exactly one repository and one permission:
 //
 //   build.yml:build      AnyWear-Service-API  contents: read   the OpenAPI spec
-//   release.yml:handoff  AnyWear-E2E          actions: write  the smoke dispatch
+//   release.yml:handoff  AnyWear-Infra        actions: write  the publish-client dispatch
 //
 // Everything else the workflows read is this public repository, or a public
 // action. The constants below are the allowlist the workflows must request and
@@ -43,7 +43,7 @@ export const tokenSites = [
     job: 'handoff',
     ref: '64ab729a6294000f5aa4a4bc0b73d1f32bc45510',
     version: 'v3.3.0',
-    repository: 'AnyWear-E2E',
+    repository: 'AnyWear-Infra',
     permissions: { actions: 'write' },
     readsSpecification: false,
   },
@@ -98,16 +98,16 @@ export const credentialBoundaryWorkflows = ['check.yml', 'client-release.yml', '
 /**
  * #278/#322: the write permissions a job-level `permissions:` block may grant, each
  * closed to the named `workflow:job` that holds it. `contents: read` is allowed on
- * any job; `release.yml:deploy` already holds `id-token: write` for its AWS boundary
- * and is named here rather than exempted implicitly. The Beta APK workflow's
- * dispatch-only publish job is the one further `contents: write` holder, and no job
- * that runs on a merge holds it.
+ * any job. No Client job holds `id-token: write` any more: the web publication's
+ * AWS path is retired and `release.yml` holds no cloud principal, so the two OIDC
+ * holders left are the tag release's attestation job and nothing else. The Beta APK
+ * workflow's dispatch-only publish job is the one further `contents: write` holder,
+ * and no job that runs on a merge holds it.
  */
 export const jobPermissionSites = {
   'client-release.yml:publish': ['contents: write'],
   'client-beta-apk.yml:publish-beta-prerelease': ['contents: write'],
   'client-release.yml:assemble': ['id-token: write', 'attestations: write'],
-  'release.yml:deploy': ['id-token: write'],
 };
 
 /** Every signing secret name, and the closed set of sites each may be read at. */
@@ -872,9 +872,11 @@ function cloudCommandOf(line) {
  * The packaging-entry boundary of one parsed workflow: a packaging entry holds no
  * GitHub Environment, no cloud principal and no cloud CLI.
  *
- * This is keyed to the closed set of packaging entries by the caller. It is not a
- * general rule for the repository: `release.yml` is the web-publication entry and
- * legitimately assumes its own AWS role.
+ * This is keyed to the closed set of packaging entries by the caller, not applied to
+ * every workflow. The web publication `release.yml` holds no cloud principal either,
+ * since the AWS path moved to `AnyWear-Infra`'s `publish-client`, but its census is
+ * `entry-surface.node-test.mjs`'s, so the packaging rules stay scoped to the two
+ * workflows that sign binaries.
  */
 function packagingEntryViolations(document) {
   const { workflow, steps } = document;
@@ -1207,9 +1209,10 @@ export function validateSourceCiCredentialBoundary({ documents, submoduleReposit
   }
 
   // The packaging entries are the closed two-workflow set. The confinement is the
-  // rule, not a convenience: `release.yml` is the web-publication entry, declares
-  // its own `environment:` and assumes its own AWS role, so a scan widened to every
-  // workflow would report that correct tree as a violation.
+  // rule, not a convenience: the Client's other workflows — the automatic check, the
+  // web handoff and the called build/test workflows — are governed by their own
+  // census, so a scan widened to every workflow would report constructs these two
+  // rules were never written for.
   for (const file of signingWorkflows) {
     const signingDocument = documents.find((document) => document.workflow.file === file);
     if (signingDocument === undefined) {

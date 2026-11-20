@@ -3,8 +3,10 @@ name: Deploy Beta Web Client
 # The one publication entry for this repository, on two events: a merge to `main`
 # publishes the reviewed revision with no typed values, and a manual
 # `operation: deploy` dispatch keeps the three interface overrides. Either event
-# builds the revision, verifies it without credentials, and only then assumes the
-# dedicated publish role to sync the built assets and record the publication.
+# builds the revision and verifies it without credentials; `handoff` then hands the
+# built bundle to `AnyWear-Infra`, which performs the publication. This repository
+# holds no AWS credential at all: under the single-writer model (ADR 0033 §9)
+# `AnyWear-Infra` is the only writer of Beta's served tuple.
 on:
   # A merge whose changed files are all documentation starts nothing: every changed
   # path matches `paths-ignore`, so the run is skipped before any job — no artifact
@@ -30,8 +32,8 @@ on:
 
       # Manual-only overrides for the three reviewed constants below. A push has no
       # inputs and compiles the constants; a dispatch may replace any of them.
-      # build-metadata.json records exactly the values Vite compiled, and `deploy`
-      # refuses when the live Beta interface differs from them.
+      # build-metadata.json records exactly the values Vite compiled, and `verify`
+      # refuses when the declared interface differs from them.
       api_base_url:
         description: Declared API base URL compiled into the bundle
         type: string
@@ -45,26 +47,27 @@ on:
         type: string
         required: true
 
-# The reviewed Beta interface, as last published: `AnyWearPlatformStack-beta`'s
-# `ApiBaseUrl` output and the `/anywear/beta/cognito_user_pool_id` and
-# `/anywear/beta/cognito_client_id` parameters. The credential-free build cannot
-# resolve them, so they are reviewed constants here and every job reads them
+# The reviewed Beta interface, as last published: the API distribution's domain and
+# the two Cognito values the Beta environment serves. The credential-free build
+# cannot resolve them, so they are reviewed constants here and every job reads them
 # through `inputs.<name> || env.BETA_<NAME>`: a push needs no input, and a manual
 # dispatch can still override any of the three.
 #
-# `deploy` re-resolves the live interface and refuses a mismatch before the first
-# S3 write. A recreated stack therefore fails closed instead of publishing an
-# interface no review saw, and needs exactly one reviewed change here.
+# `AnyWear-Infra`'s `publish-client` re-resolves the live interface and refuses a
+# mismatch before the first S3 write. A recreated stack therefore fails closed
+# instead of publishing an interface no review saw, and needs exactly one reviewed
+# change here.
 env:
   BETA_API_BASE_URL: 'https://d1pfqujqt29n11.cloudfront.net'
   BETA_COGNITO_USER_POOL_ID: 'ap-east-1_XqXt4Kw1L'
   BETA_COGNITO_CLIENT_ID: '4jp37atfitq59hmjo404342int'
 
-# This queue serializes Client publication, independently of Infra's queue.
+# This queue serializes Client build-and-handoff runs, independently of Infra's
+# queue.
 concurrency:
   group: beta-client-publish
   cancel-in-progress: false
-  # Up to 100 pending runs, processed in wait order; an in-flight upload is never
+  # Up to 100 pending runs, processed in wait order; an in-flight handoff is never
   # cancelled by a newer merge.
   queue: max
 
@@ -75,12 +78,17 @@ jobs:
   build:
     name: Build the reviewed Beta web client
     # The stage switch and the main ref gate the chain, and the event decides which
-    # entry this is: a push is the publication, and a dispatch needs `deploy`.
-    # `build` and `verify` hold no AWS credential; `deploy` waits for `verify`.
+    # entry this is: a push is the publication request, and a dispatch needs
+    # `deploy`. `build` and `verify` hold no credential; `handoff` waits for both.
     if: vars.ENABLE_BETA_MUTATION == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.operation == 'deploy')
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # The digest `handoff` sends to Infra: the SHA-256 of the bundle manifest this
+    # job wrote beside the assets. `verify` recomputes it before anything leaves the
+    # repository.
+    outputs:
+      client_bundle_digest: ${{ steps.manifest.outputs.digest }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       SOURCE_COMMIT_SHA: ${{ github.sha }}
@@ -118,6 +126,14 @@ jobs:
           VITE_COGNITO_CLIENT_ID: ${{ inputs.cognito_client_id || env.BETA_COGNITO_CLIENT_ID }}
         run: pnpm build
 
+      # The manifest names every built asset by path, SHA-256 and size, repeats the
+      # identity and interface `build-metadata.json` records, and excludes itself.
+      # It is written before the upload so the digest names bytes the uploaded
+      # `client-dist` artifact carries.
+      - name: Write the bundle manifest
+        id: manifest
+        run: node scripts/write-bundle-manifest.mjs
+
       - name: Upload built client
         uses: actions/upload-artifact@v4
         with:
@@ -135,9 +151,6 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       BETA_MUTATION_ENABLED: ${{ vars.ENABLE_BETA_MUTATION }}
-      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      CLIENT_PUBLISH_ROLE_ARN: ${{ vars.CLIENT_PUBLISH_ROLE_ARN }}
 
     steps:
       # `pnpm run test:run` below includes the ambient case in
@@ -176,12 +189,15 @@ jobs:
           name: client-dist
           path: dist
 
-      # Publication identity, the exact workflow/source sha, and the interface
-      # values recorded in build-metadata.json against the declared interface: the
-      # dispatch overrides or, on a push, the reviewed constants. It also asserts
-      # that the compiled assets contain those values.
-      - name: Validate publication identity and declared interface
+      # Publication identity, the exact workflow/source sha, the interface values
+      # recorded in build-metadata.json against the declared interface (the dispatch
+      # overrides or, on a push, the reviewed constants), and the compiled assets
+      # that must contain those values. It also proves the digest `handoff` sends:
+      # the bundle manifest matches build-metadata.json and the asset inventory it
+      # names, and its SHA-256 is the one `build` published.
+      - name: Validate the publication identity, declared interface and bundle manifest
         env:
+          CLIENT_BUNDLE_DIGEST: ${{ needs.build.outputs.client_bundle_digest }}
           DECLARED_API_BASE_URL: ${{ inputs.api_base_url || env.BETA_API_BASE_URL }}
           DECLARED_COGNITO_USER_POOL_ID: ${{ inputs.cognito_user_pool_id || env.BETA_COGNITO_USER_POOL_ID }}
           DECLARED_COGNITO_CLIENT_ID: ${{ inputs.cognito_client_id || env.BETA_COGNITO_CLIENT_ID }}
@@ -191,262 +207,57 @@ jobs:
         run: pnpm run test:run
 
       # The browser suite also runs in check.yml on every push to main. It is
-      # repeated here so the deploy chain verifies the exact revision it is
-      # about to publish instead of relying on an earlier run.
+      # repeated here so the chain verifies the exact revision it is about to hand
+      # over instead of relying on an earlier run.
       - name: Install Chromium
         run: pnpm exec playwright install chromium --with-deps
 
       - name: Run browser integration tests
         run: pnpm run test:browser
 
-  deploy:
-    name: Deploy the reviewed Beta web client
-    needs: [verify]
-    runs-on: ubuntu-latest
-    # The only job in this repository that declares an environment or an OIDC
-    # token. It runs after `verify`, so credentials are acquired only after the
-    # artifact and its declared interface have been verified.
-    environment: beta
-    permissions:
-      id-token: write
-      contents: read
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      BETA_MUTATION_ENABLED: ${{ vars.ENABLE_BETA_MUTATION }}
-      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      CLIENT_PUBLISH_ROLE_ARN: ${{ vars.CLIENT_PUBLISH_ROLE_ARN }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Download built client
-        uses: actions/download-artifact@v4
-        with:
-          name: client-dist
-          path: dist
-
-      # Re-runs the credential-free identity and declared-interface check before
-      # the first AWS call, so a tampered artifact cannot reach the credentialed
-      # step.
-      - name: Validate publication identity and declared interface
-        env:
-          DECLARED_API_BASE_URL: ${{ inputs.api_base_url || env.BETA_API_BASE_URL }}
-          DECLARED_COGNITO_USER_POOL_ID: ${{ inputs.cognito_user_pool_id || env.BETA_COGNITO_USER_POOL_ID }}
-          DECLARED_COGNITO_CLIENT_ID: ${{ inputs.cognito_client_id || env.BETA_COGNITO_CLIENT_ID }}
-        run: node .github/scripts/assert-client-publication.mjs verify
-
-      - name: Configure Beta AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.CLIENT_PUBLISH_ROLE_ARN }}
-          role-session-name: client-publish-${{ github.run_id }}-${{ github.run_attempt }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Verify Beta Client principal
-        shell: bash
-        run: |
-          aws sts get-caller-identity --output json | jq -e \
-            --arg account "$AWS_ACCOUNT_ID" \
-            --arg arn "arn:aws:sts::$AWS_ACCOUNT_ID:assumed-role/beta-client-publish-role/client-publish-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-            '.Account == $account and .Arn == $arn'
-
-      - name: Resolve Beta deployment settings
-        id: settings
-        shell: bash
-        run: |
-          # `AnyWearPlatformStack-beta` is the Beta `Base` stack: it owns the
-          # Client bucket, both CloudFront distributions and the `ApiBaseUrl`
-          # output. #166 moved the API distribution into `Base`, so this stack is
-          # the deployed interface the publish role may read. Resolve every value
-          # from this one stack or from SSM; no other stack is read here.
-          platform_outputs="$(aws cloudformation describe-stacks \
-            --stack-name AnyWearPlatformStack-beta --query 'Stacks[0].Outputs' --output json)"
-          # `jq -e` fails when an output is absent, but prints no message. Name
-          # the stack and the output so a renamed output is not a bare exit code.
-          require_output() {
-            jq -er --arg key "$1" \
-              '.[] | select(.OutputKey == $key and (.OutputValue | length) > 0) | .OutputValue' \
-              <<<"$platform_outputs" \
-              || { echo "AnyWearPlatformStack-beta has no $1 output" >&2; exit 1; }
-          }
-          bucket="$(require_output ClientBucketName)"
-          distribution="$(require_output ClientDistributionId)"
-          api_url="$(require_output ApiBaseUrl)"
-          pool_id="$(aws ssm get-parameter --name /anywear/beta/cognito_user_pool_id --query Parameter.Value --output text)"
-          client_id="$(aws ssm get-parameter --name /anywear/beta/cognito_client_id --query Parameter.Value --output text)"
-          {
-            echo "bucket=$bucket"
-            echo "distribution=$distribution"
-            echo "api_url=$api_url"
-            echo "pool_id=$pool_id"
-            echo "client_id=$client_id"
-          } >> "$GITHUB_OUTPUT"
-
-      # Refuses the run when the live Beta interface differs in any value from
-      # the interface recorded in build-metadata.json. No asset is written before
-      # this check passes.
-      - name: Refuse a live interface that differs from the built interface
-        env:
-          LIVE_API_BASE_URL: ${{ steps.settings.outputs.api_url }}
-          LIVE_COGNITO_USER_POOL_ID: ${{ steps.settings.outputs.pool_id }}
-          LIVE_COGNITO_CLIENT_ID: ${{ steps.settings.outputs.client_id }}
-        run: node .github/scripts/assert-client-publication.mjs deploy
-
-      - name: Publish static assets
-        id: publish
-        shell: bash
-        env:
-          CLIENT_BUCKET: ${{ steps.settings.outputs.bucket }}
-          CLIENT_DISTRIBUTION: ${{ steps.settings.outputs.distribution }}
-        run: |
-          aws s3 sync dist "s3://$CLIENT_BUCKET" --delete
-          invalidation="$(aws cloudfront create-invalidation \
-            --distribution-id "$CLIENT_DISTRIBUTION" --paths '/*' \
-            --query Invalidation.Id --output text)"
-          echo "invalidation=$invalidation" >> "$GITHUB_OUTPUT"
-
-      - name: Write the publication record
-        shell: bash
-        env:
-          CLIENT_BUCKET: ${{ steps.settings.outputs.bucket }}
-          CLIENT_DISTRIBUTION: ${{ steps.settings.outputs.distribution }}
-          INVALIDATION_ID: ${{ steps.publish.outputs.invalidation }}
-          API_BASE_URL: ${{ steps.settings.outputs.api_url }}
-          COGNITO_USER_POOL_ID: ${{ steps.settings.outputs.pool_id }}
-          COGNITO_CLIENT_ID: ${{ steps.settings.outputs.client_id }}
-        run: |
-          mkdir -p publication
-          jq -n \
-            --arg source_commit "$GITHUB_SHA" \
-            --arg run_id "$GITHUB_RUN_ID" \
-            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
-            --arg bucket "$CLIENT_BUCKET" \
-            --arg distribution_id "$CLIENT_DISTRIBUTION" \
-            --arg invalidation_id "$INVALIDATION_ID" \
-            --arg api_base_url "$API_BASE_URL" \
-            --arg cognito_user_pool_id "$COGNITO_USER_POOL_ID" \
-            --arg cognito_client_id "$COGNITO_CLIENT_ID" \
-            --arg published_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{
-              schema_version: 1,
-              component: "AnyWear-Client",
-              source_commit: $source_commit,
-              run_id: $run_id,
-              run_attempt: $run_attempt,
-              bucket: $bucket,
-              distribution_id: $distribution_id,
-              invalidation_id: $invalidation_id,
-              interface: {
-                api_base_url: $api_base_url,
-                cognito_user_pool_id: $cognito_user_pool_id,
-                cognito_client_id: $cognito_client_id
-              },
-              published_at: $published_at
-            }' > publication/publication-record.json
-          cat publication/publication-record.json
-
-      - name: Upload the publication record
-        uses: actions/upload-artifact@v4
-        with:
-          name: client-publication-record
-          path: publication/
-          if-no-files-found: error
-          retention-days: 7
-
-  record:
-    name: Record the Client publication
-    needs: [deploy]
-    runs-on: ubuntu-latest
-    # No environment and no OIDC token: recording reads only the artifact the
-    # deploy job uploaded.
-    permissions:
-      contents: read
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      BETA_MUTATION_ENABLED: ${{ vars.ENABLE_BETA_MUTATION }}
-      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      CLIENT_PUBLISH_ROLE_ARN: ${{ vars.CLIENT_PUBLISH_ROLE_ARN }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Download the publication record
-        uses: actions/download-artifact@v4
-        with:
-          name: client-publication-record
-          path: publication
-
-      - name: Validate the publication record
-        run: node .github/scripts/assert-client-publication.mjs record
-
-      - name: Write the step summary
-        shell: bash
-        run: |
-          {
-            echo '### Client publication record'
-            echo
-            jq -r '"- Client source: `" + .source_commit + "`"
-              + "\n- Run/attempt: `" + .run_id + "/" + .run_attempt + "`"
-              + "\n- Bucket: `" + .bucket + "`"
-              + "\n- Distribution: `" + .distribution_id + "`"
-              + "\n- Invalidation: `" + .invalidation_id + "`"
-              + "\n- API base URL: `" + .interface.api_base_url + "`"
-              + "\n- Cognito user pool: `" + .interface.cognito_user_pool_id + "`"
-              + "\n- Cognito client: `" + .interface.cognito_client_id + "`"' \
-              publication/publication-record.json
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload the validated publication record
-        uses: actions/upload-artifact@v4
-        with:
-          name: client-publication-record-validated
-          path: publication/
-          if-no-files-found: error
-          retention-days: 90
-
   handoff:
-    name: Dispatch the post-publication E2E smoke
-    needs: [record]
+    name: Hand the built Beta web client to AnyWear-Infra
+    needs: [build, verify]
     runs-on: ubuntu-latest
-    # No environment, no OIDC token and no AWS permission: this job only dispatches
-    # the E2E smoke that observes what the publication left live. Its one App token
-    # is scoped to AnyWear-E2E with `actions: write` and nothing else.
+    # The observation of the created Infra run is bounded at 150 minutes, so the
+    # deadline fires before this timeout and the step still reports what it saw.
+    timeout-minutes: 160
+    # No environment, no OIDC token and no AWS permission: this job holds one App
+    # token, narrowed to AnyWear-Infra with `actions: write`, and nothing else. The
+    # publication, the live-interface refusal and the post-publication smoke belong
+    # to the Infra run.
     permissions:
       contents: read
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       # The dispatch target, owner-qualified: the token input below takes the bare
       # repository name, but every REST path here needs `owner/repo`.
-      E2E_OWNER: ${{ github.repository_owner }}
-      E2E_REPOSITORY: AnyWear-E2E
-      E2E_WORKFLOW: beta-qualification.yml
-      # The dedupe key and the payload's `dispatched_by`: this run's own URL, which
-      # the E2E receiver renders into its run name.
-      DISPATCHED_BY: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      INFRA_OWNER: ${{ github.repository_owner }}
+      INFRA_REPOSITORY: AnyWear-Infra
+      INFRA_WORKFLOW: mutate.yml
+      # The `publish-client` payload: this run's identity, the digest of the bundle
+      # `verify` just proved, and this run's URL as both the run-name trailer the
+      # dedupe matches and the `dispatched_by` the receiver records.
+      CLIENT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      CLIENT_RUN_ID: ${{ github.run_id }}
+      CLIENT_RUN_ATTEMPT: ${{ github.run_attempt }}
+      CLIENT_BUNDLE_DIGEST: ${{ needs.build.outputs.client_bundle_digest }}
 
     steps:
-      - name: Mint the AnyWear-E2E dispatch token
-        id: e2e-token
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      # The handoff program imports node builtins only, so this job installs nothing.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Mint the AnyWear-Infra dispatch token
+        id: infra-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ vars.APP_ID }}
@@ -454,108 +265,15 @@ jobs:
           owner: ${{ github.repository_owner }}
           # One repository, named explicitly: without `repositories` the token
           # reaches every repository the App installation grants.
-          repositories: AnyWear-E2E
+          repositories: AnyWear-Infra
           permission-actions: write
 
-      # The dedupe key is this run's URL, which the receiver renders into the run
-      # name, so a re-run of this job finds its own pending run and skips the
-      # dispatch. A failed listing dispatches anyway and says so: a duplicate smoke
-      # wastes a run, while a skipped one would hide what this publication left live.
-      - name: Check for a smoke run already queued for this publication
-        id: dedupe
-        shell: bash
+      # Dedupe, dispatch and read-back are one step: it skips the dispatch when an
+      # Infra run of `mutate.yml` already names this Client run in its display title,
+      # dispatches with `return_run_details: true`, reads the created run back by
+      # id, and polls its job list until the Infra `deploy` job concludes. The job
+      # fails when that job was skipped or did not succeed, naming the Infra run.
+      - name: Dispatch the Infra publish-client run and read it back
         env:
-          GH_TOKEN: ${{ steps.e2e-token.outputs.token }}
-        run: |
-          : "${DISPATCHED_BY:?this run has no URL}"
-          listing_failed=false
-          existing=""
-          for status in queued in_progress; do
-            matches="$(gh api --paginate \
-              "repos/${E2E_OWNER}/${E2E_REPOSITORY}/actions/workflows/${E2E_WORKFLOW}/runs?status=${status}" \
-              --jq '.workflow_runs[] | select(.display_title | contains(env.DISPATCHED_BY)) | .html_url')" || {
-              listing_failed=true
-              continue
-            }
-            if [ -n "$matches" ]; then
-              existing="$(head -n 1 <<< "$matches")"
-            fi
-          done
-          if [ -n "$existing" ]; then
-            echo "Skipping the smoke dispatch: this publication already has a pending run at ${existing}"
-            echo 'skip=true' >> "$GITHUB_OUTPUT"
-          elif [ "$listing_failed" = true ]; then
-            echo "::warning::Could not list ${E2E_WORKFLOW} runs in ${E2E_REPOSITORY}; dispatching the smoke anyway"
-            echo 'skip=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'skip=false' >> "$GITHUB_OUTPUT"
-          fi
-
-      # `gh workflow run` cannot ask for the run it created, so the dispatch goes
-      # through the REST endpoint with `return_run_details`. The response names the
-      # created run by id, and the normal path reads that run back by id — one read,
-      # no polling — because the run exists as soon as the dispatch returns. The run
-      # title is rendered after the run appears, so a check that reads it immediately
-      # reports a failure for a run that exists; the title is read only on the
-      # fallback path below, and there it is polled a bounded number of times. This is
-      # the job's last step.
-      - name: Dispatch the post-publication smoke
-        if: steps.dedupe.outputs.skip != 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ steps.e2e-token.outputs.token }}
-        run: |
-          : "${DISPATCHED_BY:?this run has no URL}"
-          response="$(gh api --method POST \
-            "repos/${E2E_OWNER}/${E2E_REPOSITORY}/actions/workflows/${E2E_WORKFLOW}/dispatches" \
-            -f ref=main \
-            -F return_run_details=true \
-            -f 'inputs[operation]=smoke' \
-            -f 'inputs[trigger]=deploy-smoke' \
-            -f 'inputs[worker_slot_offset]=0' \
-            -f "inputs[dispatched_by]=${DISPATCHED_BY}")"
-          run_id="$(jq -r '.workflow_run_id // empty' <<< "$response")"
-          run_url="$(jq -r '.html_url // .run_url // empty' <<< "$response")"
-
-          # Normal path: the response names the run it created, so read that run back
-          # by id and require the id to match. Reading the run title here is the defect
-          # this check must not repeat: the title renders shortly after the run row
-          # appears, so an immediate read fails for a run that exists.
-          if [ -n "$run_id" ]; then
-            echo "Dispatched the post-publication smoke: ${run_url:-run ${run_id}}"
-            created_id="$(gh api \
-              "repos/${E2E_OWNER}/${E2E_REPOSITORY}/actions/runs/${run_id}" --jq '.id')" || {
-              echo "::error::The dispatch returned run ${run_id}, which cannot be read back"
-              exit 1
-            }
-            if [ "$created_id" != "$run_id" ]; then
-              echo "::error::The dispatch returned run ${run_id} but the runs API returned '${created_id}'"
-              exit 1
-            fi
-          else
-            # Fallback only when the response carries no `workflow_run_id` (an older
-            # API or a proxy that strips it): the run title is the only handle left,
-            # and it renders shortly after the run appears. Poll a bounded number of
-            # times with a short wait; a single immediate read is the bug, not the
-            # check.
-            attempts=8
-            wait_seconds=2
-            run_url=""
-            for attempt in $(seq 1 "$attempts"); do
-              run_url="$(gh api \
-                "repos/${E2E_OWNER}/${E2E_REPOSITORY}/actions/workflows/${E2E_WORKFLOW}/runs?per_page=100" \
-                --jq '.workflow_runs[] | select(.display_title | contains(env.DISPATCHED_BY)) | .html_url' \
-                | sed -n '1p')" || run_url=""
-              if [ -n "$run_url" ]; then
-                break
-              fi
-              if [ "$attempt" -lt "$attempts" ]; then
-                sleep "$wait_seconds"
-              fi
-            done
-            if [ -z "$run_url" ]; then
-              echo "::error::The dispatch returned no workflow_run_id, and no run titled with ${DISPATCHED_BY} appeared in ${attempts} attempts"
-              exit 1
-            fi
-            echo "Dispatched the post-publication smoke: ${run_url} (found by title on attempt ${attempt})"
-          fi
+          GH_TOKEN: ${{ steps.infra-token.outputs.token }}
+        run: node scripts/client-handoff.mjs

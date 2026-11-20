@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { assertClientPublication } from '../.github/scripts/assert-client-publication.mjs';
+import {
+  assertBundleManifest,
+  assertBuiltConfiguration,
+  assertClientPublication,
+} from '../.github/scripts/assert-client-publication.mjs';
+import { bundleManifestName, sha256, writeBundleManifest } from './write-bundle-manifest.mjs';
 
 const source = 'a'.repeat(40);
 const values = {
@@ -27,9 +32,6 @@ const environment = {
   GITHUB_EVENT_NAME: 'workflow_dispatch',
   GITHUB_SHA: source,
   GITHUB_WORKFLOW_SHA: source,
-  AWS_ACCOUNT_ID: '650880818323',
-  AWS_REGION: 'ap-east-1',
-  CLIENT_PUBLISH_ROLE_ARN: 'arn:aws:iam::650880818323:role/beta-client-publish-role',
   GITHUB_RUN_ID: '123',
   GITHUB_RUN_ATTEMPT: '1',
 };
@@ -38,11 +40,6 @@ const declared = {
   DECLARED_COGNITO_USER_POOL_ID: values.cognito_user_pool_id,
   DECLARED_COGNITO_CLIENT_ID: values.cognito_client_id,
 };
-const live = {
-  LIVE_API_BASE_URL: values.api_base_url,
-  LIVE_COGNITO_USER_POOL_ID: values.cognito_user_pool_id,
-  LIVE_COGNITO_CLIENT_ID: values.cognito_client_id,
-};
 const metadata = {
   schema_version: 3,
   component: 'AnyWear-Client',
@@ -50,31 +47,59 @@ const metadata = {
   client_version: 1,
   interface: values,
 };
-const record = {
-  schema_version: 1,
-  component: 'AnyWear-Client',
-  source_commit: source,
-  run_id: '123',
-  run_attempt: '1',
-  bucket: 'anywear-client-beta-bucket',
-  distribution_id: 'E2ABCDEFGHIJK1',
-  invalidation_id: 'I2J0ABCDEFGHIJ',
-  interface: values,
-};
 
-test('ordinary Client release needs no migration window or issue-comment inputs', () => {
+/** A built `dist/` tree with the metadata, an asset and the manifest beside them. */
+async function builtTree(t) {
+  const directory = await mkdtemp(join(tmpdir(), 'anywear-client-publication-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, 'assets'), { recursive: true });
+  await writeFile(join(directory, 'build-metadata.json'), JSON.stringify(metadata), 'utf8');
+  await writeFile(join(directory, 'assets', 'index-abc123.js'), `const values=${JSON.stringify(values)};\n`, 'utf8');
+  await writeFile(join(directory, 'index.html'), '<!doctype html>\n', 'utf8');
+  const { digest } = await writeBundleManifest(directory, { SOURCE_COMMIT_SHA: source });
+  return { directory, digest };
+}
+
+test('the Client verifies its build and declared interface without any AWS identity', () => {
   assert.doesNotThrow(() => assertClientPublication({ ...environment, ...declared }, 'verify', metadata));
-  assert.doesNotThrow(() => assertClientPublication({ ...environment, ...live }, 'deploy', metadata));
-  assert.doesNotThrow(() => assertClientPublication(environment, 'record', record));
 });
 
-test('accepts a push to main as a publication and refuses every other event or ref', () => {
-  // A merge publishes with the reviewed constants; the dispatch path is unchanged.
-  assert.doesNotThrow(() => assertClientPublication({ ...environment, ...declared, GITHUB_EVENT_NAME: 'push' }, 'verify', metadata));
-  assert.doesNotThrow(() => assertClientPublication({ ...environment, ...live, GITHUB_EVENT_NAME: 'push' }, 'deploy', metadata));
-  assert.doesNotThrow(() => assertClientPublication({ ...environment, GITHUB_EVENT_NAME: 'push' }, 'record', record));
+test('the deploy and record phases are gone, not merely unreachable', () => {
+  // The retired AWS path: each phase this repository no longer runs is refused by
+  // name, so a workflow that still calls it fails instead of verifying nothing.
+  for (const phase of ['deploy', 'record']) {
+    assert.throws(
+      () => assertClientPublication({ ...environment, ...declared }, phase, metadata),
+      new RegExp(`Unknown publication validation phase: ${phase}`),
+      `expected the retired ${phase} phase to be refused`,
+    );
+  }
+  assert.throws(() => assertClientPublication({ ...environment, ...declared }, undefined, metadata), /Unknown publication validation phase/);
+});
 
-  // Only the two entry events are publications: an automatic check, a tag and a
+test('the retired AWS assertions no longer gate the Client', () => {
+  // These values were required while `deploy` assumed the publish role. The Client
+  // holds no AWS principal now, so their absence and their junk both verify.
+  for (const retired of [
+    {},
+    { AWS_ACCOUNT_ID: '123456789012' },
+    { AWS_REGION: 'us-east-1' },
+    { CLIENT_PUBLISH_ROLE_ARN: '' },
+    { CLIENT_PUBLISH_ROLE_ARN: 'arn:aws:iam::650880818323:role/beta-client-publish-role' },
+    { AWS_ACCOUNT_ID: '650880818323', AWS_REGION: 'ap-east-1', CLIENT_PUBLISH_ROLE_ARN: 'arn:aws:iam::650880818323:role/other' },
+  ]) {
+    assert.doesNotThrow(
+      () => assertClientPublication({ ...environment, ...declared, ...retired }, 'verify', metadata),
+      `expected ${JSON.stringify(retired)} not to be an assertion any more`,
+    );
+  }
+});
+
+test('accepts a push to main as a handoff and refuses every other event or ref', () => {
+  // A merge hands over with the reviewed constants; the dispatch path is unchanged.
+  assert.doesNotThrow(() => assertClientPublication({ ...environment, ...declared, GITHUB_EVENT_NAME: 'push' }, 'verify', metadata));
+
+  // Only the two entry events are handoffs: an automatic check, a tag and a
   // scheduler run are not.
   for (const event of ['pull_request', 'pull_request_target', 'workflow_run', 'release', 'schedule', 'merge_group']) {
     assert.throws(
@@ -84,7 +109,7 @@ test('accepts a push to main as a publication and refuses every other event or r
     );
   }
 
-  // A push of a tag is not a publication: the ref and the workflow ref must both be main.
+  // A push of a tag is not a handoff: the ref and the workflow ref must both be main.
   assert.throws(
     () => assertClientPublication({ ...environment, ...declared, GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/tags/v1.2.3' }, 'verify', metadata),
     /Publication requires the Client repository id 1176104200 and main ref/,
@@ -108,13 +133,8 @@ test('#266: the repository id is the guard, so either owner publishes through th
       const identity = { ...environment, ...ownerRelative(repository), GITHUB_EVENT_NAME: event };
       assert.doesNotThrow(
         () => assertClientPublication({ ...identity, ...declared }, 'verify', metadata),
-        `expected ${repository} on ${event} to publish`,
+        `expected ${repository} on ${event} to hand over`,
       );
-      assert.doesNotThrow(
-        () => assertClientPublication({ ...identity, ...live }, 'deploy', metadata),
-        `expected ${repository} on ${event} to deploy`,
-      );
-      assert.doesNotThrow(() => assertClientPublication(identity, 'record', record), `expected ${repository} to record`);
     }
     // The id, not the name, is the repository guard: the same name under another id
     // is not this repository. A wrong id fails under either owner's name.
@@ -151,19 +171,16 @@ test('#266: the workflow ref must be this run\'s own repository, release.yml and
   }
 });
 
-test('rejects an untrusted source, disabled release or wrong AWS scope', async (t) => {
+test('rejects an untrusted source, disabled release or missing run identity', async (t) => {
   const invalidInputs = [
     ['BETA_MUTATION_ENABLED', 'false'],
+    ['BETA_MUTATION_ENABLED', ''],
     ['GITHUB_REPOSITORY_ID', '123'],
     ['GITHUB_REF', 'refs/heads/feature'],
     ['GITHUB_EVENT_NAME', 'pull_request'],
     ['GITHUB_WORKFLOW_REF', 'git-malu/AnyWear-Client/.github/workflows/other.yml@refs/heads/main'],
     ['GITHUB_SHA', 'main'],
     ['GITHUB_WORKFLOW_SHA', 'b'.repeat(40)],
-    ['AWS_ACCOUNT_ID', '123456789012'],
-    ['AWS_REGION', 'us-east-1'],
-    ['CLIENT_PUBLISH_ROLE_ARN', 'arn:aws:iam::650880818323:role/beta-github-actions-pipeline-role'],
-    ['CLIENT_PUBLISH_ROLE_ARN', ''],
     ['GITHUB_RUN_ID', ''],
     ['GITHUB_RUN_ATTEMPT', '0'],
   ];
@@ -174,7 +191,7 @@ test('rejects an untrusted source, disabled release or wrong AWS scope', async (
   }
 });
 
-test('rejects missing, malformed or different built Client identity before publication', () => {
+test('rejects missing, malformed or different built Client identity before the handoff', () => {
   const invalidMetadata = [
     undefined,
     null,
@@ -207,103 +224,143 @@ test('rejects missing, malformed or different built Client identity before publi
       `expected a different ${key} to be rejected`,
     );
   }
-  assert.throws(() => assertClientPublication(environment, 'unknown', metadata), /Unknown publication/);
 });
 
-test('rejects a built interface that differs from the live Beta interface', () => {
-  for (const key of Object.keys(live)) {
+test('the compiled assets must carry the interface the metadata records', async (t) => {
+  const { directory } = await builtTree(t);
+  assert.doesNotThrow(() => assertBuiltConfiguration(join(directory, 'assets'), values));
+  for (const key of Object.keys(values)) {
     assert.throws(
-      () => assertClientPublication({ ...environment, ...live, [key]: 'different' }, 'deploy', metadata),
-      /Built Client metadata does not match the live Beta interface values/,
-      `expected a different live ${key} to be rejected`,
+      () => assertBuiltConfiguration(join(directory, 'assets'), { ...values, [key]: `different-${key}` }),
+      new RegExp(`Built assets do not contain the ${key} recorded in build-metadata.json`),
+      `expected a different ${key} to be refused`,
     );
   }
-  assert.throws(
-    () => assertClientPublication({ ...environment, ...live }, 'deploy', undefined),
-    /Built Client metadata/,
-  );
 });
 
-test('rejects an incomplete or inconsistent publication record', () => {
-  for (const input of [
-    undefined,
-    {},
-    { ...record, component: 'AnyWear-Service' },
-    { ...record, source_commit: 'b'.repeat(40) },
-    { ...record, run_id: '999' },
-    { ...record, run_attempt: '2' },
-    { ...record, bucket: '' },
-    { ...record, distribution_id: '' },
-    { ...record, distribution_id: 'not a distribution' },
-    { ...record, invalidation_id: '' },
-    { ...record, interface: undefined },
-    { ...record, interface: { ...values, cognito_client_id: 'short' } },
-  ]) {
-    assert.throws(() => assertClientPublication(environment, 'record', input), /Publication record/);
+test('the bundle manifest matches the build metadata and its own asset inventory', async (t) => {
+  const { directory, digest } = await builtTree(t);
+  assert.equal(await assertBundleManifest(directory, metadata, digest), digest);
+
+  // Every identity field the manifest repeats is compared with build-metadata.json.
+  const mismatches = [
+    [{ ...metadata, source_commit: 'b'.repeat(40) }, /does not match build-metadata\.json \(source_commit\)/],
+    [{ ...metadata, client_version: 2 }, /does not match build-metadata\.json \(client_version\)/],
+    [{ ...metadata, interface: { ...values, cognito_client_id: 'zyxwvutsrqponmlkjihgfedcba' } }, /does not match build-metadata\.json \(interface cognito_client_id\)/],
+  ];
+  for (const [changed, expected] of mismatches) {
+    await assert.rejects(() => assertBundleManifest(directory, changed, digest), expected);
   }
 });
 
-test('workflow CLI reads the artifact, the live interface and the record, and fails closed', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'anywear-client-publication-'));
-  const script = join(directory, '.github', 'scripts', 'assert-client-publication.mjs');
-  const contract = join(directory, 'scripts', 'build-interface.mjs');
-  const output = join(directory, 'dist', 'build-metadata.json');
-  const assets = join(directory, 'dist', 'assets', 'index-abc123.js');
-  const publication = join(directory, 'publication', 'publication-record.json');
+test('the bundle manifest is refused when it is missing, unsorted or not its own subject', async (t) => {
+  const { directory, digest } = await builtTree(t);
+  const path = join(directory, bundleManifestName);
+  const text = await readFile(path, 'utf8');
+  const manifest = JSON.parse(text);
+  const write = (changed) => writeFile(path, `${JSON.stringify(changed, null, 2)}\n`, 'utf8');
+  // An entry added to the inventory must keep the list sorted, or the ordering rule
+  // fires first and the rule under test is never reached.
+  const withAssets = (extra) => [...manifest.assets, ...extra]
+    .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+
+  await assert.rejects(
+    () => assertBundleManifest(join(directory, 'not-a-build'), metadata, digest),
+    /the bundle manifest cannot be read/,
+  );
+  for (const [changed, expected] of [
+    [{ ...manifest, schema_version: 2 }, /unexpected schema or component/],
+    [{ ...manifest, component: 'AnyWear-Service' }, /unexpected schema or component/],
+    [{ ...manifest, assets: [] }, /records no built assets/],
+    [{ ...manifest, assets: [{ path: '' }] }, /records an asset with no path/],
+    [{ ...manifest, assets: [...manifest.assets].reverse() }, /inventory is not sorted by path/],
+    [{ ...manifest, assets: withAssets([{ path: bundleManifestName, sha256: 'a'.repeat(64), bytes: 1 }]) }, /must not list itself/],
+    [{ ...manifest, assets: withAssets([{ path: 'assets/absent.js', sha256: 'a'.repeat(64), bytes: 1 }]) }, /lists assets\/absent\.js, which the build does not contain/],
+    [{ ...manifest, assets: manifest.assets.filter((asset) => asset.path !== 'index.html') }, /Built asset index\.html is missing from the bundle manifest/],
+    [{ ...manifest, assets: manifest.assets.map((asset) => (asset.path === 'index.html' ? { ...asset, bytes: asset.bytes + 1 } : asset)) }, /Built asset index\.html does not match the bundle manifest/],
+  ]) {
+    await write(changed);
+    await assert.rejects(() => assertBundleManifest(directory, metadata, digest), expected, `expected ${JSON.stringify(changed).slice(0, 120)} to be refused`);
+  }
+
+  // The digest is the manifest file's own SHA-256: a recorded digest that is not it,
+  // or none at all, is refused.
+  await writeFile(path, text, 'utf8');
+  await assert.rejects(
+    () => assertBundleManifest(directory, metadata, sha256('something else')),
+    /The bundle manifest digest is [0-9a-f]{64}, not the published client_bundle_digest/,
+  );
+  for (const declaredDigest of [undefined, '', 'not-a-digest']) {
+    await assert.rejects(
+      () => assertBundleManifest(directory, metadata, declaredDigest),
+      /The build did not publish a client_bundle_digest/,
+      `expected ${declaredDigest} to be refused`,
+    );
+  }
+});
+
+test('workflow CLI verifies the bundle and fails closed on every retired or tampered input', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'anywear-client-publication-cli-'));
   try {
+    const script = join(directory, '.github', 'scripts', 'assert-client-publication.mjs');
+    const output = join(directory, 'dist', 'build-metadata.json');
+    const assets = join(directory, 'dist', 'assets', 'index-abc123.js');
+    const manifest = join(directory, 'dist', bundleManifestName);
     await mkdir(join(directory, '.github', 'scripts'), { recursive: true });
     await mkdir(join(directory, 'scripts'), { recursive: true });
     await mkdir(join(directory, 'dist', 'assets'), { recursive: true });
-    await mkdir(join(directory, 'publication'));
     await copyFile(new URL('../.github/scripts/assert-client-publication.mjs', import.meta.url), script);
-    await copyFile(new URL('./build-interface.mjs', import.meta.url), contract);
+    await copyFile(new URL('./build-interface.mjs', import.meta.url), join(directory, 'scripts', 'build-interface.mjs'));
+    await copyFile(new URL('./write-bundle-manifest.mjs', import.meta.url), join(directory, 'scripts', 'write-bundle-manifest.mjs'));
+
+    await writeFile(output, JSON.stringify(metadata));
+    await writeFile(assets, `const values=${JSON.stringify(values)};`);
+    const { digest } = await writeBundleManifest(join(directory, 'dist'), { SOURCE_COMMIT_SHA: source });
     const run = (phase, extra = {}) => spawnSync(process.execPath, [script, phase], {
       env: {
-        ...process.env, ...environment, ...declared, ...live, ...extra, GITHUB_STEP_SUMMARY: '',
+        ...process.env, ...environment, ...declared, CLIENT_BUNDLE_DIGEST: digest, GITHUB_STEP_SUMMARY: '', ...extra,
       },
       encoding: 'utf8',
     });
-    const writeAssets = (body) => writeFile(assets, body, 'utf8');
-
-    await writeFile(output, JSON.stringify(metadata));
-    await writeAssets(`const values=${JSON.stringify(values)};`);
-    await writeFile(publication, JSON.stringify(record));
 
     assert.equal(run('verify').status, 0);
-    assert.equal(run('deploy').status, 0);
-    assert.equal(run('record').status, 0);
-
-    // The merge entry runs the same three phases, and a tag push does not.
+    // The merge entry runs the same phase, and a tag push does not.
     assert.equal(run('verify', { GITHUB_EVENT_NAME: 'push' }).status, 0);
-    assert.equal(run('deploy', { GITHUB_EVENT_NAME: 'push' }).status, 0);
     assert.equal(run('verify', { GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/tags/v1.2.3' }).status, 1);
+    // The retired phases are refused by name, so a stale workflow cannot pass.
+    for (const phase of ['deploy', 'record']) {
+      const retired = run(phase);
+      assert.equal(retired.status, 1, `expected ${phase} to fail`);
+      assert.match(retired.stderr, new RegExp(`::error::Unknown publication validation phase: ${phase}`));
+    }
 
     // The built assets must actually carry the interface the metadata records.
-    await writeAssets(`const values=${JSON.stringify({ ...values, cognito_client_id: undefined })};`);
+    await writeFile(assets, `const values=${'{}'};`);
     assert.equal(run('verify').status, 1);
-    await writeAssets(`const values=${JSON.stringify(values)};`);
+    await writeFile(assets, `const values=${JSON.stringify(values)};`);
 
     await writeFile(output, '{invalid json');
     assert.equal(run('verify').status, 1);
     await writeFile(output, JSON.stringify({ ...metadata, source_commit: 'b'.repeat(40) }));
     assert.equal(run('verify').status, 1);
-    await writeFile(output, JSON.stringify({ ...metadata, client_version: undefined }));
-    assert.equal(run('verify').status, 1);
-    await writeFile(output, JSON.stringify({ ...metadata, client_version: '1' }));
-    assert.equal(run('verify').status, 1);
     await writeFile(output, JSON.stringify(metadata));
     assert.equal(run('verify', { DECLARED_API_BASE_URL: 'https://other.example' }).status, 1);
-    assert.equal(run('deploy', { LIVE_COGNITO_CLIENT_ID: 'zyxwvutsrqponmlkjihgfedcba' }).status, 1);
+
+    // The manifest is the digest's subject: a changed asset, a changed manifest and
+    // a digest that is not the manifest's are each refused.
+    await writeFile(assets, `const values=${JSON.stringify(values)}; // tampered`);
+    assert.equal(run('verify').status, 1);
+    await writeFile(assets, `const values=${JSON.stringify(values)};`);
+    await writeFile(manifest, '{invalid json');
+    assert.equal(run('verify').status, 1);
+    await writeBundleManifest(join(directory, 'dist'), { SOURCE_COMMIT_SHA: source });
+    assert.equal(run('verify', { CLIENT_BUNDLE_DIGEST: sha256('something else') }).status, 1);
+    assert.equal(run('verify', { CLIENT_BUNDLE_DIGEST: '' }).status, 1);
+    await rm(manifest);
+    assert.equal(run('verify').status, 1);
 
     await rm(output);
     assert.equal(run('verify').status, 1);
-
-    await rm(publication);
-    assert.equal(run('record').status, 1);
-    await writeFile(publication, JSON.stringify({ ...record, run_id: '999' }));
-    assert.equal(run('record').status, 1);
-    await writeFile(publication, JSON.stringify(record));
-    assert.equal(run('record').status, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

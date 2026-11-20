@@ -1,25 +1,49 @@
+// The Client's credential-free publication verification.
+//
+// The Client builds and verifies the Beta web bundle and hands it to
+// `AnyWear-Infra`, which is the single writer of Beta's served tuple (ADR 0033 §9).
+// The workflow therefore runs one phase only, `verify`:
+//
+//   * the workflow identity that still applies to `build`/`verify` — this repository,
+//     `main`, `release.yml`, the exact source SHA, the run identity and the stage
+//     switch;
+//   * the built metadata against the declared interface — the dispatch overrides or
+//     the reviewed workflow constants a push compiles — and the compiled assets
+//     against the values the metadata records;
+//   * the bundle manifest against `build-metadata.json`, against the asset inventory
+//     it names, and against the `client_bundle_digest` the `build` job published, so
+//     `verify` proves the digest's subject.
+//
+// The `deploy` and `record` phases are retired with the AWS path: the live-interface
+// refusal, the S3 sync, the CloudFront invalidation and the publication record moved
+// into `AnyWear-Infra`'s `publish-client` `deploy` job. Nothing here reads an AWS
+// account, region or role, and no phase here assumes one.
+
 import { appendFileSync, readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildInterface, isValidInterfaceValue } from '../../scripts/build-interface.mjs';
+import {
+  bundleManifestComponent,
+  bundleManifestName,
+  bundleManifestSchemaVersion,
+  inventoryBuiltAssets,
+  sha256,
+} from '../../scripts/write-bundle-manifest.mjs';
 
 const runIdPattern = /^[1-9]\d*$/;
-const distributionIdPattern = /^[A-Z0-9]+$/;
-const invalidationIdPattern = /^[A-Za-z0-9]+$/;
+const digestPattern = /^[0-9a-f]{64}$/;
 
-// The environment variable that carries each recorded interface value. `verify`
-// compares the artifact against the declared interface — the manual dispatch
-// overrides, or the reviewed workflow constants a push compiles — and `deploy`
-// compares it against the live Beta interface resolved from CloudFormation and SSM.
+// The environment variable that carries each declared interface value: the manual
+// dispatch overrides, or the reviewed workflow constants a push compiles.
 const interfaceEnvironment = {
   api_base_url: 'API_BASE_URL',
   cognito_user_pool_id: 'COGNITO_USER_POOL_ID',
   cognito_client_id: 'COGNITO_CLIENT_ID',
 };
-const interfacePhase = {
-  verify: { prefix: 'DECLARED', label: 'declared' },
-  deploy: { prefix: 'LIVE', label: 'live Beta' },
-};
+
+/** The one phase this repository still runs. */
+const verifyPhase = 'verify';
 
 function requireCondition(condition, message) {
   if (!condition) throw new Error(message);
@@ -39,13 +63,11 @@ function assertWorkflowIdentity(env) {
     && env.GITHUB_WORKFLOW_REF === `${env.GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/main`, 'Publication requires the main deploy workflow dispatch or a push to main');
   requireCondition(/^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? '')
     && env.GITHUB_WORKFLOW_SHA === env.GITHUB_SHA, 'Publication requires the exact workflow source SHA');
-  requireCondition(env.AWS_ACCOUNT_ID === '650880818323' && env.AWS_REGION === 'ap-east-1', 'Unexpected Beta account or region');
-  requireCondition(env.CLIENT_PUBLISH_ROLE_ARN === 'arn:aws:iam::650880818323:role/beta-client-publish-role', 'A dedicated Beta Client publish role is required');
   requireCondition(runIdPattern.test(env.GITHUB_RUN_ID ?? '')
     && runIdPattern.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'Missing Actions run identity');
 }
 
-function assertBuiltMetadata(env, metadata, phase) {
+function assertBuiltMetadata(env, metadata) {
   requireCondition(metadata?.schema_version === 3
     && metadata.component === 'AnyWear-Client'
     && metadata.source_commit === env.GITHUB_SHA, 'Built Client metadata does not match the workflow source');
@@ -54,32 +76,20 @@ function assertBuiltMetadata(env, metadata, phase) {
   for (const key of Object.keys(buildInterface)) {
     requireCondition(isValidInterfaceValue(key, metadata.interface?.[key]), `Built Client metadata has a malformed ${key}`);
   }
-  const { prefix, label } = interfacePhase[phase];
   for (const [key, suffix] of Object.entries(interfaceEnvironment)) {
-    requireCondition(env[`${prefix}_${suffix}`] === metadata.interface[key], `Built Client metadata does not match the ${label} interface values (${key})`);
+    requireCondition(env[`DECLARED_${suffix}`] === metadata.interface[key], `Built Client metadata does not match the declared interface values (${key})`);
   }
 }
 
-function assertPublicationRecord(env, record) {
-  requireCondition(record?.schema_version === 1 && record.component === 'AnyWear-Client', 'Publication record has an unexpected schema or component');
-  requireCondition(record.source_commit === env.GITHUB_SHA, 'Publication record does not match the workflow source');
-  requireCondition(record.run_id === env.GITHUB_RUN_ID && record.run_attempt === env.GITHUB_RUN_ATTEMPT, 'Publication record does not match the Actions run identity');
-  requireCondition(typeof record.bucket === 'string' && record.bucket !== '', 'Publication record has no bucket');
-  requireCondition(distributionIdPattern.test(record.distribution_id ?? ''), 'Publication record has no CloudFront distribution id');
-  requireCondition(invalidationIdPattern.test(record.invalidation_id ?? ''), 'Publication record has no invalidation id');
-  for (const key of Object.keys(buildInterface)) {
-    requireCondition(isValidInterfaceValue(key, record.interface?.[key]), `Publication record has a malformed ${key}`);
-  }
-}
-
+/**
+ * The `verify` phase. `deploy` and `record` are refused rather than ignored: a
+ * caller that still names them is running a workflow that has not retired the AWS
+ * path, and silently accepting the phase would verify nothing.
+ */
 export function assertClientPublication(env, phase, input) {
-  requireCondition(phase === 'verify' || phase === 'deploy' || phase === 'record', 'Unknown publication validation phase');
+  requireCondition(phase === verifyPhase, `Unknown publication validation phase: ${phase}`);
   assertWorkflowIdentity(env);
-  if (phase === 'record') {
-    assertPublicationRecord(env, input);
-  } else {
-    assertBuiltMetadata(env, input, phase);
-  }
+  assertBuiltMetadata(env, input);
 }
 
 /** Every interface value the metadata records must be present in the built assets. */
@@ -89,11 +99,11 @@ export function assertBuiltConfiguration(assetsDirectory, interfaceValues) {
   while (pending.length > 0) {
     const directory = pending.pop();
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = resolve(directory, entry.name);
+      const entryPath = resolve(directory, entry.name);
       if (entry.isDirectory()) {
-        pending.push(path);
+        pending.push(entryPath);
       } else if (/\.(?:[cm]?js|css|html|json|svg)$/.test(entry.name)) {
-        assets.push(readFileSync(path, 'utf8'));
+        assets.push(readFileSync(entryPath, 'utf8'));
       }
     }
   }
@@ -103,26 +113,76 @@ export function assertBuiltConfiguration(assetsDirectory, interfaceValues) {
   }
 }
 
+/**
+ * The bundle manifest, proven three ways: it matches the build metadata, it is the
+ * sorted inventory of every asset the downloaded build actually contains, and its
+ * own SHA-256 is the digest `build` published and `handoff` hands to Infra. Returns
+ * the recomputed digest.
+ */
+export async function assertBundleManifest(distDirectory, metadata, declaredDigest) {
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(distDirectory, bundleManifestName), 'utf8'));
+  } catch (error) {
+    throw new Error(`the bundle manifest cannot be read: ${error.message}`);
+  }
+  requireCondition(manifest?.schema_version === bundleManifestSchemaVersion
+    && manifest.component === bundleManifestComponent, 'Bundle manifest has an unexpected schema or component');
+  requireCondition(manifest.source_commit === metadata.source_commit,
+    'Bundle manifest does not match build-metadata.json (source_commit)');
+  requireCondition(manifest.client_version === metadata.client_version,
+    'Bundle manifest does not match build-metadata.json (client_version)');
+  for (const key of Object.keys(buildInterface)) {
+    requireCondition(manifest.interface?.[key] === metadata.interface[key],
+      `Bundle manifest does not match build-metadata.json (interface ${key})`);
+  }
+
+  const recorded = manifest.assets;
+  requireCondition(Array.isArray(recorded) && recorded.length > 0, 'Bundle manifest records no built assets');
+  const paths = recorded.map((asset) => asset?.path);
+  requireCondition(paths.every((path) => typeof path === 'string' && path !== ''), 'Bundle manifest records an asset with no path');
+  const sorted = [...paths].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  requireCondition(paths.length === sorted.length && paths.every((path, index) => path === sorted[index]),
+    'Bundle manifest inventory is not sorted by path');
+  requireCondition(!paths.includes(bundleManifestName), 'Bundle manifest must not list itself');
+
+  const expected = new Map((await inventoryBuiltAssets(distDirectory)).map((asset) => [asset.path, asset]));
+  for (const path of expected.keys()) {
+    requireCondition(paths.includes(path), `Built asset ${path} is missing from the bundle manifest`);
+  }
+  for (const asset of recorded) {
+    const actual = expected.get(asset.path);
+    requireCondition(actual !== undefined, `Bundle manifest lists ${asset.path}, which the build does not contain`);
+    requireCondition(asset.sha256 === actual.sha256 && asset.bytes === actual.bytes,
+      `Built asset ${asset.path} does not match the bundle manifest`);
+  }
+
+  const digest = sha256(readFileSync(join(distDirectory, bundleManifestName)));
+  requireCondition(digestPattern.test(declaredDigest ?? ''), 'The build did not publish a client_bundle_digest');
+  requireCondition(digest === declaredDigest,
+    `The bundle manifest digest is ${digest}, not the published client_bundle_digest ${declaredDigest}`);
+  return digest;
+}
+
 const isMain = process.argv[1]
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMain) {
   try {
     const phase = process.argv[2];
-    const input = phase === 'record'
-      ? JSON.parse(readFileSync(new URL('../../publication/publication-record.json', import.meta.url), 'utf8'))
-      : JSON.parse(readFileSync(new URL('../../dist/build-metadata.json', import.meta.url), 'utf8'));
+    const distDirectory = fileURLToPath(new URL('../../dist/', import.meta.url));
+    const input = JSON.parse(readFileSync(join(distDirectory, 'build-metadata.json'), 'utf8'));
     assertClientPublication(process.env, phase, input);
-    if (phase === 'verify') {
-      assertBuiltConfiguration(fileURLToPath(new URL('../../dist/assets/', import.meta.url)), input.interface);
-    }
+    assertBuiltConfiguration(join(distDirectory, 'assets'), input.interface);
+    const digest = await assertBundleManifest(distDirectory, input, process.env.CLIENT_BUNDLE_DIGEST);
     if (process.env.GITHUB_STEP_SUMMARY) {
       appendFileSync(process.env.GITHUB_STEP_SUMMARY,
         `### Client publication identity (${phase})\n\n`
         + `- Client source: \`${process.env.GITHUB_SHA}\`\n`
-        + `- Run/attempt: \`${process.env.GITHUB_RUN_ID}/${process.env.GITHUB_RUN_ATTEMPT}\`\n\n`);
+        + `- Run/attempt: \`${process.env.GITHUB_RUN_ID}/${process.env.GITHUB_RUN_ATTEMPT}\`\n`
+        + `- Bundle manifest: \`${bundleManifestName}\`, sha256 \`${digest}\`\n\n`);
     }
-    console.log(`Validated Beta Client publication identity (${phase})`);
+    console.log(`Validated the Beta Client bundle for handoff (${phase}), digest ${digest}`);
   } catch (error) {
     console.error(`::error::${error.message}`);
     process.exitCode = 1;

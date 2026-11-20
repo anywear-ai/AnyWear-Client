@@ -179,7 +179,7 @@ test('#278: the signing secrets are closed to their named sites and scanned in e
   // signing site: the closed table names its workflow.
   const otherWorkflow = await repositoryWorkflows();
   documentOf(otherWorkflow.documents, 'release.yml').steps
-    .find((step) => step.job === 'record' && step.uses === 'actions/setup-node@v4')
+    .find((step) => step.job === 'verify' && step.uses === 'actions/setup-node@v4')
     .env = new Map([['EXTRA', '${{ secrets.WINDOWS_CERTIFICATE }}']]);
   assert.throws(
     () => assertWithinBoundary(otherWorkflow),
@@ -189,16 +189,18 @@ test('#278: the signing secrets are closed to their named sites and scanned in e
 
 // #278/#322: a job-level write permission is confined to the job that holds it. The
 // pipeline has two release writers, each named: the tag path's `publish` and the
-// Beta path's dispatch-only `publish-beta-prerelease`. A third `contents: write`
-// holder fails here.
+// Beta path's dispatch-only `publish-beta-prerelease`. `id-token: write` has exactly
+// one holder — the tag path's attestation job — because the web publication's AWS
+// path is retired and the Client holds no cloud principal. A further holder fails here.
 test('#278: job-level write permissions are confined to their named sites', async () => {
   for (const [file, job, permission, expected] of [
-    ['client-release.yml', 'publish', ['id-token', 'write'], /job `publish` grants `id-token: write`, which only `client-release\.yml:assemble` and `release\.yml:deploy` may hold/],
+    ['client-release.yml', 'publish', ['id-token', 'write'], /job `publish` grants `id-token: write`, which only `client-release\.yml:assemble` may hold/],
     ['client-release.yml', 'assemble', ['contents', 'write'], /job `assemble` grants `contents: write`, which only `client-beta-apk\.yml:publish-beta-prerelease` and `client-release\.yml:publish` may hold/],
     ['client-release.yml', 'assemble', ['artifact-metadata', 'write'], /job `assemble` grants `artifact-metadata: write`, which is not a reviewed job permission/],
     ['client-release.yml', 'verify', ['contents', 'write'], /job `verify` grants `contents: write`, which only `client-beta-apk\.yml:publish-beta-prerelease` and `client-release\.yml:publish` may hold/],
     ['client-beta-apk.yml', 'package-beta-apk', ['contents', 'write'], /job `package-beta-apk` grants `contents: write`, which only `client-beta-apk\.yml:publish-beta-prerelease` and `client-release\.yml:publish` may hold/],
-    ['build.yml', 'rust-check', ['id-token', 'write'], /job `rust-check` grants `id-token: write`, which only `client-release\.yml:assemble` and `release\.yml:deploy` may hold/],
+    ['build.yml', 'rust-check', ['id-token', 'write'], /job `rust-check` grants `id-token: write`, which only `client-release\.yml:assemble` may hold/],
+    ['release.yml', 'handoff', ['id-token', 'write'], /job `handoff` grants `id-token: write`, which only `client-release\.yml:assemble` may hold/],
   ]) {
     const workflows = await repositoryWorkflows();
     const target = documentOf(workflows.documents, file).workflow.jobs.find((candidate) => candidate.id === job);
@@ -215,12 +217,12 @@ test('#278: job-level write permissions are confined to their named sites', asyn
     'client-beta-apk.yml:publish-beta-prerelease',
     'client-release.yml:assemble',
     'client-release.yml:publish',
-    'release.yml:deploy',
   ]);
   // The merge path holds no release write: the Beta workflow's only write grant is
   // on the job a merge cannot run.
   assert.deepEqual(jobPermissionSites['client-beta-apk.yml:publish-beta-prerelease'], ['contents: write']);
   assert.equal(jobPermissionSites['client-beta-apk.yml:package-beta-apk'], undefined);
+  assert.equal(jobPermissionSites['release.yml:handoff'], undefined, 'the Client handoff holds no write permission');
 });
 
 test('exactly two App-token steps reach exactly one repository and one permission each', async () => {
@@ -268,8 +270,6 @@ test('every job that does not read the specification holds no credential', async
     ['tauri-smoke.yml', 'tauri-smoke'],
     ['release.yml', 'build'],
     ['release.yml', 'verify'],
-    ['release.yml', 'deploy'],
-    ['release.yml', 'record'],
   ]) {
     const document = documentOf(documents, file);
     for (const step of document.steps.filter((candidate) => candidate.job === job)) {
@@ -307,8 +307,8 @@ test('rejects an allowlist that names any repository but the one its site names'
     ['build.yml', 'AnyWear-Client,AnyWear-Service-API', /requests `AnyWear-Client`; the build\.yml allowlist is exactly `AnyWear-Service-API`/],
     ['build.yml', 'anywear-ai/AnyWear-Service-API', /requests `anywear-ai\/AnyWear-Service-API`; the build\.yml allowlist is exactly `AnyWear-Service-API`/],
     ['build.yml', 'AnyWear-Service-API,AnyWear-Service', /requests `AnyWear-Service`; the build\.yml allowlist is exactly `AnyWear-Service-API`/],
-    ['release.yml', 'AnyWear-Infra', /requests `AnyWear-Infra`; the release\.yml allowlist is exactly `AnyWear-E2E`/],
-    ['release.yml', 'AnyWear-Service-API', /requests `AnyWear-Service-API`; the release\.yml allowlist is exactly `AnyWear-E2E`/],
+    ['release.yml', 'AnyWear-E2E', /requests `AnyWear-E2E`; the release\.yml allowlist is exactly `AnyWear-Infra`/],
+    ['release.yml', 'AnyWear-Service-API', /requests `AnyWear-Service-API`; the release\.yml allowlist is exactly `AnyWear-Infra`/],
   ];
   for (const [file, repositories, expected] of cases) {
     const workflows = await repositoryWorkflows();
@@ -572,7 +572,7 @@ test('rejects the boundary credential on any step but the two token sites and th
     ['browser.yml', (document) => document.steps.find((step) => step.uses === 'pnpm/action-setup@v6').with.set('token', '${{ secrets.APP_PRIVATE_KEY }}'), /browser\.yml:30 step reads `secrets\.APP_PRIVATE_KEY`; only the two token sites \(build\.yml:build, release\.yml:handoff\) and the specification checkout carry that credential/],
     ['test.yml', (document) => document.steps.find((step) => step.uses === 'actions/setup-node@v4').with.set('auth-token', '${{ secrets.APP_PRIVATE_KEY }}'), /test\.yml:25 step reads `secrets\.APP_PRIVATE_KEY`; only the two token sites/],
     ['build.yml', (document) => document.steps.find((step) => step.job === 'rust-check' && step.uses === 'actions/checkout@v4').with.set('token', '${{ secrets.APP_PRIVATE_KEY }}'), /build\.yml:105/],
-    ['release.yml', (document) => document.steps.find((step) => step.job === 'record' && step.uses === 'actions/upload-artifact@v4').with.set('name', '${{ secrets.APP_PRIVATE_KEY }}'), /release\.yml:\d+ step reads `secrets\.APP_PRIVATE_KEY`; only the two token sites/],
+    ['release.yml', (document) => document.steps.find((step) => step.job === 'build' && step.uses === 'actions/upload-artifact@v4').with.set('name', '${{ secrets.APP_PRIVATE_KEY }}'), /release\.yml:\d+ step reads `secrets\.APP_PRIVATE_KEY`; only the two token sites/],
   ]) {
     const workflows = await repositoryWorkflows();
     mutate(documentOf(workflows.documents, file));
@@ -647,7 +647,7 @@ test('the boundary names the two token sites, each one repository and one permis
       job: 'handoff',
       ref: '64ab729a6294000f5aa4a4bc0b73d1f32bc45510',
       version: 'v3.3.0',
-      repository: 'AnyWear-E2E',
+      repository: 'AnyWear-Infra',
       permissions: { actions: 'write' },
       readsSpecification: false,
     },
@@ -664,7 +664,7 @@ test('the boundary names the two token sites, each one repository and one permis
       'app-id': '${{ vars.APP_ID }}',
       'private-key': '${{ secrets.APP_PRIVATE_KEY }}',
       owner: '${{ github.repository_owner }}',
-      repositories: 'AnyWear-E2E',
+      repositories: 'AnyWear-Infra',
       'permission-actions': 'write',
     },
   ]);
@@ -687,9 +687,9 @@ test('the Client publication path adds one token, in handoff, and its checkouts 
 });
 
 test('a token step outside the two sites is rejected, so no other job can mint one', async () => {
-  // The dispatch and the record jobs are the dangerous ones: either could start an
-  // E2E run or edit a release if it minted a token of its own.
-  for (const [file, job] of [['release.yml', 'record'], ['release.yml', 'deploy'], ['build.yml', 'rust-check'], ['check.yml', 'test']]) {
+  // The build, verify and check jobs are the dangerous ones: each could start an
+  // Infra run if it minted a token of its own, and only `handoff` may.
+  for (const [file, job] of [['release.yml', 'verify'], ['release.yml', 'build'], ['build.yml', 'rust-check'], ['check.yml', 'test']]) {
     const workflows = await repositoryWorkflows();
     const document = documentOf(workflows.documents, file);
     document.steps.push({
@@ -890,7 +890,7 @@ async function splicedSigningWorkflow(splice, file = signingWorkflows[0]) {
 // `client-release.yml` holds no `vars.` reference at all, so the negative fixtures
 // below and the index forms are the only discriminating cases for the matcher; do
 // not delete them as redundant.
-const roleVariable = '${{ vars.CLIENT_PUBLISH_ROLE_ARN }}';
+const roleVariable = '${{ vars.DEPLOY_ROLE_ARN }}';
 
 /** Splice `EXTRA: <expression>` into the workflow-level `env:` block. */
 function withWorkflowEnv(expression) {
@@ -914,10 +914,10 @@ test('#294: a job-level environment in the packaging entry is rejected', async (
   const inline = await splicedSigningWorkflow((text) => insertAfter(
     text,
     '    name: Preflight the release tag\n',
-    '    environment: beta\n',
+    '    environment: production\n',
   ));
   assert.deepEqual(validateSourceCiCredentialBoundary(inline.workflows), [
-    `client-release.yml:${lineOf(inline.text, '    environment: beta')} job \`preflight\` declares \`environment: beta\`; the packaging entry holds no GitHub Environment, so no job may declare one — the Client workflow census is authoritative in pipeline_stages.md § Protected entry points`,
+    `client-release.yml:${lineOf(inline.text, '    environment: production')} job \`preflight\` declares \`environment: production\`; the packaging entry holds no GitHub Environment, so no job may declare one — the Client workflow census is authoritative in pipeline_stages.md § Protected entry points`,
   ]);
 
   const block = await splicedSigningWorkflow((text) => insertAfter(
@@ -970,7 +970,7 @@ test('#294: a cloud-credential action or input in the packaging entry is rejecte
 test('#294: a role-shaped vars reference or an arn:aws value in the packaging entry is rejected', async () => {
   const workflowEnv = await splicedSigningWorkflow(withWorkflowEnv(roleVariable));
   assert.deepEqual(validateSourceCiCredentialBoundary(workflowEnv.workflows), [
-    `client-release.yml:${lineOf(workflowEnv.text, 'env:\n  EXTRA:')} workflow env \`EXTRA\` reads \`vars.CLIENT_PUBLISH_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
+    `client-release.yml:${lineOf(workflowEnv.text, 'env:\n  EXTRA:')} workflow env \`EXTRA\` reads \`vars.DEPLOY_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
   ]);
 
   const jobEnv = await splicedSigningWorkflow((text) => insertAfter(
@@ -979,7 +979,7 @@ test('#294: a role-shaped vars reference or an arn:aws value in the packaging en
     `    env:\n      EXTRA: ${roleVariable}\n`,
   ));
   assert.deepEqual(validateSourceCiCredentialBoundary(jobEnv.workflows), [
-    `client-release.yml:${lineOf(jobEnv.text, '    env:\n      EXTRA:')} job \`preflight\` env \`EXTRA\` reads \`vars.CLIENT_PUBLISH_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
+    `client-release.yml:${lineOf(jobEnv.text, '    env:\n      EXTRA:')} job \`preflight\` env \`EXTRA\` reads \`vars.DEPLOY_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
   ]);
 
   const stepEnv = await splicedSigningWorkflow((text) => insertAfter(
@@ -988,12 +988,12 @@ test('#294: a role-shaped vars reference or an arn:aws value in the packaging en
     `          EXTRA: ${roleVariable}\n`,
   ));
   assert.deepEqual(validateSourceCiCredentialBoundary(stepEnv.workflows), [
-    `client-release.yml:${lineOf(stepEnv.text, '      - name: Validate the tag and resolve the declared platforms')} step \`Validate the tag and resolve the declared platforms\` env \`EXTRA\` reads \`vars.CLIENT_PUBLISH_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
+    `client-release.yml:${lineOf(stepEnv.text, '      - name: Validate the tag and resolve the declared platforms')} step \`Validate the tag and resolve the declared platforms\` env \`EXTRA\` reads \`vars.DEPLOY_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
   ]);
 
   for (const [expression, reference] of [
-    ["${{ vars['CLIENT_PUBLISH_ROLE_ARN'] }}", "vars['CLIENT_PUBLISH_ROLE_ARN']"],
-    ['${{ vars["CLIENT_PUBLISH_ROLE_ARN"] }}', 'vars["CLIENT_PUBLISH_ROLE_ARN"]'],
+    ["${{ vars['DEPLOY_ROLE_ARN'] }}", "vars['DEPLOY_ROLE_ARN']"],
+    ['${{ vars["DEPLOY_ROLE_ARN"] }}', 'vars["DEPLOY_ROLE_ARN"]'],
     ['${{ vars.AWS_ROLE_ARN }}', 'vars.AWS_ROLE_ARN'],
     ['${{ vars.SIGNING_ROLE }}', 'vars.SIGNING_ROLE'],
   ]) {
@@ -1102,11 +1102,11 @@ test('#294: the parser fails closed on a job shape it cannot read', async () => 
   const text = await readFile(new URL(signingWorkflows[0], workflowsDirectory), 'utf8');
   for (const [addition, expected] of [
     [
-      '  cloud: &cloud\n    runs-on: ubuntu-latest\n    environment: beta',
+      '  cloud: &cloud\n    runs-on: ubuntu-latest\n    environment: production',
       /Unsupported workflow job on line \d+: `cloud` declares neither `steps:` nor `uses:`/,
     ],
     [
-      '  cloudflow: {runs-on: ubuntu-latest, environment: beta, steps: [{run: aws sts get-caller-identity}]}',
+      '  cloudflow: {runs-on: ubuntu-latest, environment: production, steps: [{run: aws sts get-caller-identity}]}',
       /Unsupported workflow job on line \d+: `cloudflow` declares neither `steps:` nor `uses:`/,
     ],
     [
@@ -1145,11 +1145,11 @@ test('#322: the packaging-entry boundary refuses the same constructs in the Beta
   );
 
   const environment = await splicedSigningWorkflow(
-    (text) => insertAfter(text, '    name: Package the Beta APK\n', '    environment: beta\n'),
+    (text) => insertAfter(text, '    name: Package the Beta APK\n', '    environment: production\n'),
     'client-beta-apk.yml',
   );
   assert.deepEqual(validateSourceCiCredentialBoundary(environment.workflows), [
-    `client-beta-apk.yml:${lineOf(environment.text, '    environment: beta')} job \`package-beta-apk\` declares \`environment: beta\`; the packaging entry holds no GitHub Environment, so no job may declare one — the Client workflow census is authoritative in pipeline_stages.md § Protected entry points`,
+    `client-beta-apk.yml:${lineOf(environment.text, '    environment: production')} job \`package-beta-apk\` declares \`environment: production\`; the packaging entry holds no GitHub Environment, so no job may declare one — the Client workflow census is authoritative in pipeline_stages.md § Protected entry points`,
   ]);
 
   const cloudAction = await splicedSigningWorkflow(
@@ -1162,7 +1162,7 @@ test('#322: the packaging-entry boundary refuses the same constructs in the Beta
 
   const role = await splicedSigningWorkflow(withWorkflowEnv(roleVariable), 'client-beta-apk.yml');
   assert.deepEqual(validateSourceCiCredentialBoundary(role.workflows), [
-    `client-beta-apk.yml:${lineOf(role.text, 'env:\n  EXTRA:')} workflow env \`EXTRA\` reads \`vars.CLIENT_PUBLISH_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
+    `client-beta-apk.yml:${lineOf(role.text, 'env:\n  EXTRA:')} workflow env \`EXTRA\` reads \`vars.DEPLOY_ROLE_ARN\`, a role-shaped variable; the packaging entry names no cloud role`,
   ]);
 
   const cloudCli = await splicedSigningWorkflow(
@@ -1177,45 +1177,48 @@ test('#322: the packaging-entry boundary refuses the same constructs in the Beta
 test('#294: the packaging-entry assertions are keyed to the packaging workflows, not every workflow', async () => {
   assert.deepEqual(validateSourceCiCredentialBoundary(await repositoryWorkflows()), []);
 
-  // The confinement is the rule: `release.yml` is the web-publication entry and
-  // legitimately assumes its own AWS role. The proof is only worth making while the
-  // publisher still holds every construct the four assertions reject.
-  const publisherText = await readFile(new URL('release.yml', workflowsDirectory), 'utf8');
-  for (const needle of [
-    'environment: beta',
-    'uses: aws-actions/configure-aws-credentials@v4',
-    'role-to-assume: ${{ vars.CLIENT_PUBLISH_ROLE_ARN }}',
-    'aws sts get-caller-identity',
-    'arn:aws:sts::',
-    'aws s3 sync',
-  ]) {
-    assert.ok(publisherText.includes(needle), `the scoping proof needs release.yml to still contain ${needle}`);
-  }
-
-  // Parsed under the packaging entry's file name, `release.yml` is exactly eleven
-  // packaging-entry violations: one environment, one cloud-credential action, four
-  // role-shaped references, one ARN and four cloud CLI invocations. Two of the four
-  // are single-line `$(aws …)` substitutions the command-substitution scan reaches;
-  // the publisher's substitutions opened across physical lines cannot be closed by a
-  // per-line scan. Other validator rules also fire on this renamed document, so the
-  // packaging-entry messages are filtered out by family first; the total pins the
-  // else-if rule too, because a `with:` finding on the known AWS action would add one.
-  const renamed = parseWorkflow(publisherText, signingWorkflows[0]);
+  // The confinement is the rule, and this proves it from the other side: a workflow
+  // that is NOT one of the two packaging entries keeps every construct the four
+  // assertions reject and draws no packaging-entry finding. `release.yml` holds none
+  // of them any more — the Client's web path holds no cloud principal at all — so the
+  // proof uses one self-contained document rather than that file's text.
+  const foreign = [
+    'name: Foreign',
+    'permissions:',
+    '  contents: read',
+    'env:',
+    '  EXTRA: ${{ vars.DEPLOY_ROLE_ARN }}',
+    'jobs:',
+    '  cloud:',
+    '    environment: production',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - name: Cloud credentials',
+    '        uses: aws-actions/configure-aws-credentials@v4',
+    '        with:',
+    '          role-to-assume: arn:aws:iam::123456789012:role/deploy',
+    '      - name: Cloud probe',
+    '        run: |',
+    '          aws sts get-caller-identity',
+    '',
+  ].join('\n');
   const violations = validateSourceCiCredentialBoundary({
-    documents: [renamed],
+    documents: [parseWorkflow(foreign, 'release.yml')],
     submoduleRepositories: parseGitmodules(await readFile(gitmodulesPath, 'utf8')),
     specificationRevision: await specificationGitlink(),
   });
   const packaging = violations.filter((message) => /declares `environment: |a cloud-credential action \(|passes `with: .*, a cloud-credential input|a role-shaped variable|whose name cannot be resolved|names `arn:aws|runs `[a-z]+` in its `run:` body/.test(message));
-  assert.equal(packaging.length, 11);
-  const families = (needle) => packaging.filter((message) => message.includes(needle));
-  assert.equal(families('declares `environment: beta`').length, 1);
-  assert.match(families('declares `environment: beta`')[0], /job `deploy` declares `environment: beta`/);
-  assert.equal(families('a cloud-credential action (AWS)').length, 1);
-  assert.match(families('a cloud-credential action (AWS)')[0], /uses `aws-actions\/configure-aws-credentials@v4`, a cloud-credential action \(AWS\)/);
-  assert.equal(families('reads `vars.CLIENT_PUBLISH_ROLE_ARN`, a role-shaped variable').length, 4);
-  assert.equal(families('names `arn:aws:sts::').length, 1);
-  assert.equal(families('runs `aws` in its `run:` body').length, 4);
+  assert.deepEqual(packaging, [], 'the packaging-entry rules must not govern a workflow outside the two packaging entries');
+
+  // What the same document does draw is the missing-certificate census: neither
+  // packaging workflow was parsed, so it cannot pass by omission.
+  assert.deepEqual(
+    violations.filter((message) => message.includes('was not parsed')),
+    [
+      'client-release.yml:1 `client-release.yml` was not parsed; the packaging-entry boundary is unverified',
+      'client-beta-apk.yml:1 `client-beta-apk.yml` was not parsed; the packaging-entry boundary is unverified',
+    ],
+  );
 });
 
 // #293: the guard job is self-enforcing. Each of the three entry workflows carries

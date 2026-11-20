@@ -7,7 +7,7 @@ permission:
 | Token site | Repository | Permission | What it is for |
 | --- | --- | --- | --- |
 | `build.yml` → `build` | `AnyWear-Service-API` | `contents: read` | Fetches the published OpenAPI specification the generated client comes from |
-| `release.yml` → `handoff` | `AnyWear-E2E` | `actions: write` | Dispatches the post-publication `smoke` run |
+| `release.yml` → `handoff` | `AnyWear-Infra` | `actions: write` | Dispatches `mutate.yml` (`operation=publish-client`) and reads the created run back |
 
 The two packaging entries add nine repository-scoped signing secrets — private key
 material and the passwords and alias that accompany it — and no external GitHub App
@@ -54,8 +54,8 @@ The source-CI token step requests:
 
 The release handoff token step requests:
 
-- `repositories: AnyWear-E2E` — the same explicit allowlist, naming the one
-  repository whose `beta-qualification.yml` receives the dispatch.
+- `repositories: AnyWear-Infra` — the same explicit allowlist, naming the one
+  repository whose `mutate.yml` receives the publication dispatch.
 - `permission-actions: write` — the one permission that can start a run in that
   repository, and nothing else. It cannot read or write source, releases, packages
   or pull requests.
@@ -96,10 +96,12 @@ own `Check codegen consistency` step is what catches a specification revision th
 committed generated client does not match: `pnpm run orval` regenerates the client and
 `git diff --exit-code` fails when the result differs.
 
-The Beta Client publication chain, `.github/workflows/release.yml`, holds no
-credential in `build`, `verify` or `record`: each uses a plain
-`actions/checkout@v4` at the built revision, and only `deploy` assumes its own AWS
-role. The one App token the chain mints is the `handoff` token above. The checkout
+The Beta Client handoff chain, `.github/workflows/release.yml`, holds no AWS
+credential in any of its three jobs. `build` and `verify` use a plain
+`actions/checkout@v4` at the built revision and hold nothing but the workflow's own
+read grant; `handoff` checks the repository out the same way and mints the one App
+token above. No job declares an `environment:`, an `id-token:` or a role, so the
+publication's AWS principal belongs entirely to `AnyWear-Infra`. The checkout
 rules in this note — the full-commit specification pin, the `api` path, the
 generated token, the default credential everywhere else — still describe
 `build.yml` only, because it is the only site that checks another repository out.
@@ -199,7 +201,7 @@ carries it. The table's rules fail `pnpm run test:run` when:
 - a job declares a write permission outside the named job that holds it: only
   `client-release.yml:publish` and `client-beta-apk.yml:publish-beta-prerelease`
   hold `contents: write`; only `client-release.yml:assemble` holds `id-token: write`
-  and `attestations: write`, and `release.yml:deploy` keeps its `id-token: write`;
+  and `attestations: write`, and no other job holds an OIDC token at all;
 - a job declares a job-level `environment:` — the packaging entries hold no GitHub
   Environment, so no job may declare one;
 - a step `uses:` names a cloud-credential action (`aws-actions/`, `azure/`,
@@ -219,8 +221,9 @@ carries it. The table's rules fail `pnpm run test:run` when:
   closes on the same body line — the packaging entries run no cloud CLI.
 
 These four packaging-entry rules read both packaging workflows, `client-release.yml`
-and `client-beta-apk.yml`; `release.yml` is the web-publication entry, which declares
-its own `environment:` and assumes its own AWS role, so none of the four applies.
+and `client-beta-apk.yml`. They are keyed to those two because that is the closed
+census the signing table describes; the web handoff entry `release.yml` happens to
+hold no cloud principal either, since the write moved into `AnyWear-Infra`.
 
 `tokenSites` stays at exactly two: the tagged binary publication mints no App
 token, dispatches nothing and runs no cloud CLI. `preflight` references no secret at
@@ -276,10 +279,9 @@ run without it, and handing untrusted source a wider credential to make CI pass 
 exactly what this boundary prevents. To run the Client checks on such a revision, run
 them locally where the submodule is already initialised.
 
-The handoff site fails the same way: a publication run whose `APP_PRIVATE_KEY` is
-empty fails at `Mint the AnyWear-E2E dispatch token` and never reaches the dispatch,
-so a publication without a credential leaves no smoke run and no E2E run that
-pretends one was dispatched.
+The handoff site fails the same way: a run whose `APP_PRIVATE_KEY` is empty fails at
+`Mint the AnyWear-Infra dispatch token` and never reaches the dispatch, so a Client
+run without the credential leaves no Infra run that pretends one was dispatched.
 
 `vars.APP_ID` is a repository variable. Context availability for variables on
 fork-triggered runs is documented less clearly than it is for secrets, and this
@@ -302,6 +304,6 @@ under the organisation's settings and compare its repository selection with the 
 repositories named above. One installation fact is evidenced from CI itself: the
 trusted `main` run on `7b92ace` minted a token and fetched the private
 `AnyWear-Service-API` revision successfully, so the installation covers that
-repository. The `handoff` site has not been exercised yet: this change dispatches
-nothing, so its first merge is what proves the installation also covers
-`AnyWear-E2E` with `actions: write`.
+repository. The `handoff` site's new target has not been exercised yet: this change
+dispatches nothing, so its first merge is what proves the installation also covers
+`AnyWear-Infra` with `actions: write`.

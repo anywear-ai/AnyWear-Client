@@ -67,6 +67,8 @@ async function setupMock(page: Page, state: MockState) {
     const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
     if (method === 'GET' && path === '/users/me') return json({ id: 'test-user-id', email: 'test@anywear.local' });
     if (method === 'GET' && path === '/outfits') return json({ outfits: [] });
+    // Issue 335 — selecting items asks whether the set is already a saved outfit.
+    if (method === 'GET' && path === '/outfits/lookup') return json({ outfit: null });
     if (method === 'GET' && path === '/wardrobe/categories') return json({ categories: ['Top', 'Bottom'] });
     if (method === 'GET' && path === '/wardrobe') {
       const category = url.searchParams.get('category');

@@ -1,191 +1,125 @@
-import { describe, expect, it } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   describeWardrobeItemDeleteFailure,
+  describeWardrobeItemLifecycleFailure,
   ITEM_ALREADY_GONE_MESSAGE,
+  ITEM_CLEANUP_PENDING_MESSAGE,
 } from './wardrobeItemDeleteFailure';
 
-/** An Axios rejection: the status and body live on `error.response`. */
-function rejection(status: number, data?: unknown) {
-  return { isAxiosError: true, response: { status, data } };
+/**
+ * The sentences the Storage Box delete paints, under the issue 332/334 contract.
+ *
+ * The retired `409 RESOURCE_REFERENCED` (an outfit still lists the item) is gone:
+ * the delete cascades into those outfits instead of refusing. What remains is the
+ * Storage Box gate, the in-flight refusal with its named blocker, the item's own
+ * gallery proof, and the two "already settled" outcomes.
+ */
+function httpError(status: number, data?: unknown) {
+  return { response: { status, data } };
 }
-
-/** The Service's `DELETE /wardrobe/items/{id}` 409 body. */
-function referencedBody(dependentResources: { resource: string; count?: number }[], hint?: string) {
-  return {
-    error: 'RESOURCE_REFERENCED',
-    message: 'The wardrobe item is still referenced by other resources',
-    details: {
-      reason: 'DEPENDENT_RESOURCES_EXIST',
-      dependent_resources: dependentResources,
-      action: 'delete_dependents_first',
-      hint: hint ?? 'Remove the item from the outfit that lists it, then delete it',
-    },
-  };
-}
-
-// S1: the Service reported exactly one outfit.
-const S1 =
-  'Nothing was deleted: this item is still in 1 outfit. Remove it from that outfit, or delete the outfit. An outfit cannot be saved with no items, so if this is its only item, delete it.';
-// S2: the Service reported more than one outfit; the number is the Service's.
-const S2 =
-  'Nothing was deleted: this item is still in 3 outfits. Remove it from those outfits, or delete them. An outfit cannot be saved with no items, so an outfit holding only this item has to be deleted.';
-// S3: an outfit dependent with no count.
-const S3 =
-  'Nothing was deleted: this item is still in one or more outfits. Remove it from those outfits, or delete them. An outfit cannot be saved with no items, so an outfit holding only this item has to be deleted.';
 
 describe('describeWardrobeItemDeleteFailure', () => {
-  it('states the one-outfit sentence with the count the Service reports', () => {
-    expect(
-      describeWardrobeItemDeleteFailure(rejection(409, referencedBody([{ resource: 'outfit', count: 1 }]))),
-    ).toEqual({ message: S1, gone: false });
-  });
-
-  it('states the plural sentence with the Service count for more than one outfit', () => {
-    expect(
-      describeWardrobeItemDeleteFailure(rejection(409, referencedBody([{ resource: 'outfit', count: 3 }]))),
-    ).toEqual({ message: S2, gone: false });
-  });
-
-  it('states the count-less sentence when the Service supplied no count', () => {
-    expect(
-      describeWardrobeItemDeleteFailure(rejection(409, referencedBody([{ resource: 'outfit' }]))),
-    ).toEqual({ message: S3, gone: false });
-
-    // A zero or negative count is not a number of outfits that can hold the item,
-    // so it reads count-less rather than claiming "0 outfits".
-    expect(
-      describeWardrobeItemDeleteFailure(rejection(409, referencedBody([{ resource: 'outfit', count: 0 }]))),
-    ).toEqual({ message: S3, gone: false });
-  });
-
-  it('states that nothing was deleted and both remedies in every outfit sentence', () => {
-    for (const message of [S1, S2, S3]) {
-      expect(message.startsWith('Nothing was deleted:')).toBe(true);
-      // The two remedies, in the order the sentence gives them.
-      expect(message).toContain('Remove it from');
-      expect(message).toContain('or delete the');
-      // The at-least-one-item constraint that makes deleting the outfit necessary.
-      expect(message).toContain('An outfit cannot be saved with no items');
-    }
-    // Only the singular sentence can promise the outfit may be emptied first.
-    expect(S1).toContain('if this is its only item, delete it.');
-    expect(S2).toContain('an outfit holding only this item has to be deleted.');
-    expect(S3).toContain('an outfit holding only this item has to be deleted.');
-  });
-
-  it('keeps the Service hint verbatim for a 409 that names no outfit', () => {
-    const body = referencedBody([{ resource: 'wardrobe_item_tag', count: 2 }], 'Delete the tag that references this item first');
-
-    const failure = describeWardrobeItemDeleteFailure(rejection(409, body));
-
-    expect(failure).toEqual({ message: 'Delete the tag that references this item first', gone: false });
-    // The fallback boundary: nothing invents an outfit the Service did not name.
-    expect(failure.message).not.toContain('outfit');
-  });
-
-  it('states the generic dependent sentence for a 409 with no hint and no outfit', () => {
-    const noHint = {
-      error: 'RESOURCE_REFERENCED',
-      message: 'The wardrobe item is still referenced by other resources',
-      details: { reason: 'DEPENDENT_RESOURCES_EXIST', dependent_resources: [], action: 'delete_dependents_first' },
-    };
-    expect(describeWardrobeItemDeleteFailure(rejection(409, noHint))).toEqual({
-      message: 'Something still depends on this item, so it was not deleted.',
-      gone: false,
-    });
-
-    // A 409 with no `details` at all supplies no hint either.
-    expect(describeWardrobeItemDeleteFailure(rejection(409, { error: 'RESOURCE_REFERENCED', message: 'Still referenced' }))).toEqual({
-      message: 'Something still depends on this item, so it was not deleted.',
-      gone: false,
-    });
-  });
-
-  it('treats a 404 as already gone and states the page sentence', () => {
-    expect(describeWardrobeItemDeleteFailure(rejection(404, { error: 'NOT_FOUND', message: 'Wardrobe item not found' }))).toEqual({
-      message: ITEM_ALREADY_GONE_MESSAGE,
-      gone: true,
-    });
-    expect(ITEM_ALREADY_GONE_MESSAGE).toBe(
-      'This item is no longer in your wardrobe, so it was removed from this list.',
-    );
-  });
-
-  it('reports a server error with its real status', () => {
-    expect(describeWardrobeItemDeleteFailure(rejection(500, { message: 'Internal Server Error' }))).toEqual({
-      message: 'Could not delete this item (server error 500). Try again.',
-      gone: false,
-    });
-    expect(describeWardrobeItemDeleteFailure(rejection(503, undefined))).toEqual({
-      message: 'Could not delete this item (server error 503). Try again.',
-      gone: false,
-    });
-  });
-
   it('reports a request that never reached the server as a connection failure', () => {
-    // Axios records the attempted request and no response for a network failure.
-    expect(describeWardrobeItemDeleteFailure({ isAxiosError: true, request: {}, message: 'Network Error' })).toEqual({
+    expect(describeWardrobeItemDeleteFailure(new Error('Network Error'))).toMatchObject({
+      gone: false,
+      cleanupPending: false,
       message: 'Could not reach the server. Check your connection and try again.',
-      gone: false,
     });
   });
 
-  it('paints nothing for a 401, which the interceptor is redirecting on', () => {
-    // The page is leaving for /login; a sentence beside the control would be an
-    // error beside a redirect the person cannot act on.
-    expect(describeWardrobeItemDeleteFailure(rejection(401, { error: 'UNAUTHORIZED', message: 'Unauthorized' }))).toEqual({
-      message: null,
-      gone: false,
+  it('treats a 404 as already gone rather than a failure', () => {
+    expect(describeWardrobeItemDeleteFailure(httpError(404))).toMatchObject({
+      gone: true,
+      message: ITEM_ALREADY_GONE_MESSAGE,
     });
   });
 
-  it('uses the Service message for the remaining refused statuses', () => {
-    expect(describeWardrobeItemDeleteFailure(rejection(400, { message: 'Invalid item id' }))).toEqual({
-      message: 'Invalid item id',
-      gone: false,
-    });
-    expect(describeWardrobeItemDeleteFailure(rejection(403, { message: 'Not your item' }))).toEqual({
-      message: 'Not your item',
-      gone: false,
-    });
-    // A body without a message keeps the Client's generic refusal sentence.
-    expect(describeWardrobeItemDeleteFailure({ response: { status: 400 }, message: '' })).toEqual({
-      message: 'Could not delete this item.',
-      gone: false,
-    });
+  it('says nothing beside the control for a 401, which the interceptor owns', () => {
+    expect(describeWardrobeItemDeleteFailure(httpError(401)).message).toBeNull();
   });
 
-  it('reports a value that is not an error with the generic refusal sentence', () => {
-    expect(describeWardrobeItemDeleteFailure('failure')).toEqual({
-      message: 'Could not delete this item.',
-      gone: false,
-    });
-    expect(describeWardrobeItemDeleteFailure(null)).toEqual({
-      message: 'Could not delete this item.',
-      gone: false,
-    });
+  /** Issue 332 — deletion is reachable only from the Storage Box. */
+  it('explains the Storage Box gate for ITEM_NOT_ARCHIVED', () => {
+    const failure = describeWardrobeItemDeleteFailure(httpError(409, {
+      error: 'ITEM_NOT_ARCHIVED',
+      message: 'Clothing item is not in the Storage Box; archive it before deleting it',
+      details: { itemId: 'item-1' },
+    }));
+    expect(failure.gone).toBe(false);
+    expect(failure.message).toContain('Storage Box');
   });
 
-  it('never describes an outfit conflict for the fallback boundary statuses', () => {
-    // #330.3: a 404, a 5xx, a transport failure and a 409 naming no outfit each
-    // render a distinct sentence that names no outfit and points at no remedy.
-    const boundary = [
-      describeWardrobeItemDeleteFailure(rejection(404, {})).message,
-      describeWardrobeItemDeleteFailure(rejection(503, {})).message,
-      describeWardrobeItemDeleteFailure({ isAxiosError: true, request: {} }).message,
-      describeWardrobeItemDeleteFailure(
-        rejection(409, referencedBody(
-          [{ resource: 'outfit_generation', count: 2 }],
-          'Delete the try-on that references this item, then delete it.',
-        )),
-      ).message,
-    ];
+  /** Issue 332 — a running try-on refuses the whole delete and names the outfit. */
+  it('names the outfit whose try-on is still running for GENERATION_IN_PROGRESS', () => {
+    const failure = describeWardrobeItemDeleteFailure(httpError(409, {
+      error: 'GENERATION_IN_PROGRESS',
+      message: 'VTO generation is still Pending and cannot be deleted',
+      details: {
+        generation_id: 'gen-1',
+        status: 'Pending',
+        blocking: [{
+          outfitId: 'outfit-1',
+          outfitName: 'Weekend Casual',
+          generationId: 'gen-1',
+          status: 'Pending',
+        }],
+      },
+    }));
+    expect(failure.gone).toBe(false);
+    expect(failure.message).toContain('"Weekend Casual"');
+    expect(failure.message).toContain('Pending');
+    expect(failure.message).toContain('Wait for it to finish');
+  });
 
-    expect(new Set(boundary).size).toBe(boundary.length);
-    for (const message of boundary) {
-      expect(message).not.toBeNull();
-      expect(message).not.toContain('outfit');
-      expect(message).not.toContain('Nothing was deleted');
-    }
+  it('falls back to the status when the blocker names no outfit', () => {
+    const failure = describeWardrobeItemDeleteFailure(httpError(409, {
+      error: 'GENERATION_IN_PROGRESS',
+      message: 'still running',
+      details: { generation_id: 'gen-1', status: 'Processing' },
+    }));
+    expect(failure.message).toContain('Processing');
+  });
+
+  /** Issue 334 — the item's gallery proof is the only object proof left. */
+  it('treats the item gallery 502 as a completed delete with cleanup pending', () => {
+    const failure = describeWardrobeItemDeleteFailure(httpError(502, {
+      error: 'OBJECT_DELETION_INCOMPLETE',
+      message: 'The resource was deleted, but 1 stored object(s) could not be proven deleted',
+      details: {
+        manifest_id: 'manifest-1',
+        manifest_ids: ['manifest-1'],
+        retained_object_keys: ['wearable-items/user/item.jpg'],
+      },
+    }));
+    expect(failure.cleanupPending).toBe(true);
+    expect(failure.gone).toBe(false);
+    expect(failure.message).toBe(ITEM_CLEANUP_PENDING_MESSAGE);
+  });
+
+  it('keeps a genuine server fault as a retryable sentence', () => {
+    const failure = describeWardrobeItemDeleteFailure(httpError(503));
+    expect(failure.cleanupPending).toBe(false);
+    expect(failure.message).toContain('server error 503');
+  });
+
+  it('keeps the Service message for any other 4xx', () => {
+    const failure = describeWardrobeItemDeleteFailure(httpError(403, { message: 'Not your item' }));
+    expect(failure.message).toBe('Not your item');
+  });
+});
+
+describe('describeWardrobeItemLifecycleFailure', () => {
+  it('names the action that failed', () => {
+    expect(describeWardrobeItemLifecycleFailure(httpError(500), 'archive')).toContain('archive');
+    expect(describeWardrobeItemLifecycleFailure(httpError(500), 'restore')).toContain('restore');
+  });
+
+  it('treats a 404 as the item being gone', () => {
+    expect(describeWardrobeItemLifecycleFailure(httpError(404), 'archive'))
+      .toBe('This item is no longer in your wardrobe.');
+  });
+
+  it('says nothing for a 401, which the interceptor owns', () => {
+    expect(describeWardrobeItemLifecycleFailure(httpError(401), 'archive')).toBe('');
   });
 });

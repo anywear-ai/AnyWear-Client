@@ -29,4 +29,9 @@ export type GetWardrobeItemsId200 = {
   imageEmbedding: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+     * When this item entered the Storage Box, or null while it is in use. Archiving and restoring are the only writes to it.
+     * @nullable
+     */
+  archivedAt: string | null;
 };

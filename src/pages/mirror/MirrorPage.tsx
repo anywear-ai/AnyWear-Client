@@ -7,11 +7,13 @@ import OutfitPicker from '../../components/mirror/OutfitPicker';
 import StylePromptInput from '../../components/mirror/StylePromptInput';
 import TryOnButton from '../../components/mirror/TryOnButton';
 import ResultArea from '../../components/mirror/ResultArea';
+import OutfitLookupNotice from '../../components/mirror/OutfitLookupNotice';
 import VtoHistorySection from '../../components/mirror/VtoHistorySection';
 import useVtoGeneration from '../../hooks/useVtoGeneration';
 import useVtoRating from '../../hooks/useVtoRating';
 import { useGetUsersMe } from '../../api/endpoints/users/users';
 import { useGetVtoBasePhotos } from '../../api/endpoints/vto/vto';
+import { useGetOutfitsLookup } from '../../api/endpoints/outfits/outfits';
 import { resolveBasePhotoSelection } from '../../lib/basePhotoSelection';
 import type { PostVtoGenerationsBody } from '../../api/model/postVtoGenerationsBody';
 
@@ -64,6 +66,21 @@ export default function MirrorPage() {
   // `undefined` means no profile has arrived: the balance is unknown, never 0.
   const credits = user?.dailyCredits ?? undefined;
 
+  /**
+   * Issue 335 — the selected item set may already be a saved outfit.
+   *
+   * The lookup is read-only and charges nothing, so the page can show the existing
+   * outfit before the Try-on button spends a credit. A hit also decides the
+   * generation body below: pressing Try on appends a record to that outfit rather
+   * than creating a second one for the same combination.
+   */
+  const lookupIds = mode === 'items' ? selectedWearableItemIds : [];
+  const { data: outfitLookup, isLoading: isLookingUpOutfit } = useGetOutfitsLookup(
+    { wearable_item_ids: [...lookupIds].sort().join(',') },
+    { query: { enabled: lookupIds.length > 0, retry: false } },
+  );
+  const matchedOutfit = lookupIds.length > 0 ? outfitLookup?.outfit ?? null : null;
+
   const hasItems = mode === 'outfit' ? !!selectedOutfitId : selectedWearableItemIds.length > 0;
   const canGenerate = !!selectedBasePhotoId && hasItems && credits !== undefined && credits > 0 && !isStarting && !isPolling;
 
@@ -76,6 +93,14 @@ export default function MirrorPage() {
         outfit_id: selectedOutfitId,
         prompt: prompt.trim() || undefined,
       });
+    } else if (mode === 'items' && matchedOutfit) {
+      // The set is already an outfit: append a record to it, which is both the
+      // cheaper request and the one that keeps one card per combination.
+      generate({
+        base_photo_id: selectedBasePhotoId,
+        outfit_id: matchedOutfit.id,
+        prompt: prompt.trim() || undefined,
+      });
     } else if (mode === 'items' && selectedWearableItemIds.length > 0) {
       generate({
         base_photo_id: selectedBasePhotoId,
@@ -84,7 +109,7 @@ export default function MirrorPage() {
         prompt: prompt.trim() || undefined,
       });
     }
-  }, [generate, selectedBasePhotoId, mode, selectedOutfitId, selectedWearableItemIds, outfitName, prompt]);
+  }, [generate, selectedBasePhotoId, mode, selectedOutfitId, matchedOutfit, selectedWearableItemIds, outfitName, prompt]);
 
   // The history section builds the retry body from the failed row and the
   // page's current effective base photo; the page only runs it through the one
@@ -179,6 +204,7 @@ export default function MirrorPage() {
               <CreditDisplay />
             </div>
             <div className="space-y-3">
+              <OutfitLookupNotice outfit={matchedOutfit} isLoading={isLookingUpOutfit} />
               <TryOnButton
                 onGenerate={handleGenerate}
                 disabled={!canGenerate}

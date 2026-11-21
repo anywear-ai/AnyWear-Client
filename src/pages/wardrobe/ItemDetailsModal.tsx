@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from 'react';
-import { usePatchWardrobeItemsId, useDeleteWardrobeItemsId, usePostWardrobeItemsItemIdRetag } from '../../api/endpoints/wardrobe/wardrobe';
+import { useState, useRef } from 'react';
+import { usePatchWardrobeItemsId, usePostWardrobeItemsItemIdArchive, usePostWardrobeItemsItemIdRestore, usePostWardrobeItemsItemIdRetag } from '../../api/endpoints/wardrobe/wardrobe';
 import { GetWardrobe200Item } from '../../api/model/getWardrobe200Item';
 import type { PostWardrobeItemsIdUpload200 } from '../../api/model/postWardrobeItemsIdUpload200';
 import type { PostWardrobeItemsIdUploadUrl200 } from '../../api/model/postWardrobeItemsIdUploadUrl200';
@@ -8,7 +8,7 @@ import { AXIOS_INSTANCE } from '../../api/custom-instance';
 import { resolveImageContentType, uploadImageWithSignedPost, validateImageFile } from '../../lib/imageUpload';
 import { prepareImageForUpload } from '../../lib/imagePreparation';
 import { getErrorMessage } from '../../lib/errors';
-import { describeWardrobeItemDeleteFailure } from '../../lib/wardrobeItemDeleteFailure';
+import { describeWardrobeItemLifecycleFailure } from '../../lib/wardrobeItemDeleteFailure';
 import useAccessibleDialog from '../../hooks/useAccessibleDialog';
 import { isAndroidApp } from '../../lib/platform';
 import { isClientVersionRefused } from '../../store/clientVersionRefusalStore';
@@ -135,26 +135,26 @@ function ItemDetailsEditor({ item, onClose, onSuccess, onDeleted, onRetagStarted
   const [addImageError, setAddImageError] = useState<string | null>(null);
   // The in-place delete question, the sentence a refused delete leaves inside it,
   // and the update/re-tag failure the action row prints above itself.
-  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
-  const [deleteFailure, setDeleteFailure] = useState<string | null>(null);
+  // Issue 332 — the details dialog offers the item lifecycle transition, never a
+  // raw delete: a permanent delete is reachable only from the Storage Box, through
+  // the page dependent-outfit confirmation. This surface archives (or restores)
+  // the item, which is the active view one destructive action.
+  const [lifecycleFailure, setLifecycleFailure] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  // Set by a decline: the Delete control the question replaced takes focus back
-  // once it is in the document again.
-  const restoreDeleteFocus = useRef(false);
   const deleteButtonRef = useRef<HTMLButtonElement>(null);
-  const cancelDeleteRef = useRef<HTMLButtonElement>(null);
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
   const { mutateAsync: updateItem, isPending: isUpdating } = usePatchWardrobeItemsId();
-  const { mutateAsync: deleteItem, isPending: isDeleting } = useDeleteWardrobeItemsId();
+  const { mutateAsync: archiveItem, isPending: isArchiving } = usePostWardrobeItemsItemIdArchive();
+  const { mutateAsync: restoreItem, isPending: isRestoring } = usePostWardrobeItemsItemIdRestore();
   const { mutateAsync: retagItem, isPending: isRetagging } = usePostWardrobeItemsItemIdRetag();
 
   // Every close path — Escape, the backdrop, the close control and Cancel — runs
-  // through this guard, so a delete that is still out keeps the question it
-  // started from and its outcome always has somewhere to land.
+  // through this guard, so an in-flight lifecycle change keeps its surface and its
+  // outcome always has somewhere to land.
   const requestClose = () => {
-    if (isDeleting) return;
+    if (isArchiving || isRestoring) return;
     onClose();
   };
 
@@ -201,40 +201,26 @@ function ItemDetailsEditor({ item, onClose, onSuccess, onDeleted, onRetagStarted
     }
   };
 
-  const openDeleteQuestion = () => {
-    // An update or re-tag sentence above the action row describes that action,
-    // not this one, so it keeps its place until its own next attempt.
-    setDeleteFailure(null);
-    setIsConfirmingDelete(true);
-  };
-
-  const declineDelete = () => {
-    setIsConfirmingDelete(false);
-    setDeleteFailure(null);
-    // The Delete control takes the question's place back, so focus returns to it.
-    restoreDeleteFocus.current = true;
-  };
-
-  const handleDelete = async () => {
+  /**
+   * Issue 332 — the dialog's destructive action is the Storage Box transition.
+   * Archiving hides the item without touching any outfit that lists it; restoring
+   * puts it back. A permanent delete lives only in the Storage Box view.
+   */
+  const handleArchiveToggle = async () => {
     if (!item.id) return;
-    setDeleteFailure(null);
+    setLifecycleFailure(null);
     try {
-      await deleteItem({ id: item.id });
-      onDeleted('deleted');
+      if (item.archivedAt) await restoreItem({ itemId: item.id });
+      else await archiveItem({ itemId: item.id });
     } catch (error) {
-      console.error('Failed to delete item:', error);
+      console.error('Failed to change the item lifecycle:', error);
       if (isClientVersionRefused()) return;
-      const failure = describeWardrobeItemDeleteFailure(error);
-      // A 404 is not a failure to report beside the control: the row is already
-      // gone, so the page states the removal and nothing names an outfit.
-      if (failure.gone) {
-        onDeleted('already-gone');
-        return;
-      }
-      setDeleteFailure(failure.message);
+      setLifecycleFailure(describeWardrobeItemLifecycleFailure(error, item.archivedAt ? 'restore' : 'archive'));
+      return;
     }
+    // The item leaves the view it was in, so the dialog closes and the page re-reads.
+    onDeleted('deleted');
   };
-
   const handleRetag = async () => {
     if (!item.id) return;
     setActionError(null);
@@ -247,21 +233,6 @@ function ItemDetailsEditor({ item, onClose, onSuccess, onDeleted, onRetagStarted
       setActionError('Failed to start re-tagging');
     }
   };
-
-  // The question focuses its Cancel first, as the recorded confirmation does;
-  // opening it is not a remount, so the dialog hook's own focus move cannot.
-  useEffect(() => {
-    if (!isConfirmingDelete) return;
-    cancelDeleteRef.current?.focus();
-  }, [isConfirmingDelete]);
-
-  // Declining re-renders the Delete control the question replaced; focus moves
-  // there once it is back in the document.
-  useEffect(() => {
-    if (!restoreDeleteFocus.current || isConfirmingDelete) return;
-    restoreDeleteFocus.current = false;
-    deleteButtonRef.current?.focus();
-  }, [isConfirmingDelete]);
 
   const handleViewChange = (index: number, value: string) => {
     setImages((prev) => {
@@ -355,7 +326,7 @@ function ItemDetailsEditor({ item, onClose, onSuccess, onDeleted, onRetagStarted
 
         <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="item-details-title" tabIndex={-1} className="relative inline-block px-4 pt-5 pb-4 overflow-hidden text-left align-bottom transition-all transform bg-white rounded-xl shadow-xl sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
           <div className="absolute top-0 right-0 pt-4 pr-4">
-            <button onClick={requestClose} disabled={isDeleting} className="text-gray-400 bg-white rounded-md hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50">
+            <button onClick={requestClose} disabled={isArchiving || isRestoring} className="text-gray-400 bg-white rounded-md hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50">
               <span className="sr-only">Close</span>
               <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
@@ -572,37 +543,15 @@ function ItemDetailsEditor({ item, onClose, onSuccess, onDeleted, onRetagStarted
                       {isRetagging ? 'Re-tagging...' : 'Re-tag'}
                     </button>
                   )}
-                  {isConfirmingDelete ? (
-                    // The question takes the Delete control's place, so the
-                    // dialog's Save, Re-tag and Cancel keep theirs and the
-                    // refusal prints beside the control that sent the request.
-                    <div role="group" aria-label="Delete this item?" className="flex flex-col gap-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-sm text-red-600">Delete this item? This cannot be undone.</span>
-                        <button ref={cancelDeleteRef} type="button"
-                          onClick={declineDelete}
-                          disabled={isDeleting}
-                          className="inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
-                          Cancel
-                        </button>
-                        <button type="button" disabled={isDeleting}
-                          onClick={handleDelete}
-                          className="inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-red-600 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
-                          {isDeleting ? 'Deleting...' : 'Delete'}
-                        </button>
-                      </div>
-                      {deleteFailure && (
-                        <p role="alert" className="text-sm text-red-700">{deleteFailure}</p>
-                      )}
-                    </div>
-                  ) : (
-                    <button ref={deleteButtonRef} type="button" disabled={isDeleting}
-                      onClick={openDeleteQuestion}
-                      className="inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-red-600 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
-                      Delete
-                    </button>
-                  )}
-                  <button type="button" onClick={requestClose}
+                  <button ref={deleteButtonRef} type="button" disabled={isArchiving || isRestoring}
+                    data-testid="item-lifecycle-action"
+                    onClick={handleArchiveToggle}
+                    className="inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-gray-800 text-sm font-medium text-white hover:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 disabled:opacity-50">
+                    {isArchiving ? 'Archiving...' : isRestoring ? 'Restoring...' : item.archivedAt ? 'Restore' : 'Archive'}
+                  </button>
+                  {lifecycleFailure && (
+                    <p role="alert" className="text-sm text-red-700">{lifecycleFailure}</p>
+                  )}                  <button type="button" onClick={requestClose}
                     className="inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500">
                     Cancel
                   </button>

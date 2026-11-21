@@ -4,8 +4,11 @@
  * AnyWear API
  * OpenAPI spec version: 1.0.0
  */
+import type { DeleteVtoGenerationsGenerationId409DetailsBlockingItem } from './deleteVtoGenerationsGenerationId409DetailsBlockingItem';
 
 export type DeleteVtoGenerationsGenerationId409Details = {
   generation_id: string;
   status: string;
+  /** Every try-on that is still running in the container the delete named, one entry each. Present only on the container deletes (`DELETE /outfits/{id}` and `DELETE /wardrobe/items/{item_id}`): `DELETE /vto/generations/{generation_id}` names its one generation in `generation_id` and omits this member entirely. */
+  blocking?: DeleteVtoGenerationsGenerationId409DetailsBlockingItem[];
 };

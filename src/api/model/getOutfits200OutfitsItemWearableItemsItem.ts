@@ -13,4 +13,9 @@ export type GetOutfits200OutfitsItemWearableItemsItem = {
   category: string;
   /** The wardrobe item's images, ordered by position, each with a freshly signed `url`. */
   images: ImageEntryResponse[];
+  /**
+     * When this member entered the Storage Box, or null while it is in use. An archived member is still listed here and is skipped by try-on generation.
+     * @nullable
+     */
+  archivedAt: string | null;
 };

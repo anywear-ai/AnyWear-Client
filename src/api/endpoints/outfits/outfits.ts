@@ -24,9 +24,11 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
-  DeleteOutfitsId502,
+  DeleteOutfitsId409,
   GetOutfits200,
   GetOutfitsId200,
+  GetOutfitsLookup200,
+  GetOutfitsLookupParams,
   PatchOutfitsId200,
   PatchOutfitsIdBody,
   PostOutfits201,
@@ -56,7 +58,7 @@ export const postOutfits = (
 
 
 
-export const getPostOutfitsMutationOptions = <TError = unknown,
+export const getPostOutfitsMutationOptions = <TError = void,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postOutfits>>, TError,{data: PostOutfitsBody}, TContext>, request?: SecondParameter<typeof customInstance>}
 ): UseMutationOptions<Awaited<ReturnType<typeof postOutfits>>, TError,{data: PostOutfitsBody}, TContext> => {
 
@@ -85,9 +87,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type PostOutfitsMutationResult = NonNullable<Awaited<ReturnType<typeof postOutfits>>>
     export type PostOutfitsMutationBody = PostOutfitsBody
-    export type PostOutfitsMutationError = unknown
+    export type PostOutfitsMutationError = void
 
-    export const usePostOutfits = <TError = unknown,
+    export const usePostOutfits = <TError = void,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postOutfits>>, TError,{data: PostOutfitsBody}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof postOutfits>>,
@@ -172,6 +174,91 @@ export function useGetOutfits<TData = Awaited<ReturnType<typeof getOutfits>>, TE
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getGetOutfitsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+export const getOutfitsLookup = (
+    params: GetOutfitsLookupParams,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<GetOutfitsLookup200>(
+      {url: `/outfits/lookup`, method: 'GET',
+        params, signal
+    },
+      options);
+    }
+
+
+
+
+export const getGetOutfitsLookupQueryKey = (params?: GetOutfitsLookupParams,) => {
+    return [
+    `/outfits/lookup`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetOutfitsLookupQueryOptions = <TData = Awaited<ReturnType<typeof getOutfitsLookup>>, TError = void>(params: GetOutfitsLookupParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getOutfitsLookup>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetOutfitsLookupQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getOutfitsLookup>>> = ({ signal }) => getOutfitsLookup(params, requestOptions, signal);
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getOutfitsLookup>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetOutfitsLookupQueryResult = NonNullable<Awaited<ReturnType<typeof getOutfitsLookup>>>
+export type GetOutfitsLookupQueryError = void
+
+
+export function useGetOutfitsLookup<TData = Awaited<ReturnType<typeof getOutfitsLookup>>, TError = void>(
+ params: GetOutfitsLookupParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getOutfitsLookup>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getOutfitsLookup>>,
+          TError,
+          Awaited<ReturnType<typeof getOutfitsLookup>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetOutfitsLookup<TData = Awaited<ReturnType<typeof getOutfitsLookup>>, TError = void>(
+ params: GetOutfitsLookupParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getOutfitsLookup>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getOutfitsLookup>>,
+          TError,
+          Awaited<ReturnType<typeof getOutfitsLookup>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetOutfitsLookup<TData = Awaited<ReturnType<typeof getOutfitsLookup>>, TError = void>(
+ params: GetOutfitsLookupParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getOutfitsLookup>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useGetOutfitsLookup<TData = Awaited<ReturnType<typeof getOutfitsLookup>>, TError = void>(
+ params: GetOutfitsLookupParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getOutfitsLookup>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetOutfitsLookupQueryOptions(params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 
@@ -337,7 +424,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-export const getDeleteOutfitsIdMutationOptions = <TError = void | DeleteOutfitsId502,
+export const getDeleteOutfitsIdMutationOptions = <TError = void | DeleteOutfitsId409,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteOutfitsId>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
 ): UseMutationOptions<Awaited<ReturnType<typeof deleteOutfitsId>>, TError,{id: string}, TContext> => {
 
@@ -366,9 +453,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type DeleteOutfitsIdMutationResult = NonNullable<Awaited<ReturnType<typeof deleteOutfitsId>>>
 
-    export type DeleteOutfitsIdMutationError = void | DeleteOutfitsId502
+    export type DeleteOutfitsIdMutationError = void | DeleteOutfitsId409
 
-    export const useDeleteOutfitsId = <TError = void | DeleteOutfitsId502,
+    export const useDeleteOutfitsId = <TError = void | DeleteOutfitsId409,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteOutfitsId>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof deleteOutfitsId>>,

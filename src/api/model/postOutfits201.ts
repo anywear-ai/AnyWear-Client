@@ -20,7 +20,7 @@ export type PostOutfits201 = {
   /** @nullable */
   look?: PostOutfits201Look;
   /**
-     * The number of outfit generations that `DELETE /outfits/{id}` removes with this outfit, across every status. Resolved in one aggregate statement per page; null when it could not be read.
+     * How many try-on records this outfit already has, across every status. Deleting the outfit keeps them, so this is informational: the delete confirmation and the Mirror lookup result both show it. Resolved in one aggregate statement per page; null when it could not be read.
      * @minimum 0
      * @nullable
      */

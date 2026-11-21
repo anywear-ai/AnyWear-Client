@@ -1,5 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { useDeleteWardrobeItemsId, useGetWardrobeCategories } from '../../api/endpoints/wardrobe/wardrobe';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import {
+  useDeleteWardrobeItemsItemId,
+  useGetWardrobeCategories,
+  useGetWardrobeItemsItemIdDependentOutfits,
+  usePostWardrobeItemsItemIdArchive,
+  usePostWardrobeItemsItemIdRestore,
+} from '../../api/endpoints/wardrobe/wardrobe';
 import { useGetOutfits } from '../../api/endpoints/outfits/outfits';
 import { usePostVtoGenerations } from '../../api/endpoints/vto/vto';
 import AddItemModal from './AddItemModal';
@@ -12,7 +18,12 @@ import OutfitLookBadge from '../../components/OutfitLookBadge';
 import { getOutfitLookImage } from '../../lib/image-utils';
 import { outfitHasActiveGeneration, outfitLookRefetchInterval, type OutfitLookState } from '../../lib/outfit-look';
 import { getErrorMessage } from '../../lib/errors';
-import { describeWardrobeItemDeleteFailure, ITEM_ALREADY_GONE_MESSAGE } from '../../lib/wardrobeItemDeleteFailure';
+import {
+  describeWardrobeItemDeleteFailure,
+  describeWardrobeItemLifecycleFailure,
+  ITEM_ALREADY_GONE_MESSAGE,
+  ITEM_CLEANUP_PENDING_MESSAGE,
+} from '../../lib/wardrobeItemDeleteFailure';
 import { connectSse } from '../../lib/sse';
 import { mergeWardrobeStatus } from '../../lib/status-arbitration';
 import { useWardrobeList } from '../../hooks/useWardrobeList';
@@ -113,7 +124,8 @@ const RETAG_STARTED_TEXT = 'Re-tagging started. Check back shortly.';
 type PageNotice =
   | { kind: 'outfit-cleanup'; retainedObjectKeys: number }
   | { kind: 'retag-started' }
-  | { kind: 'item-already-gone' };
+  | { kind: 'item-already-gone' }
+  | { kind: 'item-cleanup-pending' };
 
 function noticeText(notice: PageNotice): string {
   switch (notice.kind) {
@@ -123,6 +135,8 @@ function noticeText(notice: PageNotice): string {
       return RETAG_STARTED_TEXT;
     case 'item-already-gone':
       return ITEM_ALREADY_GONE_MESSAGE;
+    case 'item-cleanup-pending':
+      return ITEM_CLEANUP_PENDING_MESSAGE;
   }
 }
 
@@ -133,6 +147,15 @@ interface DeleteTarget {
   category?: string | null;
 }
 
+/**
+ * Issue 332 — the wardrobe lists two lifecycle layers, never both at once.
+ *
+ * `active` is the items in use; `storage` is the Storage Box, the only place from
+ * which an item can be deleted permanently. The archived flag travels to the
+ * Service as `archive_status`, so the list read is one query either way.
+ */
+type WardrobeView = 'active' | 'storage';
+
 export default function WardrobePage() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isOutfitModalOpen, setIsOutfitModalOpen] = useState(false);
@@ -140,6 +163,10 @@ export default function WardrobePage() {
   const [selectedOutfit, setSelectedOutfit] = useState<GetOutfits200OutfitsItem | null>(null);
   const [activeCategory, setActiveCategory] = useState<string>('all');
   const [filters, setFilters] = useState<GetWardrobeParams>({});
+  // Issue 332 — the Active / Storage Box switch. The Storage Box is the only view
+  // that offers a permanent delete; the active view offers Archive instead.
+  const [view, setView] = useState<WardrobeView>('active');
+  const [lifecycleFailure, setLifecycleFailure] = useState<string | null>(null);
   const [lookTarget, setLookTarget] = useState<{ id: string; name?: string | null } | null>(null);
   const [lookError, setLookError] = useState<string | null>(null);
   // Held from the confirm click until the request and its refreshes settle, so
@@ -163,17 +190,39 @@ export default function WardrobePage() {
   const queryClient = useQueryClient();
 
   // One merged list read on mount and on each recovery trigger; no interval.
+  // The view's `archive_status` is part of the filters the Service filters on, and
+  // the object identity is memoised because the list hook derives its query key
+  // from it.
+  const listFilters: GetWardrobeParams = useMemo(
+    () => (view === 'storage' ? { ...filters, archive_status: 'archived' } : filters),
+    [view, filters],
+  );
   const {
     items: wardrobeData,
     isLoading,
     refetch,
     notifyStreamState,
-  } = useWardrobeList(filters);
+  } = useWardrobeList(listFilters);
 
   const { data: categoriesResponse } = useGetWardrobeCategories();
   // The delete is awaited in the panel's handler: the outcome has to be known to
   // decide whether the card leaves and where the sentence goes.
-  const { mutateAsync: deleteItem, isPending: isDeleting } = useDeleteWardrobeItemsId();
+  const { mutateAsync: deleteItem, isPending: isDeleting } = useDeleteWardrobeItemsItemId();
+  const { mutateAsync: archiveItem, isPending: isArchiving } = usePostWardrobeItemsItemIdArchive();
+  const { mutateAsync: restoreItem, isPending: isRestoring } = usePostWardrobeItemsItemIdRestore();
+  // Issue 332 — the delete confirmation renders from this preview. The dialog
+  // enables confirmation only when the page holds every entry the Service counts,
+  // so the request pages to `total` rather than accepting the first page.
+  const deletePreview = useGetWardrobeItemsItemIdDependentOutfits(
+    deleteTarget?.id ?? '',
+    { limit: 100, offset: 0 },
+    {
+      query: {
+        enabled: !!deleteTarget,
+        retry: false,
+      },
+    },
+  );
   const { data: outfitsResponse } = useGetOutfits({
     query: {
       // Poll only while an outfit has a Pending or Processing generation; the
@@ -300,22 +349,28 @@ export default function WardrobePage() {
     setDeleteFailure(null);
 
     try {
-      await deleteItem({ id });
+      await deleteItem({ itemId: id });
     } catch (error) {
       console.error('Failed to delete item:', error);
       // The terminal refusal owns the whole screen; nothing is written over it.
       if (isClientVersionRefused()) return;
       const failure = describeWardrobeItemDeleteFailure(error);
-      if (!failure.gone) {
+      if (!failure.gone && !failure.cleanupPending) {
         // The item stays and its own sentence sits beside the control that sent
         // the request, so the person can retry or cancel.
         setDeleteFailure(failure.message);
         void refetch();
         return;
       }
-      // A 404 means the row is already gone: it is a removal, not a failure.
+      // A 404 means the row is already gone: it is a removal, not a failure. A
+      // 502 means every row went and only background object cleanup is owed, so
+      // the delete completed from the user's point of view.
       removeItemFromLists(id);
-      settleDeletedItem(id, { kind: 'item-already-gone' });
+      if (failure.cleanupPending) {
+        settleDeletedItem(id, { kind: 'item-cleanup-pending' });
+      } else {
+        settleDeletedItem(id, { kind: 'item-already-gone' });
+      }
       void refetch();
       return;
     }
@@ -323,6 +378,27 @@ export default function WardrobePage() {
     removeItemFromLists(id);
     settleDeletedItem(id);
     void refetch();
+  };
+
+  /**
+   * Issue 332 — the two Storage Box transitions. Both are one request and one row
+   * write, and the list is re-read afterwards because the item leaves the view it
+   * was in: an archived item is not in the active list, and a restored one is not
+   * in the Storage Box.
+   */
+  const runLifecycle = async (id: string, action: 'archive' | 'restore') => {
+    setLifecycleFailure(null);
+    try {
+      if (action === 'archive') await archiveItem({ itemId: id });
+      else await restoreItem({ itemId: id });
+    } catch (error) {
+      if (isClientVersionRefused()) return;
+      setLifecycleFailure(describeWardrobeItemLifecycleFailure(error, action));
+      return;
+    }
+    removeItemFromLists(id);
+    if (selectedItem?.id === id) setSelectedItem(null);
+    await refetch();
   };
 
   // A confirmed delete takes the card that opened the confirmation with it — and
@@ -412,7 +488,38 @@ export default function WardrobePage() {
         </button>
       </div>
 
-      {categories.length > 0 && (
+      {/* Issue 332 — the two lifecycle layers. The Storage Box is the only view
+          that offers a permanent delete; the active view offers Archive. */}
+      <div className="mb-5 flex gap-2" role="tablist" aria-label="Wardrobe view">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'active'}
+          onClick={() => { setView('active'); setLifecycleFailure(null); }}
+          className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+            view === 'active' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+          } focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2`}
+        >
+          Active
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'storage'}
+          onClick={() => { setView('storage'); setLifecycleFailure(null); }}
+          className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+            view === 'storage' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+          } focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2`}
+        >
+          Storage Box
+        </button>
+      </div>
+
+      {lifecycleFailure && (
+        <p role="alert" className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{lifecycleFailure}</p>
+      )}
+
+      {view === 'active' && categories.length > 0 && (
         <div className="mb-5 flex flex-wrap gap-2" role="group" aria-label="Filter wardrobe by category">
           <button
             onClick={() => handleCategoryFilter('all')}
@@ -450,7 +557,11 @@ export default function WardrobePage() {
           <div className="text-center py-12">Loading...</div>
         ) : wardrobeData.length === 0 ? (
           <div className="text-center py-16 px-6 bg-white border border-gray-200 rounded-xl">
-            <p className="text-gray-600">Your wardrobe is empty. Tap "Add Item" to get started.</p>
+            <p className="text-gray-600">
+              {view === 'storage'
+                ? 'The Storage Box is empty. Archived items wait here until you restore or delete them.'
+                : 'Your wardrobe is empty. Tap "Add Item" to get started.'}
+            </p>
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 sm:gap-4">
@@ -493,16 +604,38 @@ export default function WardrobePage() {
                       {(color || material) && <p className="mt-1 text-xs text-gray-500">{[color, material].filter(Boolean).join(' • ')}</p>}
                     </div>
                   </button>
-                  <button
-                    type="button"
-                    onClick={(e) => openDeleteConfirmation(item, e)}
-                    aria-label={`Delete ${item.name || item.category || 'wardrobe item'}`}
-                    className="absolute right-2 top-2 rounded-full bg-white/95 p-2 text-red-700 shadow-sm opacity-100 transition-opacity hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
-                  >
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
+                  {view === 'storage' ? (
+                    <div className="absolute right-2 top-2 flex gap-1">
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); void runLifecycle(item.id, 'restore'); }}
+                        disabled={isRestoring || isArchiving}
+                        aria-label={`Restore ${item.name || item.category || 'wardrobe item'}`}
+                        className="rounded-full bg-white/95 px-2 py-1 text-xs font-medium text-indigo-700 shadow-sm hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 disabled:opacity-50"
+                      >
+                        Restore
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => openDeleteConfirmation(item, e)}
+                        disabled={isDeleting}
+                        aria-label={`Delete ${item.name || item.category || 'wardrobe item'} permanently`}
+                        className="rounded-full bg-white/95 px-2 py-1 text-xs font-medium text-red-700 shadow-sm hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:opacity-50"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); void runLifecycle(item.id, 'archive'); }}
+                      disabled={isArchiving || isRestoring}
+                      aria-label={`Archive ${item.name || item.category || 'wardrobe item'}`}
+                      className="absolute right-2 top-2 rounded-full bg-white/95 px-2 py-1 text-xs font-medium text-gray-700 shadow-sm opacity-100 transition-opacity hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 disabled:opacity-50 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+                    >
+                      Archive
+                    </button>
+                  )}
                 </article>
               );
             })}
@@ -650,7 +783,7 @@ export default function WardrobePage() {
           onClose={handleOutfitModalClose}
           onSuccess={() => queryClient.invalidateQueries({ queryKey: ['/outfits'] })}
           onSaved={openGenerateLook}
-          onNotice={(cleanup) => setNotice({ kind: 'outfit-cleanup', retainedObjectKeys: cleanup.retainedObjectKeys })}
+          onNotice={() => queryClient.invalidateQueries({ queryKey: ['/outfits'] })}
           outfit={selectedOutfit ?? undefined}
         />
       )}
@@ -659,10 +792,14 @@ export default function WardrobePage() {
         isOpen={deleteTarget !== null}
         itemName={deleteTarget?.name}
         itemCategory={deleteTarget?.category}
+        dependentOutfits={deletePreview.data?.outfits ?? null}
+        dependentTotal={deletePreview.data?.total ?? null}
+        previewFailed={deletePreview.isError}
         isSubmitting={isDeleting}
         failureMessage={deleteFailure}
         onCancel={cancelDeleteConfirmation}
         onConfirm={confirmDeleteItem}
+        onRetryPreview={() => { void deletePreview.refetch(); }}
       />
 
       {selectedItem && (

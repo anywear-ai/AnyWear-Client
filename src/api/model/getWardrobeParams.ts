@@ -4,10 +4,15 @@
  * AnyWear API
  * OpenAPI spec version: 1.0.0
  */
+import type { GetWardrobeArchiveStatus } from './getWardrobeArchiveStatus';
 
 export type GetWardrobeParams = {
 category?: string;
 color?: string;
 material?: string;
 status?: string;
+/**
+ * Which lifecycle layer to list: `active` (in use, the default) or `archived` (the Storage Box, newest archive first).
+ */
+archive_status?: GetWardrobeArchiveStatus;
 };

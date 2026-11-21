@@ -24,11 +24,14 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
-  DeleteWardrobeItemsId200,
-  DeleteWardrobeItemsId409,
+  DeleteWardrobeItemsItemId200,
+  DeleteWardrobeItemsItemId409,
+  DeleteWardrobeItemsItemId502,
   GetWardrobe200Item,
   GetWardrobeCategories200,
   GetWardrobeItemsId200,
+  GetWardrobeItemsItemIdDependentOutfits200,
+  GetWardrobeItemsItemIdDependentOutfitsParams,
   GetWardrobeParams,
   PatchWardrobeItemsId200,
   PatchWardrobeItemsId409,
@@ -37,6 +40,8 @@ import type {
   PostWardrobeItemsIdUploadBody,
   PostWardrobeItemsIdUploadUrl200,
   PostWardrobeItemsIdUploadUrlBody,
+  PostWardrobeItemsItemIdArchive200,
+  PostWardrobeItemsItemIdRestore200,
   PostWardrobeItemsItemIdRetag202,
   PostWardrobeUpload202,
   PostWardrobeUploadBody,
@@ -477,25 +482,25 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getPatchWardrobeItemsIdMutationOptions(options), queryClient);
     }
-    export const deleteWardrobeItemsId = (
-    id: string,
+    export const postWardrobeItemsItemIdArchive = (
+    itemId: string,
  options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
 ) => {
 
 
-      return customInstance<DeleteWardrobeItemsId200>(
-      {url: `/wardrobe/items/${id}`, method: 'DELETE', signal
+      return customInstance<PostWardrobeItemsItemIdArchive200>(
+      {url: `/wardrobe/items/${itemId}/archive`, method: 'POST', signal
     },
       options);
     }
 
 
 
-export const getDeleteWardrobeItemsIdMutationOptions = <TError = void | DeleteWardrobeItemsId409,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteWardrobeItemsId>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof deleteWardrobeItemsId>>, TError,{id: string}, TContext> => {
+export const getPostWardrobeItemsItemIdArchiveMutationOptions = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postWardrobeItemsItemIdArchive>>, TError,{itemId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof postWardrobeItemsItemIdArchive>>, TError,{itemId: string}, TContext> => {
 
-const mutationKey = ['deleteWardrobeItemsId'];
+const mutationKey = ['postWardrobeItemsItemIdArchive'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
       options
@@ -505,10 +510,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteWardrobeItemsId>>, {id: string}> = (props) => {
-          const {id} = props ?? {};
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postWardrobeItemsItemIdArchive>>, {itemId: string}> = (props) => {
+          const {itemId} = props ?? {};
 
-          return  deleteWardrobeItemsId(id,requestOptions)
+          return  postWardrobeItemsItemIdArchive(itemId,requestOptions)
         }
 
 
@@ -518,19 +523,74 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
   return  { mutationFn, ...mutationOptions }}
 
-    export type DeleteWardrobeItemsIdMutationResult = NonNullable<Awaited<ReturnType<typeof deleteWardrobeItemsId>>>
+    export type PostWardrobeItemsItemIdArchiveMutationResult = NonNullable<Awaited<ReturnType<typeof postWardrobeItemsItemIdArchive>>>
 
-    export type DeleteWardrobeItemsIdMutationError = void | DeleteWardrobeItemsId409
+    export type PostWardrobeItemsItemIdArchiveMutationError = void
 
-    export const useDeleteWardrobeItemsId = <TError = void | DeleteWardrobeItemsId409,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteWardrobeItemsId>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+    export const usePostWardrobeItemsItemIdArchive = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postWardrobeItemsItemIdArchive>>, TError,{itemId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
-        Awaited<ReturnType<typeof deleteWardrobeItemsId>>,
+        Awaited<ReturnType<typeof postWardrobeItemsItemIdArchive>>,
         TError,
-        {id: string},
+        {itemId: string},
         TContext
       > => {
-      return useMutation(getDeleteWardrobeItemsIdMutationOptions(options), queryClient);
+      return useMutation(getPostWardrobeItemsItemIdArchiveMutationOptions(options), queryClient);
+    }
+    export const postWardrobeItemsItemIdRestore = (
+    itemId: string,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<PostWardrobeItemsItemIdRestore200>(
+      {url: `/wardrobe/items/${itemId}/restore`, method: 'POST', signal
+    },
+      options);
+    }
+
+
+
+export const getPostWardrobeItemsItemIdRestoreMutationOptions = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postWardrobeItemsItemIdRestore>>, TError,{itemId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof postWardrobeItemsItemIdRestore>>, TError,{itemId: string}, TContext> => {
+
+const mutationKey = ['postWardrobeItemsItemIdRestore'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postWardrobeItemsItemIdRestore>>, {itemId: string}> = (props) => {
+          const {itemId} = props ?? {};
+
+          return  postWardrobeItemsItemIdRestore(itemId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostWardrobeItemsItemIdRestoreMutationResult = NonNullable<Awaited<ReturnType<typeof postWardrobeItemsItemIdRestore>>>
+
+    export type PostWardrobeItemsItemIdRestoreMutationError = void
+
+    export const usePostWardrobeItemsItemIdRestore = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postWardrobeItemsItemIdRestore>>, TError,{itemId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postWardrobeItemsItemIdRestore>>,
+        TError,
+        {itemId: string},
+        TContext
+      > => {
+      return useMutation(getPostWardrobeItemsItemIdRestoreMutationOptions(options), queryClient);
     }
     export const getWardrobeStatusStream = (
 
@@ -616,7 +676,154 @@ export function useGetWardrobeStatusStream<TData = Awaited<ReturnType<typeof get
 
 
 
-export const postWardrobeItemsIdUploadUrl = (
+export const getWardrobeItemsItemIdDependentOutfits = (
+    itemId: string,
+    params?: GetWardrobeItemsItemIdDependentOutfitsParams,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<GetWardrobeItemsItemIdDependentOutfits200>(
+      {url: `/wardrobe/items/${itemId}/dependent-outfits`, method: 'GET',
+        params, signal
+    },
+      options);
+    }
+
+
+
+
+export const getGetWardrobeItemsItemIdDependentOutfitsQueryKey = (itemId: string,
+    params?: GetWardrobeItemsItemIdDependentOutfitsParams,) => {
+    return [
+    `/wardrobe/items/${itemId}/dependent-outfits`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetWardrobeItemsItemIdDependentOutfitsQueryOptions = <TData = Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>, TError = void>(itemId: string,
+    params?: GetWardrobeItemsItemIdDependentOutfitsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetWardrobeItemsItemIdDependentOutfitsQueryKey(itemId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>> = ({ signal }) => getWardrobeItemsItemIdDependentOutfits(itemId,params, requestOptions, signal);
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: !!(itemId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetWardrobeItemsItemIdDependentOutfitsQueryResult = NonNullable<Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>>
+export type GetWardrobeItemsItemIdDependentOutfitsQueryError = void
+
+
+export function useGetWardrobeItemsItemIdDependentOutfits<TData = Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>, TError = void>(
+ itemId: string,
+    params: undefined |  GetWardrobeItemsItemIdDependentOutfitsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>,
+          TError,
+          Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetWardrobeItemsItemIdDependentOutfits<TData = Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>, TError = void>(
+ itemId: string,
+    params?: GetWardrobeItemsItemIdDependentOutfitsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>,
+          TError,
+          Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetWardrobeItemsItemIdDependentOutfits<TData = Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>, TError = void>(
+ itemId: string,
+    params?: GetWardrobeItemsItemIdDependentOutfitsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useGetWardrobeItemsItemIdDependentOutfits<TData = Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>, TError = void>(
+ itemId: string,
+    params?: GetWardrobeItemsItemIdDependentOutfitsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getWardrobeItemsItemIdDependentOutfits>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetWardrobeItemsItemIdDependentOutfitsQueryOptions(itemId,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+export const deleteWardrobeItemsItemId = (
+    itemId: string,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<DeleteWardrobeItemsItemId200>(
+      {url: `/wardrobe/items/${itemId}`, method: 'DELETE', signal
+    },
+      options);
+    }
+
+
+
+export const getDeleteWardrobeItemsItemIdMutationOptions = <TError = void | DeleteWardrobeItemsItemId409 | DeleteWardrobeItemsItemId502,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteWardrobeItemsItemId>>, TError,{itemId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof deleteWardrobeItemsItemId>>, TError,{itemId: string}, TContext> => {
+
+const mutationKey = ['deleteWardrobeItemsItemId'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteWardrobeItemsItemId>>, {itemId: string}> = (props) => {
+          const {itemId} = props ?? {};
+
+          return  deleteWardrobeItemsItemId(itemId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DeleteWardrobeItemsItemIdMutationResult = NonNullable<Awaited<ReturnType<typeof deleteWardrobeItemsItemId>>>
+
+    export type DeleteWardrobeItemsItemIdMutationError = void | DeleteWardrobeItemsItemId409 | DeleteWardrobeItemsItemId502
+
+    export const useDeleteWardrobeItemsItemId = <TError = void | DeleteWardrobeItemsItemId409 | DeleteWardrobeItemsItemId502,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteWardrobeItemsItemId>>, TError,{itemId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof deleteWardrobeItemsItemId>>,
+        TError,
+        {itemId: string},
+        TContext
+      > => {
+      return useMutation(getDeleteWardrobeItemsItemIdMutationOptions(options), queryClient);
+    }
+    export const postWardrobeItemsIdUploadUrl = (
     id: string,
     postWardrobeItemsIdUploadUrlBody: PostWardrobeItemsIdUploadUrlBody,
  options?: SecondParameter<typeof customInstance>,signal?: AbortSignal

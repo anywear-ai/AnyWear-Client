@@ -8,6 +8,4 @@
 export type PatchOutfitsIdBody = {
   /** @maxLength 200 */
   name?: string;
-  /** @minItems 1 */
-  wearable_item_ids?: string[];
 };

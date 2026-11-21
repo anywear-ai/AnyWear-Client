@@ -207,6 +207,7 @@ function wardrobeItem(overrides: Partial<GetWardrobe200Item> = {}): GetWardrobe2
     imageEmbedding: null,
     createdAt: '2026-05-05T00:00:00.000Z',
     updatedAt: '2026-05-05T00:00:00.000Z',
+    archivedAt: null,
     ...overrides,
   };
 }
@@ -235,23 +236,6 @@ function deleteRequests(): Array<Record<string, any>> {
   return customInstanceMock.mock.calls
     .map(([config]) => config as unknown as Record<string, any>)
     .filter((config) => config.method === 'DELETE');
-}
-
-/** The card control that opens the delete confirmation for the named item. */
-function deleteControlFor(itemName: string) {
-  return screen.getByRole('button', { name: `Delete ${itemName}` });
-}
-
-/**
- * Opens the page's delete confirmation from a card, with focus already on the
- * control that asks — which is where a keyboard or pointer user leaves it and
- * where a declined confirmation returns it.
- */
-function openDeleteConfirmation(itemName = 'Coat') {
-  const control = deleteControlFor(itemName);
-  control.focus();
-  fireEvent.click(control);
-  return screen.getByRole('dialog', { name: 'Delete this item?' });
 }
 
 function wardrobeCache(): GetWardrobe200Item[] | undefined {
@@ -638,61 +622,28 @@ describe('WardrobePage saved outfit look cards', () => {
 });
 
 describe('WardrobePage outfit cleanup notice', () => {
-  it('renders the retained-image notice the dialog reports and dismisses it', () => {
-    renderPage({ seed: [] });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Edit Rainy Day' }));
-    const onNotice = createOutfitModal.props?.onNotice;
-    expect(onNotice).toBeTypeOf('function');
-
-    act(() => onNotice?.({ retainedObjectKeys: 2 }));
-
-    const notice = screen.getByRole('status');
-    expect(notice).toHaveTextContent('Outfit deleted. 2 images are still being cleaned up in the background.');
-
-    fireEvent.click(within(notice).getByRole('button', { name: 'Dismiss' }));
-    expect(screen.queryByRole('status')).toBeNull();
-  });
-
-  it('states one retained image in the singular', () => {
-    renderPage({ seed: [] });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Edit Rainy Day' }));
-    act(() => createOutfitModal.props?.onNotice?.({ retainedObjectKeys: 1 }));
-
-    expect(screen.getByRole('status')).toHaveTextContent(
-      'Outfit deleted. 1 image is still being cleaned up in the background.',
-    );
-  });
-
+  /**
+   * Issue 334 — a completed outfit delete no longer produces a "still cleaning up"
+   * notice, because the route deletes no object: only the outfit row goes, and its
+   * looks stay in the history. What the page owes after that delete is one refresh
+   * of the outfits list so the card leaves.
+   */
   it('refreshes the outfits list when the dialog reports a completed delete', async () => {
-    const { queryClient } = renderPage({ seed: [] });
-    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
-    fireEvent.click(screen.getByRole('button', { name: 'Edit Rainy Day' }));
+    renderPage({ seed: [] });
 
-    // A 204, a 404 and the completed 502 all run this success path, which is
-    // the page's one list refresh after a delete.
     await act(async () => {
       await createOutfitModal.props?.onSuccess?.();
     });
 
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['/outfits'] });
+    // The page invalidates the outfits query; the list read it triggers is the
+    // observable effect, and no cleanup notice is painted.
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
   });
 
-  it('keeps the notice visible when the page lists no outfits at all', () => {
-    mockOutfits({ outfits: [] });
+  it('paints no "still cleaning up" notice, because nothing is deleted but the row', () => {
     renderPage({ seed: [] });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Create Outfit' }));
-    act(() => createOutfitModal.props?.onNotice?.({ retainedObjectKeys: 3 }));
-
-    // The notice is not owned by the My Outfits block, so an emptied list keeps it.
-    expect(screen.getByText('No outfits yet')).toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent(
-      'Outfit deleted. 3 images are still being cleaned up in the background.',
-    );
-  });
-});
+    expect(screen.queryByText(/still being cleaned up/)).toBeNull();
+  });});
 
 describe('WardrobePage dialog scroll lock', () => {
   it('does not lock while the look dialog is mounted but closed', () => {
@@ -1262,260 +1213,239 @@ describe('WardrobePage list reads after confirmations', () => {
   });
 });
 
-describe('WardrobePage item delete confirmation', () => {
-  /** The Service's `DELETE /wardrobe/items/{id}` 409 body. */
-  function referencedBody(dependentResources: { resource: string; count?: number }[], hint?: string) {
-    return {
-      error: 'RESOURCE_REFERENCED',
-      message: 'The wardrobe item is still referenced by other resources',
-      details: {
-        reason: 'DEPENDENT_RESOURCES_EXIST',
-        dependent_resources: dependentResources,
-        action: 'delete_dependents_first',
-        hint: hint ?? 'Remove the item from the outfit that lists it, then delete it',
-      },
-    };
-  }
-
-  const S1 =
-    'Nothing was deleted: this item is still in 1 outfit. Remove it from that outfit, or delete the outfit. An outfit cannot be saved with no items, so if this is its only item, delete it.';
-  const S5 = 'This item is no longer in your wardrobe, so it was removed from this list.';
+/**
+ * Issue 332/334 — the item delete is reachable only from the Storage Box.
+ *
+ * The active view offers Archive; the Storage Box offers Restore and the
+ * permanent Delete, and that delete renders from `dependent-outfits`: it lists
+ * every outfit that goes, cannot confirm until the preview matches the exact
+ * `total`, and is disabled outright while any of them has a running try-on.
+ */
+describe('WardrobePage Storage Box lifecycle', () => {
+  /** The dependent-outfits preview the mocked Service answers. */
+  let dependentOutfits: { total: number; outfits: Array<Record<string, unknown>> } = { total: 0, outfits: [] };
+  let dependentOutfitsFails = false;
 
   beforeEach(() => {
-    wardrobeItems = [wardrobeItem()];
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    dependentOutfits = { total: 0, outfits: [] };
+    dependentOutfitsFails = false;
+    const base = customInstanceMock.getMockImplementation()!;
+    customInstanceMock.mockImplementation(((config: Record<string, any>) => {
+      if (config.method === 'GET' && typeof config.url === 'string'
+        && config.url.endsWith('/dependent-outfits')) {
+        if (dependentOutfitsFails) return Promise.reject({ response: { status: 503 } });
+        return Promise.resolve(dependentOutfits);
+      }
+      return base(config);
+    }) as any);
   });
 
-  it('asks in a panel the page renders, naming the item, and sends nothing yet', () => {
+  function archivedItem(overrides: Partial<GetWardrobe200Item> = {}) {
+    return wardrobeItem({ archivedAt: '2026-03-01T09:00:00.000Z', ...overrides });
+  }
+
+  async function openStorageBox(items: GetWardrobe200Item[]) {
+    // The archived view reads with rchive_status, so the mocked Service has to
+    // answer that read with the Storage Box contents.
+    wardrobeItems = items;
+    renderPage({ seed: items });
+    fireEvent.click(screen.getByRole('tab', { name: 'Storage Box' }));
+    await waitFor(() => expect(wardrobeRequests().some((request) => request.params?.archive_status === 'archived')).toBe(true));
+    // The archived read has to land before a card exists.
+    await screen.findByRole('button', { name: 'Delete Coat permanently' });
+  }
+
+  it('offers Archive on an active card and no permanent Delete', () => {
     renderPage({ seed: [wardrobeItem()] });
 
-    const panel = openDeleteConfirmation();
+    expect(screen.getByRole('button', { name: 'Archive Coat' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Delete Coat/ })).toBeNull();
+  });
 
-    expect(panel).toHaveTextContent('Coat will be removed from your wardrobe. This cannot be undone.');
-    expect(within(panel).getByRole('button', { name: 'Delete item' })).toBeInTheDocument();
+  it('reads the Storage Box with archive_status=archived', async () => {
+    await openStorageBox([archivedItem()]);
+
+    const request = wardrobeRequests().find((entry) => entry.params?.archive_status === 'archived');
+    expect(request).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Restore Coat' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete Coat permanently' })).toBeInTheDocument();
+  });
+
+  it('lists every dependent outfit and its record count before confirming', async () => {
+    dependentOutfits = {
+      total: 2,
+      outfits: [
+        { id: 'outfit-1', name: 'Weekend', generationCount: 3, hasActiveGeneration: false },
+        { id: 'outfit-2', name: 'Office', generationCount: 0, hasActiveGeneration: false },
+      ],
+    };
+    await openStorageBox([archivedItem()]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getAllByTestId('dependent-outfit')).toHaveLength(2));
+    expect(panel).toHaveTextContent('Weekend');
+    expect(panel).toHaveTextContent('3 try-ons');
+    expect(panel).toHaveTextContent('also deletes 2 outfits');
+    expect(panel).toHaveTextContent('stay in your history');
+    const confirm = within(panel).getByRole('button', { name: 'Delete permanently' });
+    expect(confirm).toBeEnabled();
     expect(deleteRequests()).toEqual([]);
   });
 
-  it('names the item by its category when it has no name', () => {
-    wardrobeItems = [wardrobeItem({ name: null })];
-    renderPage({ seed: [wardrobeItem({ name: null })] });
+  it('keeps confirmation disabled while any dependent outfit has a running try-on', async () => {
+    dependentOutfits = {
+      total: 1,
+      outfits: [{ id: 'outfit-1', name: 'Weekend', generationCount: 1, hasActiveGeneration: true }],
+    };
+    await openStorageBox([archivedItem()]);
 
-    const panel = openDeleteConfirmation('Outerwear');
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
 
-    expect(panel).toHaveTextContent('Outerwear will be removed from your wardrobe. This cannot be undone.');
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeDisabled());
+    expect(within(panel).getByTestId('running-try-on-notice')).toHaveTextContent('Weekend');
+    expect(within(panel).queryByRole('button', { name: /anyway/i })).toBeNull();
   });
 
-  it('leaves the axios instance without a DELETE when the confirmation is declined', () => {
-    renderPage({ seed: [wardrobeItem()] });
+  it('keeps confirmation disabled and offers a retry when the preview fails', async () => {
+    dependentOutfitsFails = true;
+    await openStorageBox([archivedItem()]);
 
-    const panel = openDeleteConfirmation();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeDisabled());
+    expect(within(panel).getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  it('sends nothing when the confirmation is declined', async () => {
+    dependentOutfits = { total: 1, outfits: [{ id: 'outfit-1', name: 'Weekend', generationCount: 0, hasActiveGeneration: false }] };
+    await openStorageBox([archivedItem()]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeEnabled());
     fireEvent.click(within(panel).getByRole('button', { name: 'Cancel' }));
 
-    expect(screen.queryByRole('dialog', { name: 'Delete this item?' })).toBeNull();
     expect(deleteRequests()).toEqual([]);
-    expect(wardrobeCache()?.map((item) => item.id)).toEqual(['item-1']);
   });
 
-  it('calls DELETE /wardrobe/items/{id} exactly once when the confirmation is accepted', async () => {
-    deleteHandler = () => {
-      wardrobeItems = [];
-      return Promise.resolve({});
-    };
-    renderPage({ seed: [wardrobeItem()] });
+  it('issues exactly one DELETE and removes the card when confirmed', async () => {
+    dependentOutfits = { total: 1, outfits: [{ id: 'outfit-1', name: 'Weekend', generationCount: 2, hasActiveGeneration: false }] };
+    await openStorageBox([archivedItem()]);
 
-    const panel = openDeleteConfirmation();
-    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeEnabled());
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete permanently' }));
 
     await waitFor(() => expect(deleteRequests()).toHaveLength(1));
-    expect(deleteRequests()[0]).toMatchObject({ method: 'DELETE', url: '/wardrobe/items/item-1' });
+    expect(deleteRequests()[0].url).toBe('/wardrobe/items/item-1');
   });
 
-  it('reads Deleting... with every exit inert while the request is out', async () => {
-    let release!: () => void;
-    const settled = new Promise<void>((resolve) => { release = resolve; });
-    deleteHandler = () => {
-      wardrobeItems = [];
-      return settled;
-    };
-    renderPage({ seed: [wardrobeItem()] });
+  it('states the already-gone outcome for a 404 without treating it as a failure', async () => {
+    dependentOutfits = { total: 0, outfits: [] };
+    deleteHandler = () => Promise.reject({ response: { status: 404 } });
+    await openStorageBox([archivedItem()]);
 
-    const panel = openDeleteConfirmation();
-    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeEnabled());
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete permanently' }));
 
-    const affirmative = await screen.findByRole('button', { name: 'Deleting...' });
-    expect(affirmative).toBeDisabled();
-    const stillOpen = screen.getByRole('dialog', { name: 'Delete this item?' });
-    expect(within(stillOpen).getByRole('button', { name: 'Cancel' })).toBeDisabled();
-
-    // No exit closes the panel or sends a second request in that window.
-    fireEvent.keyDown(document, { key: 'Escape' });
-    fireEvent.click(screen.getByTestId('delete-item-dialog-backdrop'));
-    fireEvent.click(within(stillOpen).getByRole('button', { name: 'Cancel' }));
-
-    expect(screen.getByRole('dialog', { name: 'Delete this item?' })).toBeInTheDocument();
-    expect(deleteRequests()).toHaveLength(1);
-
-    await act(async () => {
-      release();
-      await settled;
-    });
-
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Delete Coat' })).toBeNull());
-    expect(deleteRequests()).toHaveLength(1);
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('no longer in your wardrobe'));
   });
 
-  it('renders S1 for an outfit refusal and keeps the card', async () => {
+  it('explains the Storage Box gate when the Service answers ITEM_NOT_ARCHIVED', async () => {
+    dependentOutfits = { total: 0, outfits: [] };
     deleteHandler = () => Promise.reject({
-      response: { status: 409, data: referencedBody([{ resource: 'outfit', count: 1 }]) },
+      response: {
+        status: 409,
+        data: { error: 'ITEM_NOT_ARCHIVED', message: 'not archived', details: { itemId: 'item-1' } },
+      },
     });
-    renderPage({ seed: [wardrobeItem()] });
+    await openStorageBox([archivedItem()]);
 
-    const panel = openDeleteConfirmation();
-    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeEnabled());
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete permanently' }));
 
-    const alert = await waitFor(() => screen.getByRole('alert'));
-    expect(alert).toHaveTextContent(S1);
-    // The panel stays up with its sentence, and the item stays in the grid and
-    // in every cached list.
-    expect(screen.getByRole('dialog', { name: 'Delete this item?' })).toBeInTheDocument();
-    expect(deleteControlFor('Coat')).toBeInTheDocument();
-    expect(wardrobeCache()?.map((item) => item.id)).toEqual(['item-1']);
+    await waitFor(() => expect(within(panel).getByRole('alert')).toHaveTextContent('Storage Box'));
   });
 
-  const failureCases: Array<[string, unknown, string]> = [
-    [
-      'S2 for a 409 naming three outfits',
-      { response: { status: 409, data: referencedBody([{ resource: 'outfit', count: 3 }]) } },
-      'Nothing was deleted: this item is still in 3 outfits. Remove it from those outfits, or delete them. An outfit cannot be saved with no items, so an outfit holding only this item has to be deleted.',
-    ],
-    [
-      'S3 for a 409 naming an outfit with no count',
-      { response: { status: 409, data: referencedBody([{ resource: 'outfit' }]) } },
-      'Nothing was deleted: this item is still in one or more outfits. Remove it from those outfits, or delete them. An outfit cannot be saved with no items, so an outfit holding only this item has to be deleted.',
-    ],
-    [
-      'S4 for a 409 naming another resource',
-      { response: { status: 409, data: referencedBody([{ resource: 'outfit_generation', count: 2 }], 'Delete the try-on first.') } },
-      'Delete the try-on first.',
-    ],
-    [
-      'S6 for a 503',
-      { response: { status: 503, data: {} } },
-      'Could not delete this item (server error 503). Try again.',
-    ],
-    [
-      'S7 for a request that never reached the Service',
-      { isAxiosError: true, request: {}, message: 'Network Error' },
-      'Could not reach the server. Check your connection and try again.',
-    ],
-  ];
+  it('names the running try-on when the Service answers GENERATION_IN_PROGRESS', async () => {
+    dependentOutfits = { total: 0, outfits: [] };
+    deleteHandler = () => Promise.reject({
+      response: {
+        status: 409,
+        data: {
+          error: 'GENERATION_IN_PROGRESS',
+          message: 'still running',
+          details: {
+            generation_id: 'gen-1',
+            status: 'Pending',
+            blocking: [{ outfitId: 'outfit-1', outfitName: 'Weekend', generationId: 'gen-1', status: 'Pending' }],
+          },
+        },
+      },
+    });
+    await openStorageBox([archivedItem()]);
 
-  it.each(failureCases)('renders %s in the panel and keeps the card', async (_label, rejection, expected) => {
-    deleteHandler = () => Promise.reject(rejection);
-    renderPage({ seed: [wardrobeItem()] });
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeEnabled());
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete permanently' }));
 
-    const panel = openDeleteConfirmation();
-    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
-
-    const alert = await waitFor(() => screen.getByRole('alert'));
-    expect(alert).toHaveTextContent(expected);
-    expect(deleteControlFor('Coat')).toBeInTheDocument();
+    await waitFor(() => expect(within(panel).getByRole('alert')).toHaveTextContent('"Weekend"'));
   });
 
-  it('removes the card and states S5 in the page notice for a 404', async () => {
-    deleteHandler = () => {
-      wardrobeItems = [];
-      return Promise.reject({ response: { status: 404, data: { error: 'NOT_FOUND', message: 'Wardrobe item not found' } } });
-    };
-    renderPage({ seed: [wardrobeItem()] });
+  it('closes with a cleanup notice when the Service answers the gallery 502', async () => {
+    dependentOutfits = { total: 0, outfits: [] };
+    deleteHandler = () => Promise.reject({
+      response: {
+        status: 502,
+        data: {
+          error: 'OBJECT_DELETION_INCOMPLETE',
+          message: 'rows deleted, object retained',
+          details: { manifest_id: 'm-1', manifest_ids: ['m-1'], retained_object_keys: ['wearable-items/user-1/coat.jpg'] },
+        },
+      },
+    });
+    await openStorageBox([archivedItem()]);
 
-    const panel = openDeleteConfirmation();
-    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeEnabled());
+    fireEvent.click(within(panel).getByRole('button', { name: 'Delete permanently' }));
 
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete this item?' })).toBeNull());
-    expect(screen.queryByRole('button', { name: 'Delete Coat' })).toBeNull();
-    const notice = await screen.findByRole('status');
-    expect(notice).toHaveTextContent(S5);
-    expect(notice).not.toHaveTextContent('outfit');
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('cleaned up in the background'));
   });
 
-  it('removes the card without a reload after a successful delete', async () => {
-    deleteHandler = () => {
-      wardrobeItems = [];
-      return Promise.resolve({});
-    };
-    const hrefBefore = window.location.href;
-    renderPage({ seed: [wardrobeItem()] });
-    expect(wardrobeRequests()).toHaveLength(0);
-
-    const panel = openDeleteConfirmation();
-    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
-
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Delete Coat' })).toBeNull());
-    // The row leaves every cached wardrobe list and one merged read follows.
-    expect(wardrobeCache()).toEqual([]);
-    await waitFor(() => expect(wardrobeRequests()).toHaveLength(1));
-    expect(window.location.href).toBe(hrefBefore);
-  });
-
-  it('wraps Tab inside the panel and focuses Cancel first', () => {
+  it('archives from the active view with one request and no confirmation', async () => {
     renderPage({ seed: [wardrobeItem()] });
 
-    const panel = openDeleteConfirmation();
-    const cancel = within(panel).getByRole('button', { name: 'Cancel' });
-    const confirm = within(panel).getByRole('button', { name: 'Delete item' });
+    fireEvent.click(screen.getByRole('button', { name: 'Archive Coat' }));
 
-    expect(document.activeElement).toBe(cancel);
-
-    confirm.focus();
-    expect(fireEvent.keyDown(document, { key: 'Tab' })).toBe(false);
-    expect(document.activeElement).toBe(cancel);
-  });
-
-  it('declines on Escape and returns focus to the card control that asked', () => {
-    renderPage({ seed: [wardrobeItem()] });
-
-    const control = deleteControlFor('Coat');
-    control.focus();
-    fireEvent.click(control);
-    expect(document.activeElement).not.toBe(control);
-
-    fireEvent.keyDown(document, { key: 'Escape' });
-
-    expect(screen.queryByRole('dialog', { name: 'Delete this item?' })).toBeNull();
-    expect(document.activeElement).toBe(control);
+    await waitFor(() => expect(customInstanceMock.mock.calls.some(([config]) =>
+      (config as Record<string, any>).method === 'POST'
+      && String((config as Record<string, any>).url).endsWith('/archive'))).toBe(true));
     expect(deleteRequests()).toEqual([]);
   });
 
-  it('locks the body while the panel is open and releases it on close', () => {
-    renderPage({ seed: [wardrobeItem()] });
-    expect(document.body.style.overflow).toBe('');
+  it('restores from the Storage Box with one request', async () => {
+    await openStorageBox([archivedItem()]);
 
-    const panel = openDeleteConfirmation();
-    expect(document.body.style.overflow).toBe('hidden');
+    fireEvent.click(screen.getByRole('button', { name: 'Restore Coat' }));
 
-    fireEvent.click(within(panel).getByRole('button', { name: 'Cancel' }));
-    expect(document.body.style.overflow).toBe('');
+    await waitFor(() => expect(customInstanceMock.mock.calls.some(([config]) =>
+      (config as Record<string, any>).method === 'POST'
+      && String((config as Record<string, any>).url).endsWith('/restore'))).toBe(true));
   });
-
-  it('moves focus to the grid region after a confirmed delete', async () => {
-    deleteHandler = () => {
-      wardrobeItems = [];
-      return Promise.resolve({});
-    };
-    renderPage({ seed: [wardrobeItem()] });
-
-    const panel = openDeleteConfirmation();
-    fireEvent.click(within(panel).getByRole('button', { name: 'Delete item' }));
-
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Delete Coat' })).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(
-      screen.getByRole('region', { name: 'Wardrobe items' }),
-    ));
-  });
-});
-
-describe('WardrobePage outcomes of the item details dialog', () => {
+});describe('WardrobePage outcomes of the item details dialog', () => {
   const S5 = 'This item is no longer in your wardrobe, so it was removed from this list.';
 
   beforeEach(() => {

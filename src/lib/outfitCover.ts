@@ -71,3 +71,28 @@ export function outfitActionLabel(outfit: OutfitLookState): string {
   if (outfit.look) return 'New look';
   return 'Generate look';
 }
+
+/** The outfit carries a look record at all, whether or not this read could sign it. */
+export function outfitHasLook(outfit: OutfitLookState | null | undefined): boolean {
+  return (outfit?.look ?? null) !== null;
+}
+
+/**
+ * The sentence the compose step shows after `Save outfit` succeeds.
+ *
+ * `POST /outfits` is find-or-create: a `201` creates the set, a `200` returns the
+ * outfit that already holds it — and that outfit may already carry a look. The
+ * notice therefore follows the look the response returned instead of assuming the
+ * set is new, and it names the same thing the card names: a rendered look, or
+ * `Generate look` on a set that has none. Both statuses are success and the Client
+ * does not branch on the status code, only on the returned body.
+ */
+export function describeSavedOutfitNotice(
+  outfit: OutfitLookState & { name?: string | null },
+): string {
+  const name = outfit.name || 'This outfit';
+  if (outfitHasLook(outfit)) {
+    return `Matched an existing outfit — ${name} already has a look for this combination.`;
+  }
+  return `${name} is saved in My Outfits with no look yet. Generate look on its card renders it later.`;
+}

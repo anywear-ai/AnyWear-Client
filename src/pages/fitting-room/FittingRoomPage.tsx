@@ -31,6 +31,7 @@ import {
 } from '../../api/endpoints/fitting-rooms/fitting-rooms';
 import { resolveBasePhotoSelection } from '../../lib/basePhotoSelection';
 import { describeSelectionRefusal } from '../../lib/fittingRoomRefusal';
+import { describeSavedOutfitNotice } from '../../lib/outfitCover';
 import { getErrorMessage } from '../../lib/errors';
 import { isClientVersionRefused } from '../../store/clientVersionRefusalStore';
 import type { PostVtoGenerationsBody } from '../../api/model/postVtoGenerationsBody';
@@ -153,6 +154,19 @@ export default function FittingRoomPage() {
   );
   const matchedOutfit = lookupIds.length > 0 ? lookupQuery.data?.outfit ?? null : null;
   const isLookingUpOutfit = lookupIds.length > 0 && lookupQuery.isLoading;
+  /**
+   * A lookup that is actually running for the current ticked set.
+   *
+   * Pressing the button in this window would send Mode B and charge a credit
+   * without the matched-outfit confirmation ever rendering, which is the one thing
+   * the pre-charge lookup exists to prevent. Both flags are read: `isLoading`
+   * covers the first read, `isFetching` the moment a re-read of the same key is in
+   * flight. With the switch off the lookup is disabled, so `Save outfit` is never
+   * held by this.
+   */
+  const isLookupInFlight = tryItOnNow
+    && lookupIds.length > 0
+    && (lookupQuery.isLoading || lookupQuery.isFetching === true);
   const lookupError = lookupQuery.error;
 
   /**
@@ -287,6 +301,9 @@ export default function FittingRoomPage() {
   // ── Compose ───────────────────────────────────────────────────────────────
   const handleGenerate = useCallback(async () => {
     if (!selectedBasePhotoId || tickedInRoom.length === 0) return;
+    // Hold the click until the lookup settles: a hit has to reach the confirmation
+    // and go out as Mode A, never as a Mode B that spends the credit first.
+    if (lookupQuery.isFetching) return;
     // The lookup is the first request of this path, so its refusal is handled
     // here before anything is charged: the same untick, re-read and retry sentence
     // the write paths produce.
@@ -315,7 +332,7 @@ export default function FittingRoomPage() {
     } catch (error) {
       handleRefusal(error);
     }
-  }, [selectedBasePhotoId, tickedInRoom, lookupError, handleRefusal, matchedOutfit, generate, prompt]);
+  }, [selectedBasePhotoId, tickedInRoom, lookupQuery.isFetching, lookupError, handleRefusal, matchedOutfit, generate, prompt]);
 
   const handleSaveOutfit = useCallback(async () => {
     if (tickedInRoom.length === 0) return;
@@ -327,9 +344,10 @@ export default function FittingRoomPage() {
       // `customInstance` resolves any 2xx to the body, so there is nothing to branch on.
       const saved = await saveOutfit({ data: { wearable_item_ids: tickedInRoom } });
       await queryClient.invalidateQueries({ queryKey: ['/outfits'] as const });
-      setNotice(
-        `${saved.name || 'This outfit'} is saved in My Outfits with no look yet. Generate one from its card whenever you like.`,
-      );
+      // A `200` returns the outfit that already holds this set, and it may already
+      // have a rendered look; the notice follows the look the response carries
+      // rather than assuming the set is new.
+      setNotice(describeSavedOutfitNotice(saved));
     } catch (error) {
       handleRefusal(error);
     } finally {
@@ -348,7 +366,9 @@ export default function FittingRoomPage() {
 
   const hasTicks = tickedInRoom.length > 0;
   const isBusy = isStarting || isPolling || isSaving;
-  const canCompose = hasTicks && !isBusy && (tryItOnNow ? !!selectedBasePhotoId : true);
+  // The lookup is part of the generate path, so the control is held while it is
+  // in flight. `Save outfit` looks nothing up, so switching off releases it.
+  const canCompose = hasTicks && !isBusy && !isLookupInFlight && (tryItOnNow ? !!selectedBasePhotoId : true);
 
   return (
     <MirrorErrorBoundary>

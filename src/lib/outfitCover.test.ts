@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   coverPlaceholder,
+  describeSavedOutfitNotice,
   outfitActionLabel,
   outfitCoverState,
   outfitLookIsImageUnavailable,
@@ -52,6 +53,44 @@ describe('the two no-image states never collapse', () => {
     const unsigned = { latestGeneration: COMPLETED, look: { generationId: 'gen-1', url: null } };
     expect(outfitCoverState(unsigned)).not.toBe('never-generated');
     expect(outfitWasNeverGenerated(unsigned)).toBe(false);
+  });
+});
+
+describe('the save notice follows the returned outfit', () => {
+  it('reports a match that already has a look without claiming no look yet', () => {
+    const notice = describeSavedOutfitNotice({
+      name: 'Weekend Casual',
+      latestGeneration: COMPLETED,
+      look: { generationId: 'gen-1', url: 'https://example.com/a.png' },
+    });
+
+    expect(notice).toContain('Matched an existing outfit');
+    expect(notice).toContain('Weekend Casual');
+    expect(notice).toMatch(/already has a look for this combination/);
+    expect(notice).not.toMatch(/no look yet/i);
+  });
+
+  it('reports a saved set without a look and names Generate look', () => {
+    const notice = describeSavedOutfitNotice({ name: null, latestGeneration: null, look: null });
+
+    expect(notice).toContain('This outfit');
+    expect(notice).toContain('no look yet');
+    expect(notice).toContain('Generate look on its card');
+    expect(notice).not.toContain('Matched an existing outfit');
+  });
+
+  it('keeps the matched branch for a look whose url was not signed, because a look still exists', () => {
+    // The card paints `Image unavailable` for this response; the notice must not
+    // claim the set has no look when the response carries one.
+    const unsigned = { latestGeneration: COMPLETED, look: { generationId: 'gen-1', url: null } };
+    expect(outfitCoverState(unsigned)).toBe('image-unavailable');
+    expect(describeSavedOutfitNotice({ name: 'Weekend Casual', ...unsigned }))
+      .toContain('Matched an existing outfit');
+  });
+
+  it('says no look yet only when the response carries no look record', () => {
+    expect(describeSavedOutfitNotice({ name: 'Weekend Casual', latestGeneration: null, look: null }))
+      .toContain('no look yet');
   });
 });
 

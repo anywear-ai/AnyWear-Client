@@ -435,6 +435,110 @@ describe('FittingRoomPage compose paths', () => {
     expect(screen.getByRole('button', { name: 'Deselect T-Shirt' })).toBeInTheDocument();
   });
 
+  /**
+   * `POST /outfits` is find-or-create: a `200` returns an outfit that already holds
+   * this set, and that outfit may already have a look. The notice follows what the
+   * response returned, using the same two states the Wardrobe card paints, so a
+   * matched outfit with a look is never called "no look yet".
+   */
+  it('reports a matched outfit that already has a look, without claiming no look', async () => {
+    saveOutfit.mockResolvedValue({
+      id: 'outfit-1',
+      name: 'Weekend Casual',
+      latestGeneration: { id: 'gen-1', status: 'Complete', errorCode: null, createdAt: '2026-06-01T00:00:00.000Z' },
+      look: { generationId: 'gen-1', url: 'https://example.com/look.png', createdAt: '2026-06-01T00:00:00.000Z' },
+    });
+    renderPage();
+
+    tick('T-Shirt');
+    fireEvent.click(screen.getByRole('switch', { name: 'Try it on now (1 credit)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save outfit' }));
+
+    const notice = await screen.findByRole('status');
+    expect(notice).toHaveTextContent('Matched an existing outfit');
+    expect(notice).toHaveTextContent('Weekend Casual');
+    expect(notice).toHaveTextContent('already has a look for this combination');
+    expect(notice).not.toHaveTextContent(/no look yet/i);
+  });
+
+  it('reports a set saved without a look, naming Generate look as the way to render it', async () => {
+    saveOutfit.mockResolvedValue({
+      id: 'outfit-1',
+      name: 'T-Shirt, Jeans',
+      latestGeneration: null,
+      look: null,
+    });
+    renderPage();
+
+    tick('T-Shirt');
+    fireEvent.click(screen.getByRole('switch', { name: 'Try it on now (1 credit)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save outfit' }));
+
+    const notice = await screen.findByRole('status');
+    expect(notice).toHaveTextContent('no look yet');
+    expect(notice).toHaveTextContent('Generate look on its card');
+    expect(notice).not.toHaveTextContent(/Matched an existing outfit/);
+  });
+
+  /**
+   * The lookup is the step that shows a matched outfit before a credit is spent, so
+   * a click during it must not send Mode B. The control is held until the lookup
+   * settles; a hit then reaches the confirmation and the next click is Mode A.
+   */
+  it('holds the compose action during the in-flight lookup, then sends Mode A once the hit renders', async () => {
+    vi.mocked(useGetOutfitsLookup).mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isFetching: true,
+      error: undefined,
+    } as never);
+    const { rerenderPage } = renderPage();
+
+    tick('T-Shirt');
+
+    const held = screen.getByRole('button', { name: 'Generate try-on' });
+    expect(held).toBeDisabled();
+    fireEvent.click(held);
+    expect(generate).not.toHaveBeenCalled();
+
+    // The lookup resolves to a hit: the confirmation renders and the control opens.
+    vi.mocked(useGetOutfitsLookup).mockReturnValue({
+      data: { outfit: { id: 'outfit-9', name: 'Weekend Casual', generationCount: 2 } },
+      isLoading: false,
+      isFetching: false,
+      error: undefined,
+    } as never);
+    rerenderPage();
+
+    expect(screen.getByTestId('outfit-lookup-hit')).toHaveTextContent('Weekend Casual');
+    const ready = screen.getByRole('button', { name: 'Generate try-on' });
+    expect(ready).toBeEnabled();
+
+    fireEvent.click(ready);
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    const body = generate.mock.calls[0][0] as Record<string, unknown>;
+    expect(body).toMatchObject({ base_photo_id: 'photo-own', outfit_id: 'outfit-9' });
+    expect(body.wearable_item_ids).toBeUndefined();
+  });
+
+  it('never holds Save outfit, because the save path looks nothing up', () => {
+    // A lookup would be in flight for the same ticks with the switch on; the off
+    // path makes no request, so its control has nothing to wait for.
+    vi.mocked(useGetOutfitsLookup).mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isFetching: true,
+      error: undefined,
+    } as never);
+    renderPage();
+
+    tick('T-Shirt');
+    fireEvent.click(screen.getByRole('switch', { name: 'Try it on now (1 credit)' }));
+
+    expect(screen.getByRole('button', { name: 'Save outfit' })).toBeEnabled();
+  });
+
   it('saves with a drained balance because no credit is charged', () => {
     vi.mocked(useGetUsersMe).mockReturnValue({ data: { dailyCredits: 0 } } as never);
     renderPage();

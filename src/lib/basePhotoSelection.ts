@@ -1,6 +1,6 @@
 import type { GetVtoBasePhotos200Item } from '../api/model/getVtoBasePhotos200Item';
 
-/** Where The Mirror's effective base-photo selection came from. */
+/** Where the Fitting Room's effective base-photo selection came from. */
 export type BasePhotoSelectionSource = 'chosen' | 'default' | 'none';
 
 export interface BasePhotoSelection {
@@ -9,7 +9,7 @@ export interface BasePhotoSelection {
 }
 
 /**
- * Resolve the base photo The Mirror shows from the photo list and the user's
+ * Resolve the base photo the Fitting Room shows from the photo list and the user's
  * explicit choice.
  *
  * The API flags the caller's effective default on the list it returns (the

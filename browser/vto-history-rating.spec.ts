@@ -1,12 +1,13 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import type { GetVtoGenerations200GenerationsItem } from '../src/api/model/getVtoGenerations200GenerationsItem';
-import { mockClientBoundaries, expectOnlyMockedCalls } from './mock-boundaries';
+import { mockClientBoundaries, mockFittingRoom, expectOnlyMockedCalls } from './mock-boundaries';
 import { mockAmplifySession } from './auth-session';
 
 const UNRATED_ID = '11111111-1111-4111-8111-111111111111';
 const RATED_ID = '22222222-2222-4222-8222-222222222222';
 const FAILED_ID = '33333333-3333-4333-8333-333333333333';
 const RESULT_URL = 'https://example.com/vto-result.png';
+const FITTING_ROOM_ID = '99999999-9999-4999-8999-999999999999';
 
 const ITEMS = [
   { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', name: 'T-Shirt', category: 'Top', images: [] },
@@ -67,25 +68,27 @@ interface RatingRequest {
   body: unknown;
 }
 
-interface MirrorState {
+interface FittingRoomState {
   generations: GetVtoGenerations200GenerationsItem[];
   ratingRequests: RatingRequest[];
 }
 
-function createState(): MirrorState {
+function createState(): FittingRoomState {
   return { generations: historyRows(), ratingRequests: [] };
 }
 
 /**
- * The `/mirror` surface, mocked after `mockClientBoundaries`.
+ * The `/fitting-room` surface, mocked after `mockClientBoundaries`.
  *
  * The rating route is registered first: the list route is registered after it
  * and therefore answers first, so it must fall back for the rating path instead
  * of swallowing it. The stateful rating route stores the value it received, and
  * the list route then returns it, which is what the card's refetch reads.
  */
-async function setupMirror(page: Page, state: MirrorState) {
+async function setupFittingRoom(page: Page, state: FittingRoomState) {
   await mockClientBoundaries(page);
+  // Issue 313 — the Fitting Room's two room reads.
+  await mockFittingRoom(page, { id: FITTING_ROOM_ID });
 
   await page.route('http://localhost:3000/**', async (route, request) => {
     const path = new URL(request.url()).pathname;
@@ -183,8 +186,8 @@ test.describe('VTO history rating overlay (mocked Client integration)', () => {
 
   test('the fourth star receives the pointer while the actions are idle, hover-revealed and focus-revealed', async ({ page }) => {
     const state = createState();
-    await setupMirror(page, state);
-    await page.goto('/mirror');
+    await setupFittingRoom(page, state);
+    await page.goto('/fitting-room');
 
     const card = rowCard(page, 0);
     const overlay = rowOverlay(page, 0);
@@ -211,8 +214,8 @@ test.describe('VTO history rating overlay (mocked Client integration)', () => {
 
   test('an unforced click on the fourth star sends the rating and the card reads it back read-only', async ({ page }) => {
     const state = createState();
-    await setupMirror(page, state);
-    await page.goto('/mirror');
+    await setupFittingRoom(page, state);
+    await page.goto('/fitting-room');
 
     const card = rowCard(page, 0);
     const star = card.getByRole('radio', { name: '4 stars' });
@@ -228,8 +231,8 @@ test.describe('VTO history rating overlay (mocked Client integration)', () => {
 
   test('Enter and Space activate a star and send the same request as the pointer path', async ({ page }) => {
     const state = createState();
-    await setupMirror(page, state);
-    await page.goto('/mirror');
+    await setupFittingRoom(page, state);
+    await page.goto('/fitting-room');
 
     const star = rowCard(page, 0).getByRole('radio', { name: '4 stars' });
     await expect(star).toBeVisible();
@@ -257,8 +260,8 @@ test.describe('VTO history rating overlay (mocked Client integration)', () => {
     test(`the action set fits inside the media box at ${width} px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       const state = createState();
-      await setupMirror(page, state);
-      await page.goto('/mirror');
+      await setupFittingRoom(page, state);
+      await page.goto('/fitting-room');
 
       const expectedActions = [
         ['View Full', 'Reuse Outfit', 'Delete'],
@@ -303,8 +306,8 @@ test.describe('VTO history rating overlay (mocked Client integration)', () => {
     // delivery makes starts at the 390 px layout.
     await page.setViewportSize({ width: 320, height: 900 });
     const state = createState();
-    await setupMirror(page, state);
-    await page.goto('/mirror');
+    await setupFittingRoom(page, state);
+    await page.goto('/fitting-room');
 
     const card = rowCard(page, 0);
     const fifthStar = card.getByRole('radio', { name: '5 stars' });
@@ -321,8 +324,8 @@ test.describe('VTO history rating overlay (mocked Client integration)', () => {
 
   test('a rated card exposes no star and sends no rating request when its read-only value is pressed', async ({ page }) => {
     const state = createState();
-    await setupMirror(page, state);
-    await page.goto('/mirror');
+    await setupFittingRoom(page, state);
+    await page.goto('/fitting-room');
 
     const rated = page.getByText('Your rating: 4/5', { exact: true });
     await expect(rated).toBeVisible();

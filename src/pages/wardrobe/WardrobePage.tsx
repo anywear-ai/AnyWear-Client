@@ -9,13 +9,15 @@ import {
 import { useGetOutfits } from '../../api/endpoints/outfits/outfits';
 import { usePostVtoGenerations } from '../../api/endpoints/vto/vto';
 import AddItemModal from './AddItemModal';
-import CreateOutfitModal from './CreateOutfitModal';
+import OutfitModal from './OutfitModal';
 import ItemDetailsModal from './ItemDetailsModal';
 import GenerateLookDialog from './GenerateLookDialog';
 import DeleteItemDialog from './DeleteItemDialog';
 import CachedImage from '../../components/CachedImage';
+import OutfitCoverPlaceholder from '../../components/OutfitCoverPlaceholder';
 import OutfitLookBadge from '../../components/OutfitLookBadge';
 import { getOutfitLookImage } from '../../lib/image-utils';
+import { outfitCoverState, coverPlaceholder, outfitActionLabel } from '../../lib/outfitCover';
 import { outfitHasActiveGeneration, outfitLookRefetchInterval, type OutfitLookState } from '../../lib/outfit-look';
 import { getErrorMessage } from '../../lib/errors';
 import {
@@ -69,43 +71,6 @@ function getMaterialFromAttributes(styleAttributes: unknown): string | null {
   if (!styleAttributes || typeof styleAttributes !== 'object') return null;
   const sa = styleAttributes as Record<string, unknown>;
   return typeof sa.material === 'string' ? sa.material : null;
-}
-
-type OutfitCoverState = 'look' | 'generating' | 'failed' | 'image-unavailable' | 'empty';
-
-/** The cover copy of the states that have no image to paint. */
-const COVER_PLACEHOLDER: Record<Exclude<OutfitCoverState, 'look' | 'generating'>, string> = {
-  failed: 'Last try-on failed',
-  'image-unavailable': 'Image unavailable',
-  empty: 'No look yet',
-};
-
-/**
- * The cover the card paints, in precedence order: a completed look with a
- * signed URL, then a running generation (which outranks the failed and empty
- * states), then a failed last generation, then a completed look whose URL the
- * Service could not sign, and finally no generation at all.
- */
-function outfitCoverState(outfit: GetOutfits200OutfitsItem): OutfitCoverState {
-  if (getOutfitLookImage(outfit.look)) return 'look';
-  if (outfitHasActiveGeneration(outfit)) return 'generating';
-  if (outfit.latestGeneration?.status === 'Failed') return 'failed';
-  if (outfit.look) return 'image-unavailable';
-  return 'empty';
-}
-
-/** The placeholder sentence a cover state paints, or null when it paints an image or skeleton. */
-function coverPlaceholder(state: OutfitCoverState): string | null {
-  return state === 'look' || state === 'generating' ? null : COVER_PLACEHOLDER[state];
-}
-
-/** The action the card offers; a running generation offers none. */
-function outfitActionLabel(outfit: GetOutfits200OutfitsItem): string {
-  // A failed latest generation offers Retry even while an older completed look
-  // is still painted; otherwise a completed look (signed or not) offers New look.
-  if (outfit.latestGeneration?.status === 'Failed') return 'Retry';
-  if (outfit.look) return 'New look';
-  return 'Generate look';
 }
 
 /** The page-level notice a delete that still owes image cleanup leaves behind. */
@@ -661,18 +626,12 @@ export default function WardrobePage() {
 
       {outfits.length > 0 && (
         <div className="mt-8">
-          <div className="flex justify-between items-center mb-4">
+          <div className="mb-4 flex justify-between items-center">
             <h2 className="text-xl font-semibold tracking-tight text-gray-900">My Outfits</h2>
-            <button
-              onClick={() => {
-                setSelectedOutfit(null);
-                setIsOutfitModalOpen(true);
-              }}
-              className="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700"
-            >
-              + Create Outfit
-            </button>
           </div>
+          {/* Issue 313 — `+ Create Outfit` is gone. An outfit is composed in the
+              Fitting Room, and the Wardrobe only views, renames, deletes and
+              re-renders the ones that exist, so this heading has one child. */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 sm:gap-4">
             {outfits.map((outfit) => {
               const coverState = outfitCoverState(outfit);
@@ -696,6 +655,12 @@ export default function WardrobePage() {
                           data-testid={`outfit-thumbnail-${outfit.id}`}
                           className="h-full w-full object-cover"
                         />
+                      ) : coverState === 'never-generated' ? (
+                        // The bundled placeholder: `latestGeneration` and `look` are
+                        // both null, so this outfit has never been rendered. It is a
+                        // graphic plus `Generate look`, never the image-unavailable
+                        // state, and it makes no image request.
+                        <OutfitCoverPlaceholder caption={placeholder!} />
                       ) : placeholder ? (
                         <div className="flex h-full flex-col items-center justify-center gap-1 px-2 text-center text-sm text-gray-400">
                           <span>{placeholder}</span>
@@ -737,20 +702,14 @@ export default function WardrobePage() {
       )}
 
       {outfits.length === 0 && (
-        <div className="mt-8 bg-white shadow sm:rounded-lg p-6 flex items-center justify-between">
-          <div>
-            <p className="text-sm font-medium text-gray-700">No outfits yet</p>
-            <p className="text-xs text-gray-500">Group wardrobe items into outfits for quick try-ons.</p>
-          </div>
-          <button
-            onClick={() => {
-              setSelectedOutfit(null);
-              setIsOutfitModalOpen(true);
-            }}
-            className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700"
-          >
-            Create Outfit
-          </button>
+        <div className="mt-8 bg-white shadow sm:rounded-lg p-6">
+          {/* Issue 313 — the empty state names where outfits come from instead of
+              offering a second creation path beside the Fitting Room. */}
+          <p className="text-sm font-medium text-gray-700">No outfits yet</p>
+          <p className="text-xs text-gray-500">
+            Outfits are composed in the Fitting Room: stage pieces in a room, select up to five, then
+            try them on or save them as an outfit.
+          </p>
         </div>
       )}
 
@@ -778,7 +737,7 @@ export default function WardrobePage() {
       )}
 
       {isOutfitModalOpen && (
-        <CreateOutfitModal
+        <OutfitModal
           isOpen={isOutfitModalOpen}
           onClose={handleOutfitModalClose}
           onSuccess={() => queryClient.invalidateQueries({ queryKey: ['/outfits'] })}

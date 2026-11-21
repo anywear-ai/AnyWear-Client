@@ -1,5 +1,5 @@
 /**
- * Look state shared by the Wardrobe cards and the Mirror picker.
+ * Look state shared by the Wardrobe cards and the Fitting Room's try-on result.
  *
  * `latestGeneration` describes what is happening now (any status) while `look`
  * describes what the outfit looks like (newest complete generation). The card

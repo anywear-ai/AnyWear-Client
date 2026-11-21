@@ -10,7 +10,7 @@ const BADGE_STYLES: Record<string, { label: string; className: string }> = {
 
 /**
  * The live state of an outfit's generation, shared by the Wardrobe card and the
- * Mirror's saved-outfit picker. Complete is expressed by the look image itself,
+ * Fitting Room's try-on. Complete is expressed by the look image itself,
  * so it renders no badge; Pending, Processing and Failed stay distinguishable.
  */
 export default function OutfitLookBadge({ status }: OutfitLookBadgeProps) {

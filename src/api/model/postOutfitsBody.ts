@@ -8,6 +8,9 @@
 export type PostOutfitsBody = {
   /** @maxLength 200 */
   name?: string;
-  /** @minItems 1 */
+  /**
+     * @minItems 1
+     * @maxItems 5
+     */
   wearable_item_ids: string[];
 };

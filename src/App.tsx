@@ -15,7 +15,7 @@ const RegisterPage = lazy(() => import('./pages/auth/RegisterPage'));
 const VerifyEmailPage = lazy(() => import('./pages/auth/VerifyEmailPage'));
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
 const WardrobePage = lazy(() => import('./pages/wardrobe/WardrobePage'));
-const MirrorPage = lazy(() => import('./pages/mirror/MirrorPage'));
+const FittingRoomPage = lazy(() => import('./pages/fitting-room/FittingRoomPage'));
 const DashboardPage = lazy(() => import('./pages/dashboard/DashboardPage'));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage'));
 
@@ -88,7 +88,11 @@ function App() {
                   <Route path="/" element={<Navigate to="/dashboard" replace />} />
                   <Route path="/dashboard" element={<DashboardPage />} />
                   <Route path="/wardrobe" element={<WardrobePage />} />
-                  <Route path="/mirror" element={<MirrorPage />} />
+                  {/* Issue 313 — the tab is the Fitting Room. The retired path
+                      keeps working for an existing bookmark or history entry and
+                      lands on the one surface that composes an outfit. */}
+                  <Route path="/fitting-room" element={<FittingRoomPage />} />
+                  <Route path="/mirror" element={<Navigate to="/fitting-room" replace />} />
                   <Route path="/settings" element={<SettingsPage />} />
                 </Route>
                 </Routes>

@@ -10,6 +10,7 @@ const ITEM_ID_1 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const ITEM_ID_2 = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const BASE_PHOTO_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const GENERATION_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+const FITTING_ROOM_ID = '11111111-1111-4111-8111-111111111111';
 const PRIMARY_IMAGE = 'https://example.com/tshirt-primary.jpg';
 const LOOK_IMAGE = 'https://example.com/outfit-look.png';
 
@@ -31,7 +32,7 @@ const mockWardrobeItems: GetWardrobe200Item[] = [
   { id: ITEM_ID_2, ownerId: 'test-user-id', name: 'Jeans', category: 'Bottom', images: [{ imageId: 'image-jeans', url: 'https://example.com/jeans.jpg', view: null, isPrimary: true }], taggingStatus: 'ready', weatherTags: [], styleAttributes: {}, isPublic: false, imageEmbedding: null, taggingStateVersion: 1, taggingErrorCode: null, taggingErrorMessage: null, createdAt: '2026-05-05T00:00:00.000Z', updatedAt: '2026-05-05T00:00:00.000Z' },
 ];
 
-/** The one base photo the Mirror preselects through its `isDefault` flag. */
+/** The one base photo the Fitting Room preselects through its `isDefault` flag. */
 const mockBasePhoto: GetVtoBasePhotos200Item = {
   id: BASE_PHOTO_ID,
   userId: 'test-user-id',
@@ -47,6 +48,37 @@ interface MockState {
   mutations: Array<{ method: string; path: string; body: unknown }>;
   /** When set, DELETE /outfits/{id} answers 502 OBJECT_DELETION_INCOMPLETE with these keys. */
   deleteRetainedObjectKeys?: string[];
+  /** Issue 313 — the ids staged in the open room, in the order they were added. */
+  stagedItemIds?: string[];
+}
+
+/** The open room as the Service returns it: its staged members carry `addedAt`. */
+function fittingRoomDetail(state: MockState) {
+  const stagedIds = state.stagedItemIds ?? [];
+  return {
+    id: FITTING_ROOM_ID,
+    userId: 'test-user-id',
+    name: 'Fitting Room',
+    isDefault: true,
+    itemCount: stagedIds.length,
+    createdAt: '2026-05-01T00:00:00.000Z',
+    items: stagedIds.map((id) => {
+      const item = mockWardrobeItems.find((candidate) => candidate.id === id)!;
+      return { ...item, archivedAt: null, addedAt: '2026-06-02T00:00:00.000Z' };
+    }),
+  };
+}
+
+function fittingRoomSummary(state: MockState) {
+  const detail = fittingRoomDetail(state);
+  return {
+    id: detail.id,
+    userId: detail.userId,
+    name: detail.name,
+    isDefault: detail.isDefault,
+    itemCount: detail.itemCount,
+    createdAt: detail.createdAt,
+  };
 }
 
 function outfitItems(ids: string[]) {
@@ -73,9 +105,25 @@ async function setupOutfitMocks(page: Page, state: MockState) {
     if (method === 'GET' && path === '/wardrobe') return json(mockWardrobeItems);
     if (method === 'GET' && path === '/wardrobe/categories') return json({ categories: ['Top', 'Bottom'] });
     if (method === 'GET' && path === '/outfits') return json({ outfits: state.outfits });
+    // Issue 313 — the Fitting Room's room read and its staging area. The list read
+    // is the one that creates the default room; the detail read returns its rows.
+    if (method === 'GET' && path === '/fitting-rooms') return json({ fittingRooms: [fittingRoomSummary(state)] });
+    if (method === 'GET' && path === `/fitting-rooms/${FITTING_ROOM_ID}`) return json(fittingRoomDetail(state));
+    if (method === 'POST' && path === `/fitting-rooms/${FITTING_ROOM_ID}/items`) {
+      const body = request.postDataJSON() as { wearable_item_ids: string[] };
+      state.stagedItemIds = [...new Set([...(state.stagedItemIds ?? []), ...body.wearable_item_ids])];
+      return json(fittingRoomDetail(state));
+    }
+    const removedItemId = path.startsWith(`/fitting-rooms/${FITTING_ROOM_ID}/items/`)
+      ? path.split('/').pop()
+      : undefined;
+    if (method === 'DELETE' && removedItemId) {
+      state.stagedItemIds = (state.stagedItemIds ?? []).filter((id) => id !== removedItemId);
+      return route.fulfill({ status: 204 });
+    }
     if (method === 'GET' && path === '/vto/base-photos') return json([]);
     if (method === 'GET' && path === '/vto/generations') return json({ generations: [], total: 0, page: 1, limit: 12, nextPage: null });
-    // A generation start opens the same status read and stream the Mirror uses;
+    // A generation start opens the same status read and stream the Fitting Room uses;
     // the terminal frame ends the stream and is what the test ends on.
     const completedStatus = (generationId: string) => ({
       generation_id: generationId,
@@ -107,10 +155,22 @@ async function setupOutfitMocks(page: Page, state: MockState) {
     if (method === 'POST' && path === '/outfits') {
       const body = request.postDataJSON();
       state.mutations.push({ method, path, body });
+      // Issue 313 — the save path renders nothing: the row it returns has
+      // `latestGeneration` and `look` both null, which is the never-generated state.
+      // `201` on a new set and `200` on an existing one are both success, and the
+      // generated client resolves either 2xx to this same body.
+      const existing = state.outfits.find(
+        (candidate) => JSON.stringify(candidate.wearableItems?.map((item) => item.id))
+          === JSON.stringify(body.wearable_item_ids),
+      );
+      if (existing) return json(existing, 200);
       const outfit = {
         ...structuredClone(mockOutfit),
         name: body.name ?? derivedOutfitName(body.wearable_item_ids),
         wearableItems: outfitItems(body.wearable_item_ids),
+        latestGeneration: null,
+        look: null,
+        generationCount: 0,
       };
       state.outfits.push(outfit);
       return json(outfit, 201);
@@ -313,67 +373,54 @@ test.describe('Outfit Management (mocked Client integration)', () => {
   });
   test.afterEach(({ page }) => expectOnlyMockedCalls(page));
 
-  test('creates an outfit, then offers the confirmed look action on the saved card', async ({ page }) => {
-    const state: MockState = { outfits: [], mutations: [] };
+  /**
+   * Issue 313 — the Wardrobe no longer creates an outfit, so the one new path this
+   * suite gains goes through the compose step: stage a piece in the room, tick it,
+   * turn `Try it on now` off and press `Save outfit`. The request is the member
+   * list alone — no base photo, no prompt, no name, no idempotency key — and the
+   * card the Wardrobe then paints is the never-generated state, not a failure.
+   */
+  test('saves a ticked set through the compose step and lands its card in the never-generated state', async ({ page }) => {
+    const state: MockState = { outfits: [], mutations: [], stagedItemIds: [] };
     await setupOutfitMocks(page, state);
+    await page.goto('/fitting-room');
+    await expect(page.getByRole('heading', { level: 1, name: 'Fitting Room' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Add T-Shirt to try on', exact: true }).click();
+    await expect(page.getByTestId('to-try-on-row')).toHaveCount(1);
+    await page.getByRole('button', { name: 'Select T-Shirt', exact: true }).click();
+
+    // Off: the primary button is Save outfit, and it states that nothing is charged.
+    await page.getByRole('switch', { name: 'Try it on now (1 credit)' }).click();
+    await expect(page.getByText('No credit is charged for saving an outfit.', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Save outfit', exact: true }).click();
+
+    await expect.poll(() => state.mutations.length).toBe(1);
+    const [{ method, path, body }] = state.mutations;
+    expect(method).toBe('POST');
+    expect(path).toBe('/outfits');
+    // postDataJSON re-parses the exact request bytes, so the key list is the proof
+    // that no base photo, prompt, name or idempotency field reached the wire.
+    expect(Object.keys(body as Record<string, unknown>)).toEqual(['wearable_item_ids']);
+    expect(body).toEqual({ wearable_item_ids: [ITEM_ID_1] });
+
+    // To try on survives the compose attempt: the same pieces are still staged.
+    await expect(page.getByTestId('to-try-on-row')).toHaveCount(1);
+
+    const name = derivedOutfitName([ITEM_ID_1]);
     await page.goto('/wardrobe');
-    await page.getByRole('button', { name: 'Create Outfit', exact: true }).click();
-    await expect(page.getByRole('heading', { name: 'Create Outfit' })).toBeVisible();
-    await page.getByPlaceholder('e.g. Weekend Casual').fill('Office Ready');
-    await page.getByRole('button', { name: 'T-Shirt', exact: true }).click();
-    await page.getByRole('button', { name: 'Jeans', exact: true }).click();
-    await page.getByRole('button', { name: 'Create Outfit', exact: true }).last().click();
-    await expect(page.getByRole('heading', { name: 'Create Outfit' })).not.toBeVisible();
-    await expect(outfitCard(page, 'Office Ready').getByText('2 items', { exact: true })).toBeVisible();
-    // The create response is followed by the same confirmation the card offers;
-    // cancelling it spends nothing.
-    const dialog = page.getByRole('dialog');
-    await expect(dialog.getByRole('heading', { name: 'Generate a look for Office Ready?' })).toBeVisible();
-    await expect(dialog).toContainText('This uses 1 of your daily credits.');
-    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
-    await expect(page.getByRole('dialog')).not.toBeVisible();
-    expect(state.mutations).toEqual([{ method: 'POST', path: '/outfits', body: { name: 'Office Ready', wearable_item_ids: [ITEM_ID_1, ITEM_ID_2] } }]);
-  });
-
-  test('creates an outfit with a blank name and shows the Service-derived name', async ({ page }) => {
-    const state: MockState = { outfits: [], mutations: [] };
-    await setupOutfitMocks(page, state);
-    await page.goto('/wardrobe');
-    await page.getByRole('button', { name: 'Create Outfit', exact: true }).click();
-    await expect(page.getByRole('heading', { name: 'Create Outfit' })).toBeVisible();
-    await page.getByRole('button', { name: 'T-Shirt', exact: true }).click();
-    await page.getByRole('button', { name: 'Jeans', exact: true }).click();
-    // The name field is never touched, so the request must leave it out.
-    await page.getByRole('button', { name: 'Create Outfit', exact: true }).last().click();
-    await expect(page.getByRole('heading', { name: 'Create Outfit' })).not.toBeVisible();
-
-    // The card heading is the name the Service returned, not one the page made up.
-    await expect(outfitCard(page, 'T-Shirt, Jeans').getByText('2 items', { exact: true })).toBeVisible();
-    const dialog = page.getByRole('dialog');
-    await expect(dialog.getByRole('heading', { name: 'Generate a look for T-Shirt, Jeans?' })).toBeVisible();
-    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
-    await expect(page.getByRole('dialog')).not.toBeVisible();
-
-    // postDataJSON parsed the exact request bytes: the blank optional name is
-    // absent from the wire body, not present with an undefined or empty value.
-    expect(state.mutations).toEqual([
-      { method: 'POST', path: '/outfits', body: { wearable_item_ids: [ITEM_ID_1, ITEM_ID_2] } },
-    ]);
-  });
-
-  test('selects a saved outfit in the Mirror picker with its completed look', async ({ page }) => {
-    const state: MockState = { outfits: [structuredClone(mockOutfit)], mutations: [] };
-    await setupOutfitMocks(page, state);
-    await page.goto('/mirror');
-    await page.getByRole('button', { name: 'Saved', exact: true }).click();
-    const picker = page.getByRole('button', { name: 'Weekend Casual 2 items', exact: true });
-    await expect(picker).toBeVisible();
-    await expect(picker.locator('img')).toHaveAttribute('src', LOOK_IMAGE);
-    await expect(picker).toHaveAttribute('aria-pressed', 'false');
-    await picker.click();
-    await expect(picker).toHaveAttribute('aria-pressed', 'true');
-    await expect(picker).toHaveClass(/border-indigo-600/);
-    expect(state.mutations).toEqual([]);
+    // Scoped by the card's own action, because a wardrobe item can share the
+    // outfit's derived name (`T-Shirt`) and is a different article.
+    const card = page.getByRole('article').filter({
+      has: page.getByRole('button', { name: `Generate look for ${name}`, exact: true }),
+    });
+    await expect(card.getByText('1 items', { exact: true })).toBeVisible();
+    await expect(card.getByTestId('outfit-cover-placeholder')).toBeVisible();
+    await expect(card.getByText('No look yet', { exact: true })).toBeVisible();
+    await expect(card.getByText('Image unavailable', { exact: true })).toHaveCount(0);
+    await expect(card.getByRole('button', { name: `Generate look for ${name}`, exact: true })).toBeVisible();
+    // The placeholder is the Client's own graphic: no image is requested for it.
+    await expect(card.getByRole('img')).toHaveCount(0);
   });
 
   test('generates a look only after the confirmation, which omits base_photo_id', async ({ page }) => {
@@ -393,19 +440,21 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     expect(state.mutations).toEqual([{ method: 'POST', path: '/vto/generations', body: { outfit_id: OUTFIT_ID } }]);
   });
 
-  test('generates an item-mode try-on whose wire body omits the blank outfit name', async ({ page }) => {
-    const state: MockState = { outfits: [], mutations: [] };
+  test('generates a try-on from the ticked To try on rows whose wire body has no outfit name', async ({ page }) => {
+    const state: MockState = { outfits: [], mutations: [], stagedItemIds: [] };
     await setupOutfitMocks(page, state);
     // The default mock lists no base photos; this scenario needs the flagged
-    // default so the Mirror preselects it and the generate control enables.
+    // default so the Fitting Room preselects it and the generate control enables.
     await page.route('**/vto/base-photos', (route) => route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify([mockBasePhoto]),
     }));
-    await page.goto('/mirror');
+    await page.goto('/fitting-room');
 
     await expect(page.getByRole('button', { name: 'Selected base photo 1, default', exact: true })).toBeVisible();
+    // Staging adds the row; ticking is the separate act that decides what is tried.
+    await page.getByRole('button', { name: 'Add T-Shirt to try on', exact: true }).click();
     await page.getByRole('button', { name: 'Select T-Shirt', exact: true }).click();
     const generateButton = page.getByRole('button', { name: 'Generate try-on', exact: true });
     await expect(generateButton).toBeEnabled();
@@ -422,17 +471,23 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     expect(body).toMatchObject({ base_photo_id: BASE_PHOTO_ID, wearable_item_ids: [ITEM_ID_1] });
   });
 
-  test('selects wardrobe pieces with the keyboard and exposes the pressed state', async ({ page }) => {
-    const state: MockState = { outfits: [], mutations: [] };
+  test('adds a piece with the keyboard, then ticks it in To try on and exposes the pressed state', async ({ page }) => {
+    const state: MockState = { outfits: [], mutations: [], stagedItemIds: [] };
     await setupOutfitMocks(page, state);
-    await page.goto('/mirror');
+    await page.goto('/fitting-room');
 
-    const shirt = page.getByRole('button', { name: 'Select T-Shirt' });
-    await shirt.focus();
+    const add = page.getByRole('button', { name: 'Add T-Shirt to try on' });
+    await add.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('to-try-on-row')).toHaveCount(1);
+
+    const tick = page.getByRole('button', { name: 'Select T-Shirt' });
+    await tick.focus();
     await page.keyboard.press('Enter');
 
-    await expect(page.getByRole('button', { name: 'Remove T-Shirt', exact: true })).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.getByText('1 selected', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Deselect T-Shirt', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByTestId('to-try-on-counter')).toHaveText('1 / 5');
+    // Ticking is view state: it sends nothing.
     expect(state.mutations).toEqual([]);
   });
 
@@ -474,13 +529,13 @@ test.describe('Outfit Management (mocked Client integration)', () => {
   });
 
   test('closes the outfit dialog with Escape and restores focus to its opener', async ({ page }) => {
-    const state: MockState = { outfits: [], mutations: [] };
+    const state: MockState = { outfits: [structuredClone(mockOutfit)], mutations: [] };
     await setupOutfitMocks(page, state);
     await page.goto('/wardrobe');
 
-    const opener = page.getByRole('button', { name: 'Create Outfit', exact: true }).first();
+    const opener = page.getByRole('button', { name: 'Edit Weekend Casual', exact: true });
     await opener.click();
-    const dialog = page.getByRole('dialog', { name: 'Create Outfit' });
+    const dialog = page.getByRole('dialog', { name: 'Edit Outfit' });
     await expect(dialog).toBeVisible();
     await page.keyboard.press('Escape');
 
@@ -500,7 +555,7 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     const dialogs = [
       { name: 'Add Wardrobe Item', open: () => page.getByRole('button', { name: 'Add Item', exact: true }).click() },
       { name: 'Item Details', open: () => page.getByRole('button', { name: 'View T-Shirt details' }).click() },
-      { name: 'Create Outfit', open: () => page.getByRole('button', { name: /Create Outfit/ }).first().click() },
+      { name: 'Edit Outfit', open: () => page.getByRole('button', { name: 'Edit Weekend Casual', exact: true }).click() },
       { name: 'Generate a look for Weekend Casual?', open: () => page.getByRole('button', { name: 'New look for Weekend Casual', exact: true }).click() },
     ];
 
@@ -696,7 +751,7 @@ test.describe('Wardrobe dialog scroll lock and focus rings (mocked Client integr
     const dialogs = [
       { name: 'Add Wardrobe Item', opener: page.getByRole('button', { name: 'Add Item', exact: true }) },
       { name: 'Item Details', opener: page.getByRole('button', { name: 'View T-Shirt details' }) },
-      { name: 'Create Outfit', opener: page.getByRole('button', { name: '+ Create Outfit', exact: true }) },
+      { name: 'Edit Outfit', opener: page.getByRole('button', { name: 'Edit Outfit 1', exact: true }) },
       { name: 'Generate a look for Outfit 1?', opener: page.getByRole('button', { name: 'New look for Outfit 1', exact: true }) },
     ];
 
@@ -734,25 +789,23 @@ test.describe('Wardrobe dialog scroll lock and focus rings (mocked Client integr
     expect(state.mutations).toEqual([]);
   });
 
-  test('stays locked through the real outfit-save to look-dialog handoff', async ({ page }) => {
+  test('stays locked through the real outfit-rename to look-dialog handoff', async ({ page }) => {
     await page.setViewportSize({ width: 900, height: 520 });
     const state: MockState = { outfits: scrollingOutfits(6), mutations: [] };
     await setupOutfitMocks(page, state);
     await page.goto('/wardrobe');
 
-    const createButton = page.getByRole('button', { name: '+ Create Outfit', exact: true });
-    const before = await scrollOpenerIntoView(page, createButton);
+    const editButton = page.getByRole('button', { name: 'Edit Outfit 1', exact: true });
+    const before = await scrollOpenerIntoView(page, editButton);
     expect(before, 'the mocked page did not scroll').toBeGreaterThan(0);
-    await clickByPointer(page, createButton);
+    await clickByPointer(page, editButton);
 
-    const outfitDialog = page.getByRole('dialog', { name: 'Create Outfit' });
+    const outfitDialog = page.getByRole('dialog', { name: 'Edit Outfit' });
     await expect(outfitDialog).toBeVisible();
-    await outfitDialog.getByRole('button', { name: 'T-Shirt', exact: true }).click();
-    await outfitDialog.getByRole('button', { name: 'Jeans', exact: true }).click();
     await page.getByPlaceholder('e.g. Weekend Casual').fill('Office Ready');
-    await outfitDialog.getByRole('button', { name: 'Create Outfit', exact: true }).click();
+    await outfitDialog.getByRole('button', { name: 'Save Changes', exact: true }).click();
 
-    // The save closes the outfit dialog and opens the look confirmation; the
+    // The rename closes the outfit dialog and opens the look confirmation; the
     // page must stay locked because the look dialog still holds the count.
     const lookDialog = page.getByRole('dialog', { name: 'Generate a look for Office Ready?' });
     await expect(lookDialog).toBeVisible();
@@ -772,7 +825,7 @@ test.describe('Wardrobe dialog scroll lock and focus rings (mocked Client integr
     expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(before);
 
     expect(state.mutations).toEqual([
-      { method: 'POST', path: '/outfits', body: { name: 'Office Ready', wearable_item_ids: [ITEM_ID_1, ITEM_ID_2] } },
+      { method: 'PATCH', path: '/outfits/ffffffff-ffff-4fff-8fff-000000000000', body: { name: 'Office Ready' } },
     ]);
   });
 });

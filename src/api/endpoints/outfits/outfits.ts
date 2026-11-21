@@ -31,6 +31,7 @@ import type {
   GetOutfitsLookupParams,
   PatchOutfitsId200,
   PatchOutfitsIdBody,
+  PostOutfits200,
   PostOutfits201,
   PostOutfitsBody
 } from '../../model';
@@ -48,7 +49,7 @@ export const postOutfits = (
 ) => {
 
 
-      return customInstance<PostOutfits201>(
+      return customInstance<PostOutfits200 | PostOutfits201>(
       {url: `/outfits`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
       data: postOutfitsBody, signal

@@ -10,7 +10,7 @@ describe('routeDestinationName', () => {
   it.each([
     ['/dashboard', 'dashboard'],
     ['/wardrobe', 'wardrobe'],
-    ['/mirror', 'the mirror'],
+    ['/fitting-room', 'the fitting room'],
     ['/settings', 'settings'],
     ['/login', 'sign in'],
     ['/register', 'registration'],
@@ -35,8 +35,8 @@ describe('RouteLoading', () => {
   });
 
   it('renders the destination it is given', () => {
-    render(<RouteLoading destination={routeDestinationName('/mirror')} />);
+    render(<RouteLoading destination={routeDestinationName('/fitting-room')} />);
 
-    expect(screen.getByText('Loading the mirror...')).toBeVisible();
+    expect(screen.getByText('Loading the fitting room...')).toBeVisible();
   });
 });

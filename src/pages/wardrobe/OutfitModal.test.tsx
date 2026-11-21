@@ -2,30 +2,17 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import '@testing-library/jest-dom/vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
-import CreateOutfitModal from '../../pages/wardrobe/CreateOutfitModal';
-
-const mockItems = [
-  { id: 'item-1', name: 'T-Shirt', category: 'Top', images: [], archivedAt: null },
-  { id: 'item-2', name: 'Jeans', category: 'Bottom', images: [], archivedAt: null },
-  { id: 'item-3', name: null, category: 'Shoes', images: [], archivedAt: null },
-];
+import OutfitModal from '../../pages/wardrobe/OutfitModal';
 
 vi.mock('../../api/endpoints/outfits/outfits', () => ({
-  usePostOutfits: vi.fn(),
   usePatchOutfitsId: vi.fn(),
   useDeleteOutfitsId: vi.fn(),
 }));
 
-vi.mock('../../api/endpoints/wardrobe/wardrobe', () => ({
-  useGetWardrobe: vi.fn(),
-}));
-
-import { usePostOutfits, usePatchOutfitsId, useDeleteOutfitsId } from '../../api/endpoints/outfits/outfits';
-import { useGetWardrobe } from '../../api/endpoints/wardrobe/wardrobe';
+import { usePatchOutfitsId, useDeleteOutfitsId } from '../../api/endpoints/outfits/outfits';
 
 const defaultProps = { isOpen: true, onClose: vi.fn(), onSuccess: vi.fn() };
 
-let createOutfit: ReturnType<typeof vi.fn>;
 let updateOutfit: ReturnType<typeof vi.fn>;
 let deleteOutfit: ReturnType<typeof vi.fn>;
 
@@ -48,71 +35,60 @@ function makeOutfit(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   cleanup();
   vi.clearAllMocks();
-  createOutfit = vi.fn();
   updateOutfit = vi.fn();
   deleteOutfit = vi.fn();
-  vi.mocked(useGetWardrobe).mockReturnValue({ data: mockItems, isLoading: false, isError: false } as never);
-  vi.mocked(usePostOutfits).mockReturnValue({ mutate: createOutfit, isPending: false } as never);
   vi.mocked(usePatchOutfitsId).mockReturnValue({ mutate: updateOutfit, isPending: false } as never);
   vi.mocked(useDeleteOutfitsId).mockReturnValue({ mutate: deleteOutfit, isPending: false } as never);
 });
 
-describe('create mode', () => {
-  it('selects items and creates an outfit with them', () => {
-    render(<CreateOutfitModal {...defaultProps} />);
-
-    fireEvent.click(screen.getByRole('button', { name: /T-Shirt/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Jeans/ }));
-    expect(screen.getByText('Select Items (2 selected)')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Create Outfit' }));
-
-    expect(createOutfit).toHaveBeenCalledWith(
-      { data: { name: undefined, wearable_item_ids: ['item-1', 'item-2'] } },
-      expect.anything(),
-    );
+/**
+ * Issue 313 — the dialog has no creation mode.
+ *
+ * An outfit is composed in the Fitting Room, so this surface only renames and
+ * deletes an existing one. The tests below hold that boundary: there is no submit
+ * that takes a member list, and the members are read-only.
+ */
+describe('no creation mode', () => {
+  it('renders nothing without an outfit to edit', () => {
+    const { container } = render(<OutfitModal {...defaultProps} />);
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Create Outfit/ })).toBeNull();
   });
 
-  it('refuses to submit with no items selected', () => {
-    render(<CreateOutfitModal {...defaultProps} />);
-    expect(screen.getByRole('button', { name: 'Create Outfit' })).toBeDisabled();
-  });
+  it('offers only rename and delete as actions', () => {
+    render(<OutfitModal {...defaultProps} outfit={makeOutfit()} />);
 
-  it('shows the refusal sentence when the create is a 400', async () => {
-    createOutfit.mockImplementation((_body: unknown, options: { onError?: (e: unknown) => void }) => {
-      options.onError?.({ response: { status: 400, data: { error: 'VALIDATION_ERROR', message: 'nope' } } });
-    });
-    render(<CreateOutfitModal {...defaultProps} />);
-
-    fireEvent.click(screen.getByRole('button', { name: /T-Shirt/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Create Outfit' }));
-
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/cannot be changed/));
+    expect(screen.getByRole('heading', { name: 'Edit Outfit' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete Outfit' })).toBeInTheDocument();
+    // No member picker: the list is text, not a group of toggles.
+    expect(screen.queryByRole('group')).toBeNull();
+    expect(screen.queryByText(/selected/)).toBeNull();
   });
 });
 
 /**
  * Issue 332 — an outfit's members are frozen at creation.
  *
- * The edit dialog therefore renders them as a read-only list (marking the ones in
+ * The dialog therefore renders them as a read-only list (marking the ones in
  * the Storage Box) and saves `{ name }` only. A build that still sent items gets a
  * `400` whose sentence must reach the user, because a silent no-op is the failure
  * this delivery exists to remove.
  */
-describe('edit mode — frozen members', () => {
+describe('frozen members', () => {
   it('renders the members as a read-only list and says the set is fixed', () => {
-    render(<CreateOutfitModal {...defaultProps} outfit={makeOutfit()} />);
+    render(<OutfitModal {...defaultProps} outfit={makeOutfit()} />);
 
     const members = screen.getAllByTestId('outfit-member');
     expect(members).toHaveLength(2);
     expect(members[0]).toHaveTextContent('T-Shirt');
-    expect(screen.queryByText(/selected/)).toBeNull();
     expect(screen.getByText(/fixed when it is created/)).toBeInTheDocument();
   });
 
   it('marks an archived member with the Archived badge', () => {
     render(
-      <CreateOutfitModal
+      <OutfitModal
         {...defaultProps}
         outfit={makeOutfit({
           wearableItems: [
@@ -126,7 +102,7 @@ describe('edit mode — frozen members', () => {
   });
 
   it('saves only the name', async () => {
-    render(<CreateOutfitModal {...defaultProps} outfit={makeOutfit()} />);
+    render(<OutfitModal {...defaultProps} outfit={makeOutfit()} />);
 
     fireEvent.change(screen.getByPlaceholderText('e.g. Weekend Casual'), { target: { value: 'Renamed' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
@@ -152,7 +128,7 @@ describe('edit mode — frozen members', () => {
         },
       });
     });
-    render(<CreateOutfitModal {...defaultProps} outfit={makeOutfit()} />);
+    render(<OutfitModal {...defaultProps} outfit={makeOutfit()} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
 
@@ -163,7 +139,7 @@ describe('edit mode — frozen members', () => {
     updateOutfit.mockImplementation((_body: unknown, options: { onError?: (e: unknown) => void }) => {
       options.onError?.({ response: { status: 404 } });
     });
-    render(<CreateOutfitModal {...defaultProps} outfit={makeOutfit()} />);
+    render(<OutfitModal {...defaultProps} outfit={makeOutfit()} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
 
@@ -178,7 +154,7 @@ describe('edit mode — frozen members', () => {
  */
 describe('delete confirmation', () => {
   it('states the record count and that the looks stay', () => {
-    render(<CreateOutfitModal {...defaultProps} outfit={makeOutfit({ generationCount: 3 })} />);
+    render(<OutfitModal {...defaultProps} outfit={makeOutfit({ generationCount: 3 })} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
 
@@ -189,13 +165,13 @@ describe('delete confirmation', () => {
   });
 
   it('uses the singular for one record', () => {
-    render(<CreateOutfitModal {...defaultProps} outfit={makeOutfit({ generationCount: 1 })} />);
+    render(<OutfitModal {...defaultProps} outfit={makeOutfit({ generationCount: 1 })} />);
     fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
     expect(screen.getByText(/Delete this outfit\?/).textContent).toContain('1 try-on record');
   });
 
   it('states no number for a true zero', () => {
-    render(<CreateOutfitModal {...defaultProps} outfit={makeOutfit({ generationCount: 0 })} />);
+    render(<OutfitModal {...defaultProps} outfit={makeOutfit({ generationCount: 0 })} />);
     fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
     const sentence = screen.getByText(/Delete this outfit\?/).textContent ?? '';
     expect(sentence).not.toMatch(/\d/);
@@ -204,7 +180,7 @@ describe('delete confirmation', () => {
 
   it('disables confirmation while a try-on is running, with no forced delete', () => {
     render(
-      <CreateOutfitModal
+      <OutfitModal
         {...defaultProps}
         outfit={makeOutfit({
           latestGeneration: { id: 'gen-1', status: 'Pending', errorCode: null, createdAt: '2026-06-02T00:00:00.000Z' },
@@ -224,7 +200,7 @@ describe('delete confirmation', () => {
       options.onSuccess?.();
     });
     const onNotice = vi.fn();
-    render(<CreateOutfitModal {...defaultProps} onNotice={onNotice} outfit={makeOutfit({ generationCount: 0 })} />);
+    render(<OutfitModal {...defaultProps} onNotice={onNotice} outfit={makeOutfit({ generationCount: 0 })} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
@@ -238,7 +214,7 @@ describe('delete confirmation', () => {
       options.onError?.({ response: { status: 404 } });
     });
     const onNotice = vi.fn();
-    render(<CreateOutfitModal {...defaultProps} onNotice={onNotice} outfit={makeOutfit({ generationCount: 0 })} />);
+    render(<OutfitModal {...defaultProps} onNotice={onNotice} outfit={makeOutfit({ generationCount: 0 })} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
@@ -250,7 +226,7 @@ describe('delete confirmation', () => {
     deleteOutfit.mockImplementation((_body: unknown, options: { onError?: (e: unknown) => void }) => {
       options.onError?.({ response: { status: 500 } });
     });
-    render(<CreateOutfitModal {...defaultProps} outfit={makeOutfit({ generationCount: 0 })} />);
+    render(<OutfitModal {...defaultProps} outfit={makeOutfit({ generationCount: 0 })} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
@@ -259,7 +235,7 @@ describe('delete confirmation', () => {
   });
 
   it('sends nothing while the confirmation is still open', () => {
-    render(<CreateOutfitModal {...defaultProps} outfit={makeOutfit()} />);
+    render(<OutfitModal {...defaultProps} outfit={makeOutfit()} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
 

@@ -3,12 +3,12 @@ import { test, expect, type Page } from '@playwright/test';
 import type { GetWardrobe200Item } from '../src/api/model/getWardrobe200Item';
 import type { GetVtoBasePhotos200Item } from '../src/api/model/getVtoBasePhotos200Item';
 import type { PostVtoBasePhotosUpload201 } from '../src/api/model/postVtoBasePhotosUpload201';
-import { mockClientBoundaries, expectOnlyMockedCalls } from './mock-boundaries';
+import { mockClientBoundaries, mockFittingRoom, expectOnlyMockedCalls } from './mock-boundaries';
 import { mockAmplifySession } from './auth-session';
 
 /**
  * AC-6: a photo with EXIF Orientation 6 that arrives through a photo upload entry
- * must reach the wardrobe card and The Mirror's base-photo surface upright, with
+ * must reach the wardrobe card and the Fitting Room's base-photo surface upright, with
  * the orientation baked into the pixels and no EXIF orientation left in the bytes.
  *
  * The fixture is built by `browser/fixtures/build-orientation6-jpeg.mjs`: a real
@@ -34,6 +34,7 @@ const FIXTURE_FILE = { name: 'IMG_0006.jpg', mimeType: 'image/jpeg', buffer: fix
 
 const WARDROBE_ITEM_ID = '44444444-4444-4444-8444-444444444444';
 const BASE_PHOTO_ID = '55555555-5555-4555-8555-555555555555';
+const FITTING_ROOM_ID = '66666666-6666-4666-8666-666666666666';
 
 interface Surface {
   /** The reservation the Client asks for before it posts anything. */
@@ -285,6 +286,8 @@ function basePhoto(url: string): GetVtoBasePhotos200Item {
 
 async function setupMock(page: Page, state: MockState) {
   await mockClientBoundaries(page);
+  // Issue 313 — the Fitting Room's room reads, needed by the base-photo surface.
+  await mockFittingRoom(page, { id: FITTING_ROOM_ID });
 
   // The signed policy target: the browser's own multipart body is captured whole,
   // so the assertion sees the exact bytes the upload sent.
@@ -455,15 +458,15 @@ test.describe('AC-6 EXIF orientation through a photo upload entry', () => {
       .toEqual(UPRIGHT);
   });
 
-  test('the Mirror upload entry posts the same upright, EXIF-free artifact as the base photo', async ({ page }) => {
+  test('the Fitting Room upload entry posts the same upright, EXIF-free artifact as the base photo', async ({ page }) => {
     const state = createState();
     await setupMock(page, state);
-    await page.goto('/mirror');
+    await page.goto('/fitting-room');
     await expect(page.getByRole('heading', { name: 'Choose a base photo' })).toBeVisible();
 
     const upright = await expectFixtureIsOrientation6(page);
 
-    // The Mirror panel's only file input, the one behind the `Upload` button. A
+    // The Fitting Room's only file input, the one behind the `Upload` button. A
     // base photo is the only client-side image the try-on generation is derived
     // from; the generated result itself is a Service artifact this client never
     // re-encodes, so the base photo is what AC-6's client half can prove.

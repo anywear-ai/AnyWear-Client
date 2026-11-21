@@ -13,7 +13,7 @@ const LOOK_URL = 'https://anywear-beta.s3.amazonaws.com/outfit-generations/user-
 const ITEM_URL = 'https://anywear-beta.s3.amazonaws.com/wardrobe/coat.jpg?X-Amz-Signature=signed';
 const REFRESHED_URL = 'https://anywear-beta.s3.amazonaws.com/wardrobe/coat.jpg?X-Amz-Signature=refreshed';
 
-interface CreateOutfitModalMockProps {
+interface OutfitModalMockProps {
   isOpen: boolean;
   onClose?: () => void;
   onSuccess?: () => Promise<unknown> | void;
@@ -22,8 +22,8 @@ interface CreateOutfitModalMockProps {
   outfit?: { id: string; name?: string | null } | null;
 }
 
-const createOutfitModal = vi.hoisted(() => ({
-  props: null as CreateOutfitModalMockProps | null,
+const outfitModal = vi.hoisted(() => ({
+  props: null as OutfitModalMockProps | null,
 }));
 
 interface AddItemModalMockProps {
@@ -122,17 +122,17 @@ vi.mock('./ItemDetailsModal', () => ({
     return null;
   },
 }));
-vi.mock('./CreateOutfitModal', async () => {
+vi.mock('./OutfitModal', async () => {
   const { default: useAccessibleDialog } = await import('../../hooks/useAccessibleDialog');
 
-  function StandInCreateOutfitModal(props: CreateOutfitModalMockProps) {
+  function StandInOutfitModal(props: OutfitModalMockProps) {
     // The real dialog holds one counted body lock while it is open; the stand-in
     // runs the same hook so the page's overlap wiring is exercised against real
     // locking instead of a stub that never locks.
     const dialogRef = useAccessibleDialog(() => {}, props.isOpen);
     if (!props.isOpen) return null;
     return (
-      <div ref={dialogRef} data-testid="create-outfit-stand-in" tabIndex={-1}>
+      <div ref={dialogRef} data-testid="outfit-modal-stand-in" tabIndex={-1}>
         <button
           type="button"
           onClick={() => props.onSaved?.({
@@ -148,11 +148,11 @@ vi.mock('./CreateOutfitModal', async () => {
   }
 
   return {
-    default: (props: CreateOutfitModalMockProps) => {
+    default: (props: OutfitModalMockProps) => {
       // Record the real props so the tests can call the page's own onSaved wiring
-      // in both create and edit mode instead of relying on this stand-in.
-      createOutfitModal.props = props;
-      return <StandInCreateOutfitModal {...props} />;
+      // instead of relying on this stand-in.
+      outfitModal.props = props;
+      return <StandInOutfitModal {...props} />;
     },
   };
 });
@@ -312,7 +312,7 @@ async function pushFrames(connection: SseConnectionMock, frames: TaggingStatusRe
 beforeEach(() => {
   cleanup();
   vi.clearAllMocks();
-  createOutfitModal.props = null;
+  outfitModal.props = null;
   addItemModal.props = null;
   itemDetailsModal.props = null;
   sseStreams.connections.splice(0);
@@ -395,16 +395,28 @@ describe('WardrobePage saved outfit look cards', () => {
     expect(screen.getByRole('button', { name: 'Edit T-Shirt, Jeans' })).toBeInTheDocument();
   });
 
-  it('never derives the image from wearable items: no generation shows No look yet and Generate look', () => {
+  /**
+   * Issue 313 — a set saved from the Fitting Room's `Save outfit` path comes back
+   * with `latestGeneration` and `look` both null. That is the never-generated
+   * state: the bundled placeholder plus `Generate look`. The image-unavailable
+   * state has its own predicate (a `look.generationId` with a null `url`), and the
+   * two are never collapsed — painting the save as a failure would report a normal
+   * save as a broken generation.
+   */
+  it('never derives the image from wearable items: no generation shows the placeholder and Generate look', () => {
     renderPage({ seed: [] });
 
     expect(screen.queryByTestId('outfit-thumbnail-outfit-1')).toBeNull();
+    expect(screen.getByTestId('outfit-cover-placeholder')).toBeInTheDocument();
     expect(screen.getByText('No look yet')).toBeInTheDocument();
+    expect(screen.queryByText('Image unavailable')).toBeNull();
     expect(document.querySelector(`img[src="${ITEM_URL}"]`)).toBeNull();
     expect(screen.getByRole('button', { name: 'Generate look for Rainy Day' })).toBeInTheDocument();
     expect(screen.getByText('1 items')).toBeInTheDocument();
-    // An empty outfit paints the text placeholder, never the running skeleton.
+    // An empty outfit paints the placeholder, never the running skeleton, and the
+    // bundled graphic is decorative: the caption carries the meaning.
     expect(screen.queryByTestId('outfit-cover-skeleton-outfit-1')).toBeNull();
+    expect(screen.queryByRole('img')).toBeNull();
   });
 
   it('shows Pending as a skeleton with aria-busy and offers no second action while it is active', () => {
@@ -538,17 +550,6 @@ describe('WardrobePage saved outfit look cards', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
-  it('offers the same confirmed action after saving an outfit', async () => {
-    mockOutfits({ outfits: [] });
-    renderPage({ seed: [] });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Create Outfit' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Save outfit' }));
-
-    expect(screen.getByRole('dialog')).toHaveTextContent('Generate a look for Rainy Day?');
-    expect(generateLook).not.toHaveBeenCalled();
-  });
-
   it('cannot start a second generation while the first start is still settling', async () => {
     const { queryClient } = renderPage({ seed: [] });
     let releaseInvalidations!: () => void;
@@ -583,31 +584,12 @@ describe('WardrobePage saved outfit look cards', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
-  it('opens the same 1-credit confirmation from onSaved in create mode', () => {
-    mockOutfits({ outfits: [] });
-    renderPage({ seed: [] });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Create Outfit' }));
-
-    const props = createOutfitModal.props;
-    expect(props?.outfit).toBeUndefined();
-    const onSaved = props?.onSaved;
-    expect(onSaved).toBeTypeOf('function');
-
-    act(() => onSaved?.({ id: 'outfit-new', name: 'Sunny Day' }));
-
-    const dialog = screen.getByRole('dialog');
-    expect(dialog).toHaveTextContent('Generate a look for Sunny Day?');
-    expect(dialog).toHaveTextContent('This uses 1 of your daily credits.');
-    expect(generateLook).not.toHaveBeenCalled();
-  });
-
-  it('opens the same 1-credit confirmation from onSaved in edit mode', () => {
+  it('opens the same 1-credit confirmation from onSaved', () => {
     renderPage({ seed: [] });
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit Rainy Day' }));
 
-    const props = createOutfitModal.props;
+    const props = outfitModal.props;
     expect(props?.outfit).toMatchObject({ id: 'outfit-1', name: 'Rainy Day' });
     const onSaved = props?.onSaved;
     expect(onSaved).toBeTypeOf('function');
@@ -618,6 +600,48 @@ describe('WardrobePage saved outfit look cards', () => {
     expect(dialog).toHaveTextContent('Generate a look for Rainy Day Updated?');
     expect(dialog).toHaveTextContent('This uses 1 of your daily credits.');
     expect(generateLook).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Issue 313 — the Wardrobe keeps every card action but no creation entry.
+ *
+ * `POST /outfits` has exactly one caller in the app (the Fitting Room's save
+ * path), so this page must offer no control that could reach it: no `+ Create
+ * Outfit`, and no create button in the empty state either.
+ */
+describe('WardrobePage outfit creation entry', () => {
+  it('offers no create entry on a page that already has outfits', () => {
+    renderPage({ seed: [] });
+
+    expect(screen.queryByRole('button', { name: /Create Outfit/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /\+ Create Outfit/ })).toBeNull();
+    // The empty state is not rendered either, because the list is not empty.
+    expect(screen.queryByText('No outfits yet')).toBeNull();
+  });
+
+  it('offers no create entry in the empty state and points at the Fitting Room instead', () => {
+    mockOutfits({ outfits: [] });
+    renderPage({ seed: [] });
+
+    expect(screen.getByText('No outfits yet')).toBeInTheDocument();
+    expect(screen.getByText(/Outfits are composed in the Fitting Room/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Create Outfit/ })).toBeNull();
+  });
+
+  it('renders only view, rename, delete, Generate look and the member badge as card actions', () => {
+    mockOutfits(outfitResponse(outfit({
+      wearableItems: [
+        { id: 'item-1', name: 'Coat', category: 'Outerwear', images: [], archivedAt: '2026-03-01T09:00:00.000Z' },
+      ],
+    })));
+    renderPage({ seed: [] });
+
+    // The card's actions: open the edit dialog, and start the confirmed look.
+    expect(screen.getByRole('button', { name: 'Edit Rainy Day' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Generate look for Rainy Day' })).toBeInTheDocument();
+    // The member badge lives in the edit dialog, over the frozen member list.
+    expect(screen.queryByTestId('outfit-member-archived')).toBeNull();
   });
 });
 
@@ -632,7 +656,7 @@ describe('WardrobePage outfit cleanup notice', () => {
     renderPage({ seed: [] });
 
     await act(async () => {
-      await createOutfitModal.props?.onSuccess?.();
+      await outfitModal.props?.onSuccess?.();
     });
 
     // The page invalidates the outfits query; the list read it triggers is the
@@ -675,15 +699,14 @@ describe('WardrobePage dialog scroll lock', () => {
   });
 
   it('stays locked while the outfit dialog closes under the look dialog', () => {
-    mockOutfits({ outfits: [] });
     renderPage({ seed: [] });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Create Outfit' }));
-    const outfitDialog = screen.getByTestId('create-outfit-stand-in');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Rainy Day' }));
+    const outfitDialog = screen.getByTestId('outfit-modal-stand-in');
     expect(document.body.style.overflow).toBe('hidden');
 
     // The save opens the look confirmation before the outfit dialog closes: the
-    // real CreateOutfitModal calls onSaved, then onClose.
+    // real OutfitModal calls onSaved, then onClose.
     fireEvent.click(within(outfitDialog).getByRole('button', { name: 'Save outfit' }));
     const lookDialog = screen.getByRole('dialog', { name: 'Generate a look for Rainy Day?' });
     expect(document.body.style.overflow).toBe('hidden');

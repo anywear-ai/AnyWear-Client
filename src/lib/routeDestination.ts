@@ -1,7 +1,7 @@
 const ROUTE_DESTINATIONS: Record<string, string> = {
   '/dashboard': 'dashboard',
   '/wardrobe': 'wardrobe',
-  '/mirror': 'the mirror',
+  '/fitting-room': 'the fitting room',
   '/settings': 'settings',
   '/login': 'sign in',
   '/register': 'registration',

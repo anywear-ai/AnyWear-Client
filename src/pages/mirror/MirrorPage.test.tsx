@@ -17,6 +17,10 @@ vi.mock('../../api/endpoints/vto/vto', async (importOriginal) => {
   };
 });
 
+vi.mock('../../api/endpoints/outfits/outfits', () => ({
+  useGetOutfitsLookup: vi.fn(),
+}));
+
 vi.mock('../../api/endpoints/users/users', () => ({
   useGetUsersMe: vi.fn(),
 }));
@@ -66,6 +70,7 @@ import {
   usePostVtoBasePhotosUploadUrl,
 } from '../../api/endpoints/vto/vto';
 import { useGetUsersMe } from '../../api/endpoints/users/users';
+import { useGetOutfitsLookup } from '../../api/endpoints/outfits/outfits';
 import useVtoGeneration from '../../hooks/useVtoGeneration';
 import { uploadImageWithSignedPost } from '../../lib/imageUpload';
 import { prepareImageForUpload } from '../../lib/imagePreparation';
@@ -185,6 +190,64 @@ describe('MirrorPage', () => {
     return { resolveConfirm };
   }
 
+  /**
+   * Issue 335 — a set that is already an outfit is reused, not created again.
+   *
+   * The lookup is read-only and charges nothing, so the page shows the existing
+   * outfit (name, latest look, record count) before Try on; the same hit decides
+   * the generation body, which names `outfit_id` instead of the item list.
+   */
+  it('shows the matched outfit before charging and generates against its id', () => {
+    mockPhotos([ownDefaultPhoto]);
+    vi.mocked(useGetOutfitsLookup).mockReturnValue({
+      data: {
+        outfit: {
+          id: 'outfit-1',
+          userId: 'user-1',
+          name: 'Weekend Casual',
+          memberSignature: 'a'.repeat(64),
+          wearableItems: [],
+          createdAt: '2026-05-05T00:00:00.000Z',
+          latestGeneration: null,
+          look: null,
+          generationCount: 2,
+        },
+      },
+      isLoading: false,
+    } as any);
+    renderPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select a wearable item' }));
+
+    const notice = screen.getByTestId('outfit-lookup-hit');
+    expect(notice).toHaveTextContent('Weekend Casual');
+    expect(notice).toHaveTextContent('2 try-on records');
+    // Nothing is charged before the button is pressed.
+    expect(generate).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate try-on' }));
+
+    expect(generate).toHaveBeenCalledWith(expect.objectContaining({
+      base_photo_id: 'photo-own',
+      outfit_id: 'outfit-1',
+    }));
+    expect(generate.mock.calls[0][0].wearable_item_ids).toBeUndefined();
+  });
+
+  it('keeps the item-list body when the lookup finds no outfit', () => {
+    mockPhotos([ownDefaultPhoto]);
+    vi.mocked(useGetOutfitsLookup).mockReturnValue({ data: { outfit: null }, isLoading: false } as any);
+    renderPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select a wearable item' }));
+    expect(screen.queryByTestId('outfit-lookup-hit')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate try-on' }));
+
+    expect(generate).toHaveBeenCalledWith(expect.objectContaining({
+      wearable_item_ids: ['item-1'],
+    }));
+  });
   it('preselects the pointer default and generates with its id', () => {
     mockPhotos([ownDefaultPhoto, systemPhoto]);
     renderPage();

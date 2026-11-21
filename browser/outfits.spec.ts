@@ -101,6 +101,8 @@ async function setupOutfitMocks(page: Page, state: MockState) {
       state.mutations.push({ method, path, body });
       return json({ generation_id: GENERATION_ID, outfit_id: body.outfit_id }, 202);
     }
+    // Issue 335 — the item-mode selection asks whether the set is already saved.
+    if (method === 'GET' && path === '/outfits/lookup') return json({ outfit: null });
     const id = path.match(/^\/outfits\/([^/]+)$/)?.[1];
     if (method === 'POST' && path === '/outfits') {
       const body = request.postDataJSON();
@@ -118,8 +120,17 @@ async function setupOutfitMocks(page: Page, state: MockState) {
       state.mutations.push({ method, path, body });
       const outfit = state.outfits.find(outfit => outfit.id === id);
       if (!outfit) return json({ error: 'NOT_FOUND' }, 404);
+      // Issue 332 — members are frozen. The Service's schema is strict, so a body
+      // that still names them is a 400 with the key in the issue message, and no
+      // row is written.
+      if ('wearable_item_ids' in body) {
+        return json({
+          error: 'VALIDATION_ERROR',
+          message: 'Request validation failed',
+          details: [{ path: '', message: "Unrecognized key(s) in object: 'wearable_item_ids'" }],
+        }, 400);
+      }
       outfit.name = body.name ?? outfit.name;
-      outfit.wearableItems = outfitItems(body.wearable_item_ids);
       return json(outfit);
     }
     if (id && method === 'DELETE') {
@@ -522,7 +533,7 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     await expect(page.getByRole('heading', { name: 'Edit Outfit' })).not.toBeVisible();
     await expect(page.getByRole('heading', { name: 'Updated Name', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Old Name', exact: true })).not.toBeVisible();
-    expect(state.mutations).toEqual([{ method: 'PATCH', path: `/outfits/${OUTFIT_ID}`, body: { name: 'Updated Name', wearable_item_ids: [ITEM_ID_1, ITEM_ID_2] } }]);
+    expect(state.mutations).toEqual([{ method: 'PATCH', path: `/outfits/${OUTFIT_ID}`, body: { name: 'Updated Name' } }]);
   });
 
   test('deletes an outfit after confirmation and shows the empty state', async ({ page }) => {
@@ -536,7 +547,7 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     await page.getByRole('button', { name: 'Delete Outfit', exact: true }).click();
     // The confirmation states the one count the Service returned, then the
     // existing warning; the DELETE itself answers 204 with no body.
-    await expect(page.getByText('Delete this outfit? This also deletes its 2 try-on records and their images. This cannot be undone.', { exact: true })).toBeVisible();
+    await expect(page.getByText('Delete this outfit? It has 2 try-on records. Its looks stay in your history. This cannot be undone.', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Confirm', exact: true }).click();
     await expect(page.getByText('No outfits yet', { exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Weekend Casual', exact: true })).not.toBeVisible();
@@ -544,31 +555,28 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     expect(state.mutations).toEqual([{ method: 'DELETE', path: `/outfits/${OUTFIT_ID}`, body: undefined }]);
   });
 
-  test('closes on a 502 incomplete object deletion and reports the background cleanup', async ({ page }) => {
+  /**
+   * Issue 332 — a running try-on refuses the outfit delete.
+   *
+   * The confirmation keeps its control disabled and says which attempt is running;
+   * there is no forced delete, and nothing is sent.
+   */
+  test('disables the confirmation while a try-on is running and sends nothing', async ({ page }) => {
     const state: MockState = {
-      outfits: [structuredClone(mockOutfit)],
+      outfits: [{
+        ...structuredClone(mockOutfit),
+        latestGeneration: { id: 'generation-1', status: 'Pending', errorCode: null, createdAt: '2026-06-02T00:00:00.000Z' },
+      }],
       mutations: [],
-      deleteRetainedObjectKeys: [
-        'outfit-generations/test-user/generation-1.png',
-        'outfit-generations/test-user/generation-2.png',
-      ],
     };
     await setupOutfitMocks(page, state);
     await page.goto('/wardrobe');
     await page.getByRole('heading', { name: 'Weekend Casual', exact: true }).click();
     await page.getByRole('button', { name: 'Delete Outfit', exact: true }).click();
-    await expect(page.getByText('Delete this outfit? This also deletes its try-on records and images. This cannot be undone.', { exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Confirm', exact: true }).click();
 
-    // The delete completed from the user's view: the modal closes, the list
-    // refreshes to empty, and only a non-blocking cleanup notice remains.
-    await expect(page.getByRole('dialog')).not.toBeVisible();
-    await expect(page.getByText('No outfits yet', { exact: true })).toBeVisible();
-    await expect(page.getByRole('status').filter({ hasText: 'Outfit deleted.' })).toContainText(
-      'Outfit deleted. 2 images are still being cleaned up in the background.',
-    );
-    await expect(page.getByText(/Delete failed/)).toHaveCount(0);
-    expect(state.mutations).toEqual([{ method: 'DELETE', path: `/outfits/${OUTFIT_ID}`, body: undefined }]);
+    await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeDisabled();
+    await expect(page.getByText(/still running for this outfit/)).toBeVisible();
+    expect(state.mutations).toEqual([]);
   });
 
   test('shows outfit-specific counts, the completed look and the empty look state', async ({ page }) => {

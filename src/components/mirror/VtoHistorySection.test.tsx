@@ -345,7 +345,7 @@ describe('VtoHistorySection blocked Retry', () => {
     [
       'no base photo is selected',
       { basePhotoId: null },
-      'Select a base photo in Step 1 to retry.',
+      'Select a base photo in Step 3 to retry.',
     ],
     [
       'the daily credits are spent',

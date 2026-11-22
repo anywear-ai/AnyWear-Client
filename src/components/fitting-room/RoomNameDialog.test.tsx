@@ -2,16 +2,28 @@
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import RoomNameDialog, { DEFAULT_ROOM_NAME, ROOM_NAME_MAX_LENGTH } from './RoomNameDialog';
+import RoomNameDialog, {
+  DEFAULT_ROOM_NAME,
+  ROOM_NAME_MAX_LENGTH,
+  UNNAMED_ROOM_NAME,
+} from './RoomNameDialog';
 
 afterEach(cleanup);
 
 const baseProps = {
   isOpen: true,
   isSubmitting: false,
+  blankRoomName: UNNAMED_ROOM_NAME,
   onSubmit: vi.fn(),
   onCancel: vi.fn(),
 };
+
+describe('RoomNameDialog constants', () => {
+  it('names the Service default room and the name-less non-default room differently', () => {
+    expect(DEFAULT_ROOM_NAME).toBe('Default Fitting Room');
+    expect(UNNAMED_ROOM_NAME).toBe('Fitting Room');
+  });
+});
 
 describe('RoomNameDialog create', () => {
   it('submits a typed name', () => {
@@ -25,11 +37,21 @@ describe('RoomNameDialog create', () => {
     expect(onSubmit).toHaveBeenCalledWith('  Studio  ');
   });
 
-  it('allows a blank name and says it becomes Fitting Room', () => {
-    render(<RoomNameDialog {...baseProps} mode="create" />);
+  it('states the unnamed room as the blank-name result when the caller owns a room', () => {
+    render(<RoomNameDialog {...baseProps} mode="create" blankRoomName={UNNAMED_ROOM_NAME} />);
 
     expect(screen.getByRole('button', { name: 'Create room' })).toBeEnabled();
+    expect(screen.getByText(new RegExp(`Leave the name blank to store it as “${UNNAMED_ROOM_NAME}”`))).toBeInTheDocument();
+    expect(screen.getByLabelText('Room name')).toHaveAttribute('placeholder', UNNAMED_ROOM_NAME);
+  });
+
+  it('states the default room as the blank-name result when the caller owns no room', () => {
+    render(<RoomNameDialog {...baseProps} mode="create" blankRoomName={DEFAULT_ROOM_NAME} />);
+
+    // The hint names what will actually be stored, so a first room is promised its
+    // own distinguishable label rather than the old factory string.
     expect(screen.getByText(new RegExp(`Leave the name blank to store it as “${DEFAULT_ROOM_NAME}”`))).toBeInTheDocument();
+    expect(screen.getByLabelText('Room name')).toHaveAttribute('placeholder', DEFAULT_ROOM_NAME);
   });
 
   it('holds a name over the 200-character bound and states the requirement', () => {

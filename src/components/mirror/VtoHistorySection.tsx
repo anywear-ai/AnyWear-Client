@@ -77,7 +77,7 @@ function retryBlockedReason(
   credits: number | null,
 ): string | null {
   if (isGenerating) return 'A generation is already running — wait for it to finish.';
-  if (basePhotoId === null) return 'Select a base photo in Step 1 to retry.';
+  if (basePhotoId === null) return 'Select a base photo in Step 3 to retry.';
   if (credits === null) return 'Your credit balance is unavailable.';
   if (credits <= 0) return 'Out of daily credits. Credits reset at midnight.';
   return null;

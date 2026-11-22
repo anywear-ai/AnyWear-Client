@@ -388,6 +388,11 @@ test.describe('Outfit Management (mocked Client integration)', () => {
 
     await page.getByRole('button', { name: 'Add T-Shirt to try on', exact: true }).click();
     await expect(page.getByTestId('to-try-on-row')).toHaveCount(1);
+    // The Wardrobe tile states the staged set itself, so the room's membership is
+    // readable from that area alone; the name flips to the removal it will perform.
+    const wardrobe = page.getByRole('region', { name: 'Wardrobe', exact: true });
+    await expect(wardrobe.getByRole('button', { name: 'Remove T-Shirt from try on', exact: true }))
+      .toHaveAttribute('aria-pressed', 'true');
     await page.getByRole('button', { name: 'Select T-Shirt', exact: true }).click();
 
     // Off: the primary button is Save outfit, and it states that nothing is charged.
@@ -485,7 +490,7 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     await tick.focus();
     await page.keyboard.press('Enter');
 
-    await expect(page.getByRole('button', { name: 'Deselect T-Shirt', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('button', { name: 'Selected T-Shirt', exact: true })).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('to-try-on-counter')).toHaveText('1 / 5');
     // Ticking is view state: it sends nothing.
     expect(state.mutations).toEqual([]);

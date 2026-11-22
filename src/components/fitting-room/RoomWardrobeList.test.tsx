@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 
 vi.mock('../../api/endpoints/wardrobe/wardrobe', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/endpoints/wardrobe/wardrobe')>();
@@ -44,7 +44,7 @@ function wardrobeItem(overrides: Partial<GetWardrobe200Item> = {}): GetWardrobe2
   };
 }
 
-const onAdd = vi.fn();
+const onToggle = vi.fn();
 
 describe('RoomWardrobeList', () => {
   beforeEach(() => {
@@ -61,13 +61,13 @@ describe('RoomWardrobeList', () => {
   });
 
   it('reads the room wardrobe with no filters at first', () => {
-    render(<RoomWardrobeList onAdd={onAdd} />);
+    render(<RoomWardrobeList onToggle={onToggle} stagedIds={[]} />);
 
     expect(useGetWardrobe).toHaveBeenCalledWith({});
   });
 
   it('sends only the category, color and material parameters', () => {
-    render(<RoomWardrobeList onAdd={onAdd} />);
+    render(<RoomWardrobeList onToggle={onToggle} stagedIds={[]} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Top' }));
     expect(useGetWardrobe).toHaveBeenLastCalledWith({ category: 'Top' });
@@ -84,7 +84,7 @@ describe('RoomWardrobeList', () => {
   });
 
   it('filters by search on the list it already has, with no new request', () => {
-    render(<RoomWardrobeList onAdd={onAdd} />);
+    render(<RoomWardrobeList onToggle={onToggle} stagedIds={[]} />);
 
     fireEvent.change(screen.getByLabelText('Search wardrobe pieces'), { target: { value: 'jean' } });
 
@@ -98,12 +98,63 @@ describe('RoomWardrobeList', () => {
     expect(vi.mocked(useGetWardrobe)).toHaveBeenLastCalledWith({});
   });
 
-  it('names each card action Add … to try on and stages the piece', () => {
-    render(<RoomWardrobeList onAdd={onAdd} />);
+  it('puts every card in one group named Wardrobe pieces', () => {
+    render(<RoomWardrobeList onToggle={onToggle} stagedIds={[]} />);
 
+    const group = screen.getByRole('group', { name: 'Wardrobe pieces' });
+    expect(within(group).getByRole('button', { name: 'Add T-Shirt to try on' })).toBeInTheDocument();
+    expect(within(group).getByRole('button', { name: 'Add Jeans to try on' })).toBeInTheDocument();
+    // The grid keeps its test id, so the browser suite's layout check still reads it.
+    expect(screen.getByTestId('room-wardrobe-grid')).toBe(group);
+  });
+
+  it('makes the whole card one unstaged toggle button holding the image, name and tags', () => {
+    render(<RoomWardrobeList onToggle={onToggle} stagedIds={[]} />);
+
+    const tile = screen.getByRole('button', { name: 'Add T-Shirt to try on' });
+    expect(tile.tagName).toBe('BUTTON');
+    expect(tile).toHaveAttribute('type', 'button');
+    expect(tile).toHaveAttribute('aria-pressed', 'false');
+    // The image, the name and the tag line are inside the control, not beside it.
+    expect(tile.querySelector('img')).not.toBeNull();
+    expect(tile).toHaveTextContent('T-Shirt');
+    expect(tile).toHaveTextContent('Top • Blue • Cotton');
+    // The accessible name already carries the label, so the image is decoration.
+    expect(tile.querySelector('img')).toHaveAttribute('alt', '');
+    expect(screen.queryByText('Selected')).toBeNull();
+  });
+
+  it('states a staged card with aria-pressed, the Remove name and a visible Selected chip', () => {
+    render(<RoomWardrobeList onToggle={onToggle} stagedIds={['item-1']} />);
+
+    const staged = screen.getByRole('button', { name: 'Remove T-Shirt from try on' });
+    expect(staged).toHaveAttribute('aria-pressed', 'true');
+    expect(staged).toHaveClass('border-indigo-600', 'ring-1', 'ring-indigo-600');
+    // Colour is never the only carrier: the chip says so in words.
+    expect(within(staged).getByText('Selected')).toBeInTheDocument();
+    // The other card is untouched by the staged set.
+    const unstaged = screen.getByRole('button', { name: 'Add Jeans to try on' });
+    expect(unstaged).toHaveAttribute('aria-pressed', 'false');
+    expect(within(unstaged).queryByText('Selected')).toBeNull();
+  });
+
+  it('hands a tile activation to onToggle, whichever state the tile is in', () => {
+    const { unmount } = render(<RoomWardrobeList onToggle={onToggle} stagedIds={[]} />);
     fireEvent.click(screen.getByRole('button', { name: 'Add T-Shirt to try on' }));
+    expect(onToggle).toHaveBeenCalledWith('item-1');
+    unmount();
 
-    expect(onAdd).toHaveBeenCalledWith('item-1');
+    onToggle.mockClear();
+    render(<RoomWardrobeList onToggle={onToggle} stagedIds={['item-1']} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove T-Shirt from try on' }));
+    expect(onToggle).toHaveBeenCalledWith('item-1');
+  });
+
+  it('holds every tile while a staging or removal request is out', () => {
+    render(<RoomWardrobeList onToggle={onToggle} stagedIds={[]} isMutating />);
+
+    expect(screen.getByRole('button', { name: 'Add T-Shirt to try on' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add Jeans to try on' })).toBeDisabled();
   });
 
   it('never paints an archived piece, even from a stale cached list', () => {
@@ -112,7 +163,7 @@ describe('RoomWardrobeList', () => {
       isLoading: false,
     } as never);
 
-    render(<RoomWardrobeList onAdd={onAdd} />);
+    render(<RoomWardrobeList onToggle={onToggle} stagedIds={[]} />);
 
     // Absent, not marked: this is a picking surface, and To try on is where the
     // Archived badge belongs.

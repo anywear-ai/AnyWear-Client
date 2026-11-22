@@ -1386,6 +1386,31 @@ describe('WardrobePage Storage Box lifecycle', () => {
     expect(within(panel).queryByRole('button', { name: /anyway/i })).toBeNull();
   });
 
+  /**
+   * Issue 350 — the running-try-on guard reads every page: an attempt on the last
+   * page blocks the delete exactly like one on the first, and the complete list
+   * still renders so the person can see what the delete would remove.
+   */
+  it('holds the affirmative for a running try-on on the last page', async () => {
+    dependentOutfitFixtures = dependentOutfitSet(150).map((outfit, index) => (
+      index === 149 ? { ...outfit, hasActiveGeneration: true } : outfit
+    ));
+    await openStorageBox([archivedItem()]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getAllByTestId('dependent-outfit')).toHaveLength(150));
+    expect(within(panel).getByTestId('running-try-on-notice')).toHaveTextContent('Dependent outfit 150');
+    expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeDisabled();
+    expect(within(panel).queryByRole('button', { name: /anyway/i })).toBeNull();
+    expect(dependentOutfitRequests).toEqual([
+      { limit: 100, offset: 0 },
+      { limit: 100, offset: 100 },
+    ]);
+    expect(deleteRequests()).toEqual([]);
+  });
+
   it('keeps confirmation disabled and offers a retry when the preview fails', async () => {
     dependentOutfitFailOffset = 0;
     await openStorageBox([archivedItem()]);

@@ -18,7 +18,8 @@ interface OutfitModalMockProps {
   onClose?: () => void;
   onSuccess?: () => Promise<unknown> | void;
   onSaved?: (outfit: { id: string; name?: string | null }) => void;
-  onNotice?: (notice: { retainedObjectKeys: number }) => void;
+  /** A delete the Service completed; nothing else is owed to the page. */
+  onNotice?: (notice: { deletedOutfit: true }) => void;
   outfit?: { id: string; name?: string | null } | null;
 }
 
@@ -244,13 +245,17 @@ function wardrobeCache(): GetWardrobe200Item[] | undefined {
 
 const queryClients: QueryClient[] = [];
 
-function renderPage(options: { seed?: GetWardrobe200Item[]; categories?: string[] } = {}) {
+function renderPage(options: { seed?: GetWardrobe200Item[]; categories?: string[]; retry?: number } = {}) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: {
-        retry: false,
+        // A test asserts the preview's own `retry: false` by raising this: the sweep
+        // must never re-run behind the person.
+        retry: options.retry ?? false,
         // A seeded page is already authoritative, so the test starts from a
         // settled render; a page under test reads on mount and on triggers.
+        // A query that must re-read on reopen (the delete preview) declares its own
+        // `staleTime`, so this default cannot hide that read.
         staleTime: options.seed ? Infinity : 0,
       },
     },
@@ -1237,42 +1242,94 @@ describe('WardrobePage list reads after confirmations', () => {
 });
 
 /**
- * Issue 332/334 — the item delete is reachable only from the Storage Box.
+ * Issue 332/334/350 — the item delete is reachable only from the Storage Box.
  *
  * The active view offers Archive; the Storage Box offers Restore and the
  * permanent Delete, and that delete renders from `dependent-outfits`: it lists
- * every outfit that goes, cannot confirm until the preview matches the exact
- * `total`, and is disabled outright while any of them has a running try-on.
+ * every outfit that goes, cannot confirm until the preview holds the Service's
+ * exact `total`, and is disabled outright while any of them has a running try-on.
+ *
+ * The mocked Service pages the endpoint the way the real one does — it honours
+ * `limit` and `offset` and answers the true `total` — so a single-page read and a
+ * fully paged one are distinguishable here.
  */
 describe('WardrobePage Storage Box lifecycle', () => {
-  /** The dependent-outfits preview the mocked Service answers. */
-  let dependentOutfits: { total: number; outfits: Array<Record<string, unknown>> } = { total: 0, outfits: [] };
-  let dependentOutfitsFails = false;
+  /** The dependent outfits the mocked Service pages, in the Service's own order. */
+  let dependentOutfitFixtures: Array<{
+    id: string;
+    name: string;
+    generationCount: number;
+    hasActiveGeneration: boolean;
+  }> = [];
+  /** Every `limit`/`offset` the preview asked with, in request order. */
+  let dependentOutfitRequests: Array<{ limit: number; offset: number }> = [];
+  /** The `total` each page reports, indexed by page; the last entry repeats. */
+  let dependentOutfitTotals: number[] | null = null;
+  /** When set, the page at this offset answers a `503` instead. */
+  let dependentOutfitFailOffset: number | null = null;
+  /** When set, the page at this offset waits for the gate before it answers. */
+  let dependentOutfitGate: { offset: number; promise: Promise<void> } | null = null;
 
   beforeEach(() => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    dependentOutfits = { total: 0, outfits: [] };
-    dependentOutfitsFails = false;
+    dependentOutfitFixtures = [];
+    dependentOutfitRequests = [];
+    dependentOutfitTotals = null;
+    dependentOutfitFailOffset = null;
+    dependentOutfitGate = null;
     const base = customInstanceMock.getMockImplementation()!;
     customInstanceMock.mockImplementation(((config: Record<string, any>) => {
       if (config.method === 'GET' && typeof config.url === 'string'
         && config.url.endsWith('/dependent-outfits')) {
-        if (dependentOutfitsFails) return Promise.reject({ response: { status: 503 } });
-        return Promise.resolve(dependentOutfits);
+        // The page's sweep picks the window; the mocked Service only honours it, so
+        // a read that ignores `offset` cannot pass these cases.
+        const limit = typeof config.params?.limit === 'number' ? config.params.limit : 50;
+        const offset = typeof config.params?.offset === 'number' ? config.params.offset : 0;
+        dependentOutfitRequests.push({ limit, offset });
+        if (dependentOutfitFailOffset === offset) return Promise.reject({ response: { status: 503 } });
+        const pageIndex = Math.floor(offset / limit);
+        const totals = dependentOutfitTotals;
+        const total = totals && totals.length > 0
+          ? totals[Math.min(pageIndex, totals.length - 1)]
+          : dependentOutfitFixtures.length;
+        const answer = () => ({
+          total,
+          outfits: dependentOutfitFixtures.slice(offset, offset + limit),
+        });
+        const gate = dependentOutfitGate;
+        if (gate && gate.offset === offset) return gate.promise.then(answer);
+        return Promise.resolve(answer());
       }
       return base(config);
     }) as any);
   });
 
+  /** `count` dependent outfits, named so one page set's last row is identifiable. */
+  function dependentOutfitSet(count: number) {
+    return Array.from({ length: count }, (_unused, index) => ({
+      id: `outfit-${index + 1}`,
+      name: `Dependent outfit ${index + 1}`,
+      generationCount: index % 3,
+      hasActiveGeneration: false,
+    }));
+  }
+
+  /** A promise the test releases, so one page can be held open across assertions. */
+  function heldPage() {
+    let release: () => void = () => undefined;
+    const promise = new Promise<void>((resolve) => { release = resolve; });
+    return { promise, release: () => release() };
+  }
+
   function archivedItem(overrides: Partial<GetWardrobe200Item> = {}) {
     return wardrobeItem({ archivedAt: '2026-03-01T09:00:00.000Z', ...overrides });
   }
 
-  async function openStorageBox(items: GetWardrobe200Item[]) {
+  async function openStorageBox(items: GetWardrobe200Item[], options: { retry?: number } = {}) {
     // The archived view reads with rchive_status, so the mocked Service has to
     // answer that read with the Storage Box contents.
     wardrobeItems = items;
-    renderPage({ seed: items });
+    renderPage({ seed: items, retry: options.retry });
     fireEvent.click(screen.getByRole('tab', { name: 'Storage Box' }));
     await waitFor(() => expect(wardrobeRequests().some((request) => request.params?.archive_status === 'archived')).toBe(true));
     // The archived read has to land before a card exists.
@@ -1296,13 +1353,10 @@ describe('WardrobePage Storage Box lifecycle', () => {
   });
 
   it('lists every dependent outfit and its record count before confirming', async () => {
-    dependentOutfits = {
-      total: 2,
-      outfits: [
-        { id: 'outfit-1', name: 'Weekend', generationCount: 3, hasActiveGeneration: false },
-        { id: 'outfit-2', name: 'Office', generationCount: 0, hasActiveGeneration: false },
-      ],
-    };
+    dependentOutfitFixtures = [
+      { id: 'outfit-1', name: 'Weekend', generationCount: 3, hasActiveGeneration: false },
+      { id: 'outfit-2', name: 'Office', generationCount: 0, hasActiveGeneration: false },
+    ];
     await openStorageBox([archivedItem()]);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
@@ -1319,10 +1373,9 @@ describe('WardrobePage Storage Box lifecycle', () => {
   });
 
   it('keeps confirmation disabled while any dependent outfit has a running try-on', async () => {
-    dependentOutfits = {
-      total: 1,
-      outfits: [{ id: 'outfit-1', name: 'Weekend', generationCount: 1, hasActiveGeneration: true }],
-    };
+    dependentOutfitFixtures = [
+      { id: 'outfit-1', name: 'Weekend', generationCount: 1, hasActiveGeneration: true },
+    ];
     await openStorageBox([archivedItem()]);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
@@ -1334,18 +1387,168 @@ describe('WardrobePage Storage Box lifecycle', () => {
   });
 
   it('keeps confirmation disabled and offers a retry when the preview fails', async () => {
-    dependentOutfitsFails = true;
+    dependentOutfitFailOffset = 0;
     await openStorageBox([archivedItem()]);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
 
     const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
     await waitFor(() => expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeDisabled());
+    expect(panel).toHaveTextContent(
+      'The outfits that use Coat could not be listed, so this delete cannot continue.',
+    );
     expect(within(panel).getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    expect(deleteRequests()).toEqual([]);
+  });
+
+  /**
+   * Issue 350 — the defect this change exists for. The panel used to read one page
+   * and wait for a `total` it could never hold, so an item with 150 dependents never
+   * enabled its delete. The second page is held open so the between-pages state is
+   * asserted rather than assumed.
+   */
+  it('pages to the Service total, listing all 150 rows and enabling only after the last page', async () => {
+    dependentOutfitFixtures = dependentOutfitSet(150);
+    const secondPage = heldPage();
+    dependentOutfitGate = { offset: 100, promise: secondPage.promise };
+    await openStorageBox([archivedItem()]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(dependentOutfitRequests).toEqual([
+      { limit: 100, offset: 0 },
+      { limit: 100, offset: 100 },
+    ]));
+
+    // Page 1 holds 100 of the 150 the Service counts: no row renders and the
+    // affirmative stays disabled while page 2 is outstanding.
+    expect(panel).toHaveTextContent('Reading the outfits that use Coat...');
+    expect(within(panel).queryAllByTestId('dependent-outfit')).toEqual([]);
+    expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeDisabled();
+
+    await act(async () => {
+      secondPage.release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    await waitFor(() => expect(within(panel).getAllByTestId('dependent-outfit')).toHaveLength(150));
+    // Every outfit the Service counted is listed, down to the last row of the last page.
+    expect(panel).toHaveTextContent('Dependent outfit 150');
+    expect(panel).toHaveTextContent('also deletes 150 outfits');
+    expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeEnabled();
+    // One read per 100 outfits, at distinct offsets starting at 0, and no re-read.
+    expect(dependentOutfitRequests).toEqual([
+      { limit: 100, offset: 0 },
+      { limit: 100, offset: 100 },
+    ]);
+    expect(deleteRequests()).toEqual([]);
+  });
+
+  it('fails closed when a later page fails, and Try again re-reads from the first page', async () => {
+    dependentOutfitFixtures = dependentOutfitSet(150);
+    dependentOutfitFailOffset = 100;
+    // This client would retry a failed query twice. The preview must not: a retried
+    // sweep restarts every page behind the person, so `Try again` is the only retry.
+    await openStorageBox([archivedItem()], { retry: 2 });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Try again' })).toBeInTheDocument());
+    expect(panel).toHaveTextContent(
+      'The outfits that use Coat could not be listed, so this delete cannot continue.',
+    );
+    expect(within(panel).queryAllByTestId('dependent-outfit')).toEqual([]);
+    expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeDisabled();
+    expect(dependentOutfitRequests).toEqual([
+      { limit: 100, offset: 0 },
+      { limit: 100, offset: 100 },
+    ]);
+    expect(deleteRequests()).toEqual([]);
+
+    dependentOutfitFailOffset = null;
+    fireEvent.click(within(panel).getByRole('button', { name: 'Try again' }));
+
+    await waitFor(() => expect(within(panel).getAllByTestId('dependent-outfit')).toHaveLength(150));
+    // The retry re-runs the whole sweep from offset 0, and only then does the
+    // affirmative enable.
+    expect(dependentOutfitRequests).toEqual([
+      { limit: 100, offset: 0 },
+      { limit: 100, offset: 100 },
+      { limit: 100, offset: 0 },
+      { limit: 100, offset: 100 },
+    ]);
+    expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeEnabled();
+  });
+
+  it('fails closed when the Service total moves between pages', async () => {
+    dependentOutfitFixtures = dependentOutfitSet(150);
+    dependentOutfitTotals = [150, 151];
+    await openStorageBox([archivedItem()]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Try again' })).toBeInTheDocument());
+    expect(panel).toHaveTextContent('could not be listed, so this delete cannot continue.');
+    expect(within(panel).queryAllByTestId('dependent-outfit')).toEqual([]);
+    expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeDisabled();
+    expect(dependentOutfitRequests).toEqual([
+      { limit: 100, offset: 0 },
+      { limit: 100, offset: 100 },
+    ]);
+    expect(deleteRequests()).toEqual([]);
+  });
+
+  it('fails closed when a page adds no outfit before the total is held', async () => {
+    dependentOutfitFixtures = dependentOutfitSet(1);
+    dependentOutfitTotals = [2];
+    await openStorageBox([archivedItem()]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+
+    const panel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Try again' })).toBeInTheDocument());
+    expect(within(panel).queryAllByTestId('dependent-outfit')).toEqual([]);
+    expect(within(panel).getByRole('button', { name: 'Delete permanently' })).toBeDisabled();
+    // The empty second page is the page that added nothing, and the read stops there.
+    expect(dependentOutfitRequests).toEqual([
+      { limit: 100, offset: 0 },
+      { limit: 100, offset: 100 },
+    ]);
+    expect(deleteRequests()).toEqual([]);
+  });
+
+  it('re-reads the preview on reopen, so a try-on that settled meanwhile stops blocking', async () => {
+    dependentOutfitFixtures = [
+      { id: 'outfit-1', name: 'Weekend', generationCount: 1, hasActiveGeneration: true },
+    ];
+    await openStorageBox([archivedItem()]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+    const firstPanel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(firstPanel).getByRole('button', { name: 'Delete permanently' })).toBeDisabled());
+    fireEvent.click(within(firstPanel).getByRole('button', { name: 'Cancel' }));
+
+    // The try-on settles while the panel is closed; reopening reads the preview again.
+    dependentOutfitFixtures = [
+      { id: 'outfit-1', name: 'Weekend', generationCount: 1, hasActiveGeneration: false },
+    ];
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
+
+    const secondPanel = await screen.findByRole('dialog', { name: 'Delete this item permanently?' });
+    await waitFor(() => expect(within(secondPanel).getByRole('button', { name: 'Delete permanently' })).toBeEnabled());
+    expect(dependentOutfitRequests).toEqual([
+      { limit: 100, offset: 0 },
+      { limit: 100, offset: 0 },
+    ]);
+    expect(within(secondPanel).getAllByTestId('dependent-outfit')).toHaveLength(1);
+    expect(deleteRequests()).toEqual([]);
   });
 
   it('sends nothing when the confirmation is declined', async () => {
-    dependentOutfits = { total: 1, outfits: [{ id: 'outfit-1', name: 'Weekend', generationCount: 0, hasActiveGeneration: false }] };
+    dependentOutfitFixtures = [{ id: 'outfit-1', name: 'Weekend', generationCount: 0, hasActiveGeneration: false }];
     await openStorageBox([archivedItem()]);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
@@ -1357,7 +1560,7 @@ describe('WardrobePage Storage Box lifecycle', () => {
   });
 
   it('issues exactly one DELETE and removes the card when confirmed', async () => {
-    dependentOutfits = { total: 1, outfits: [{ id: 'outfit-1', name: 'Weekend', generationCount: 2, hasActiveGeneration: false }] };
+    dependentOutfitFixtures = [{ id: 'outfit-1', name: 'Weekend', generationCount: 2, hasActiveGeneration: false }];
     await openStorageBox([archivedItem()]);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Coat permanently' }));
@@ -1370,7 +1573,7 @@ describe('WardrobePage Storage Box lifecycle', () => {
   });
 
   it('states the already-gone outcome for a 404 without treating it as a failure', async () => {
-    dependentOutfits = { total: 0, outfits: [] };
+    dependentOutfitFixtures = [];
     deleteHandler = () => Promise.reject({ response: { status: 404 } });
     await openStorageBox([archivedItem()]);
 
@@ -1383,7 +1586,7 @@ describe('WardrobePage Storage Box lifecycle', () => {
   });
 
   it('explains the Storage Box gate when the Service answers ITEM_NOT_ARCHIVED', async () => {
-    dependentOutfits = { total: 0, outfits: [] };
+    dependentOutfitFixtures = [];
     deleteHandler = () => Promise.reject({
       response: {
         status: 409,
@@ -1401,7 +1604,7 @@ describe('WardrobePage Storage Box lifecycle', () => {
   });
 
   it('names the running try-on when the Service answers GENERATION_IN_PROGRESS', async () => {
-    dependentOutfits = { total: 0, outfits: [] };
+    dependentOutfitFixtures = [];
     deleteHandler = () => Promise.reject({
       response: {
         status: 409,
@@ -1427,7 +1630,7 @@ describe('WardrobePage Storage Box lifecycle', () => {
   });
 
   it('closes with a cleanup notice when the Service answers the gallery 502', async () => {
-    dependentOutfits = { total: 0, outfits: [] };
+    dependentOutfitFixtures = [];
     deleteHandler = () => Promise.reject({
       response: {
         status: 502,

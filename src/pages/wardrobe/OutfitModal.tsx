@@ -4,6 +4,11 @@ import type { GetOutfits200OutfitsItem } from '../../api/model/getOutfits200Outf
 import useAccessibleDialog from '../../hooks/useAccessibleDialog';
 import { getHttpStatus } from '../../lib/errors';
 import { outfitHasActiveGeneration } from '../../lib/outfit-look';
+import {
+  generationInProgressRefusal,
+  runningTryOnClause,
+  type RunningGeneration,
+} from '../../lib/generationInProgress';
 
 /**
  * Issue 334 — deleting an outfit removes the outfit, and nothing else.
@@ -25,11 +30,18 @@ function deleteConfirmationCopy(outfit: GetOutfits200OutfitsItem): string {
 }
 
 /**
- * Issue 332 — the delete refuses while a try-on is running. The control is
+ * Issue 332/350 — the delete refuses while a try-on is running. The control is
  * disabled rather than offering a "delete anyway": the refusal costs nothing and
- * succeeds once the attempt settles, so forcing it is never the answer.
+ * succeeds once the attempt settles, so forcing it is never the answer. The
+ * sentence names the outfit and the attempt's status, read from the outfit's own
+ * `latestGeneration`, so the person knows which attempt to wait for.
  */
-const RUNNING_TRY_ON_COPY = 'A try-on is still running for this outfit. Wait for it to finish before deleting.';
+function runningTryOnOf(outfit: GetOutfits200OutfitsItem): RunningGeneration {
+  return {
+    outfitName: outfit.name ?? null,
+    status: outfit.latestGeneration?.status ?? null,
+  };
+}
 
 /**
  * Issue 332 — a rename the Service refuses must be shown, not swallowed.
@@ -53,7 +65,7 @@ function describeOutfitSaveFailure(error: unknown): string {
 function describeOutfitDeleteFailure(error: unknown): string {
   const status = getHttpStatus(error);
   if (status === 409) {
-    return 'A try-on is still running for this outfit. Wait for it to finish, then delete the outfit.';
+    return generationInProgressRefusal(error, { fallbackName: 'This outfit', target: 'outfit' });
   }
   if (status === 404) return 'This outfit no longer exists.';
   if (typeof status === 'number') return `Delete failed with status ${status}.`;
@@ -136,6 +148,11 @@ export default function OutfitModal({ isOpen, onClose, onSuccess, onSaved, onNot
   const submitLabel = isUpdating ? 'Saving...' : 'Save Changes';
   const tryOnIsRunning = !!outfit && outfitHasActiveGeneration(outfit);
   const confirmationCopy = outfit ? deleteConfirmationCopy(outfit) : '';
+  // Issue 350 — the disabled control's sentence names the outfit and the running
+  // attempt, so the person knows which try-on to wait for.
+  const tryOnBlocker = outfit && tryOnIsRunning
+    ? `${runningTryOnClause(runningTryOnOf(outfit), 'This outfit')}. Wait for it to finish, then delete the outfit.`
+    : '';
   const members = outfit?.wearableItems ?? [];
 
   if (!isOpen || !outfit) return null;
@@ -210,7 +227,7 @@ export default function OutfitModal({ isOpen, onClose, onSuccess, onSaved, onNot
               <div className="flex flex-col gap-1">
                 <span className="text-sm text-red-600">{confirmationCopy}</span>
                 {tryOnIsRunning && (
-                  <span className="text-sm text-red-600">{RUNNING_TRY_ON_COPY}</span>
+                  <span className="text-sm text-red-600">{tryOnBlocker}</span>
                 )}
                 <div className="flex items-center gap-2">
                   <button

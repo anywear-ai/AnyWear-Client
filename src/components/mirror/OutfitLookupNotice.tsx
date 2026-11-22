@@ -10,13 +10,13 @@ interface OutfitLookupNoticeProps {
 }
 
 /**
- * Issue 335 — the selected set already has an outfit.
+ * Issue 335/350 — the selected set already has an outfit.
  *
  * `GET /outfits/lookup` is read-only and charges nothing, so this notice can show
- * what the user already owns *before* the Try-on button spends a credit: the
+ * what the user already owns *before* `Generate try-on` spends a credit: the
  * outfit's name, its latest completed look and how many try-on records it already
- * has. Pressing Try-on then appends a record to this outfit instead of creating a
- * second card for the same combination.
+ * has. Pressing `Generate try-on` then appends a record to this outfit instead of
+ * creating a second card for the same combination.
  *
  * It renders nothing on a miss and nothing while the lookup is running, so the
  * page never flashes a stale match over a newer selection.
@@ -57,7 +57,7 @@ export default function OutfitLookupNotice({ outfit, isLoading }: OutfitLookupNo
       </div>
       <p className="mt-2 text-xs text-gray-600">
         These items already make up a saved outfit. Generating adds another record to it — no new
-        outfit is created, and no credit is spent until you press Try on.
+        outfit is created, and no credit is spent until you press Generate try-on.
       </p>
     </div>
   );

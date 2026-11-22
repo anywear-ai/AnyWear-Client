@@ -178,7 +178,7 @@ describe('delete confirmation', () => {
     expect(sentence).toContain('stay in your history');
   });
 
-  it('disables confirmation while a try-on is running, with no forced delete', () => {
+  it('disables confirmation while a try-on is running, naming the outfit and its status', () => {
     render(
       <OutfitModal
         {...defaultProps}
@@ -191,7 +191,45 @@ describe('delete confirmation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
 
     expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
-    expect(screen.getByText(/still running for this outfit/)).toBeInTheDocument();
+    // Issue 350 — the sentence names which outfit holds the delete and which
+    // attempt to wait for, from the outfit's own latest generation.
+    expect(screen.getByText(
+      '"Weekend Casual" has a try-on still running (Pending). Wait for it to finish, then delete the outfit.',
+    )).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /anyway/i })).toBeNull();
+  });
+
+  it('names details.blocking[0]\'s outfit and status in the sentence a 409 leaves behind', async () => {
+    deleteOutfit.mockImplementation((_body: unknown, options: { onError?: (e: unknown) => void }) => {
+      options.onError?.({
+        response: {
+          status: 409,
+          data: {
+            error: 'GENERATION_IN_PROGRESS',
+            message: 'still running',
+            details: {
+              generation_id: 'gen-1',
+              status: 'Processing',
+              blocking: [
+                { outfitId: 'outfit-1', outfitName: 'Weekend Casual', generationId: 'gen-1', status: 'Processing' },
+              ],
+            },
+          },
+        },
+      });
+    });
+    const onNotice = vi.fn();
+    render(<OutfitModal {...defaultProps} onNotice={onNotice} outfit={makeOutfit({ generationCount: 0 })} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Outfit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(
+      'Nothing was deleted: "Weekend Casual" has a try-on still running (Processing). Wait for it to finish, then delete the outfit.',
+    ));
+    // The dialog stays open, nothing is reported as deleted, and there is no override.
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument();
+    expect(onNotice).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /anyway/i })).toBeNull();
   });
 

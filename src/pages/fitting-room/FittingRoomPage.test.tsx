@@ -788,7 +788,7 @@ describe('FittingRoomPage room actions', () => {
     await waitFor(() => expect(createRoom).toHaveBeenCalledWith({ data: { name: 'Dressing' } }));
   });
 
-  it('creates a room with no name at all, which the Service stores as Fitting Room', async () => {
+  it('creates a room with no name at all, which the Service stores as Untitled Fitting Room', async () => {
     renderPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'New room' }));
@@ -852,8 +852,8 @@ describe('FittingRoomPage room actions', () => {
 
     // Beside an existing room the create is not the default, so the hint keeps
     // stating the ordinary name-less result.
-    expect(screen.getByText(/Leave the name blank to store it as “Fitting Room”/)).toBeInTheDocument();
-    expect(screen.getByLabelText('Room name')).toHaveAttribute('placeholder', 'Fitting Room');
+    expect(screen.getByText(/Leave the name blank to store it as “Untitled Fitting Room”/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Room name')).toHaveAttribute('placeholder', 'Untitled Fitting Room');
   });
 
   it('states the default label for a blank name when the create would be the first room', () => {

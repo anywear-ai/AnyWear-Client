@@ -12,7 +12,7 @@ export const DEFAULT_ROOM_NAME = 'Default Fitting Room';
  * room**, i.e. when the created room is not the default. A name-less create
  * therefore never produces a second room labelled as the default one.
  */
-export const UNNAMED_ROOM_NAME = 'Fitting Room';
+export const UNNAMED_ROOM_NAME = 'Untitled Fitting Room';
 
 interface RoomNameDialogProps {
   isOpen: boolean;

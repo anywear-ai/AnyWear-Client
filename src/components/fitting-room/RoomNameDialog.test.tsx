@@ -21,7 +21,7 @@ const baseProps = {
 describe('RoomNameDialog constants', () => {
   it('names the Service default room and the name-less non-default room differently', () => {
     expect(DEFAULT_ROOM_NAME).toBe('Default Fitting Room');
-    expect(UNNAMED_ROOM_NAME).toBe('Fitting Room');
+    expect(UNNAMED_ROOM_NAME).toBe('Untitled Fitting Room');
   });
 });
 

@@ -611,10 +611,10 @@ test.describe('Outfit Management (mocked Client integration)', () => {
   });
 
   /**
-   * Issue 332 — a running try-on refuses the outfit delete.
+   * Issue 332/350 — a running try-on refuses the outfit delete.
    *
-   * The confirmation keeps its control disabled and says which attempt is running;
-   * there is no forced delete, and nothing is sent.
+   * The confirmation keeps its control disabled and names the outfit and the
+   * attempt's status; there is no forced delete, and nothing is sent.
    */
   test('disables the confirmation while a try-on is running and sends nothing', async ({ page }) => {
     const state: MockState = {
@@ -630,7 +630,10 @@ test.describe('Outfit Management (mocked Client integration)', () => {
     await page.getByRole('button', { name: 'Delete Outfit', exact: true }).click();
 
     await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeDisabled();
-    await expect(page.getByText(/still running for this outfit/)).toBeVisible();
+    await expect(page.getByText(
+      '"Weekend Casual" has a try-on still running (Pending). Wait for it to finish, then delete the outfit.',
+      { exact: true },
+    )).toBeVisible();
     expect(state.mutations).toEqual([]);
   });
 

@@ -4,13 +4,26 @@ import useAccessibleDialog from '../../hooks/useAccessibleDialog';
 /** The Service's name bound, in UTF-16 code units, after trimming. */
 export const ROOM_NAME_MAX_LENGTH = 200;
 
-/** What the Service stores when a create names nothing. */
-export const DEFAULT_ROOM_NAME = 'Fitting Room';
+/** The Service's name for the default room it creates. */
+export const DEFAULT_ROOM_NAME = 'Default Fitting Room';
+
+/**
+ * What the Service stores for a name-less create **when the caller already owns a
+ * room**, i.e. when the created room is not the default. A name-less create
+ * therefore never produces a second room labelled as the default one.
+ */
+export const UNNAMED_ROOM_NAME = 'Fitting Room';
 
 interface RoomNameDialogProps {
   isOpen: boolean;
   mode: 'create' | 'rename';
   initialName?: string;
+  /**
+   * The name the Service will store for a create that names nothing. The page
+   * decides it from whether the caller owns a room, so the hint always states
+   * what will actually be stored rather than one fixed label.
+   */
+  blankRoomName: string;
   isSubmitting: boolean;
   errorMessage?: string | null;
   onSubmit: (name: string) => void;
@@ -20,9 +33,10 @@ interface RoomNameDialogProps {
 /** Why the submit is held, or null when the typed name is acceptable. */
 function nameRefusal(mode: 'create' | 'rename', rawName: string): string | null {
   const name = rawName.trim();
-  // A create with no name is not an error: the Service stores `Fitting Room` and
-  // returns that row. A rename has to name something, so a blank one is refused
-  // on the Client rather than by a round trip that writes nothing.
+  // A create with no name is not an error: the Service stores the blank-name
+  // default this dialog states and returns that row. A rename has to name
+  // something, so a blank one is refused on the Client rather than by a round
+  // trip that writes nothing.
   if (name.length === 0) {
     return mode === 'create' ? null : `Enter a name of 1 to ${ROOM_NAME_MAX_LENGTH} characters.`;
   }
@@ -33,12 +47,14 @@ function nameRefusal(mode: 'create' | 'rename', rawName: string): string | null 
 }
 
 /**
- * Issue 313 — create and rename share one dialog.
+ * Issue 313 — create and rename share one dialog. Issue 351 made the blank-name
+ * hint state what the Service will actually store.
  *
  * The requirement is the same in both directions (`1..200` UTF-16 code units after
  * trimming), so the submit stays disabled and the requirement is stated before the
  * request instead of letting the Service answer `400`. A create with a blank name
- * is the one asymmetry: it is a valid request that stores `Fitting Room`.
+ * is the one asymmetry: it is a valid request whose stored name the caller reads
+ * from `blankRoomName`.
  *
  * The typed name starts from `initialName` at mount, so the page remounts it per
  * opening (a `key`) rather than resetting a state it does not own.
@@ -47,6 +63,7 @@ export default function RoomNameDialog({
   isOpen,
   mode,
   initialName = '',
+  blankRoomName,
   isSubmitting,
   errorMessage,
   onSubmit,
@@ -79,7 +96,7 @@ export default function RoomNameDialog({
           <h2 id="room-name-dialog-title" className="text-lg font-semibold text-gray-900">{title}</h2>
           <p id="room-name-dialog-requirement" className="mt-1 text-xs text-gray-600">
             {mode === 'create'
-              ? `Leave the name blank to store it as “${DEFAULT_ROOM_NAME}”. A name is 1 to ${ROOM_NAME_MAX_LENGTH} characters.`
+              ? `Leave the name blank to store it as “${blankRoomName}”. A name is 1 to ${ROOM_NAME_MAX_LENGTH} characters.`
               : `A room name is 1 to ${ROOM_NAME_MAX_LENGTH} characters.`}
           </p>
 
@@ -91,7 +108,7 @@ export default function RoomNameDialog({
             type="text"
             value={name}
             onChange={(event) => setName(event.target.value)}
-            placeholder={DEFAULT_ROOM_NAME}
+            placeholder={blankRoomName}
             className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
 

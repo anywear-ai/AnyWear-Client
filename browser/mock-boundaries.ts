@@ -43,7 +43,7 @@ export async function mockFittingRoom(page: Page, room: MockFittingRoom) {
   const summary = {
     id: room.id,
     userId: 'test-user-id',
-    name: room.name ?? 'Fitting Room',
+    name: room.name ?? 'Default Fitting Room',
     isDefault: true,
     itemCount: room.items?.length ?? 0,
     createdAt: '2026-05-01T00:00:00.000Z',

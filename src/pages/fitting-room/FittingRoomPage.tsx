@@ -12,7 +12,7 @@ import RoomWardrobeList from '../../components/fitting-room/RoomWardrobeList';
 import ToTryOnList, { MAX_TICKED_ITEMS } from '../../components/fitting-room/ToTryOnList';
 import TryItOnSwitch from '../../components/fitting-room/TryItOnSwitch';
 import ComposeActionButton from '../../components/fitting-room/ComposeActionButton';
-import RoomNameDialog from '../../components/fitting-room/RoomNameDialog';
+import RoomNameDialog, { DEFAULT_ROOM_NAME, UNNAMED_ROOM_NAME } from '../../components/fitting-room/RoomNameDialog';
 import RoomDeleteDialog from '../../components/fitting-room/RoomDeleteDialog';
 import useVtoGeneration from '../../hooks/useVtoGeneration';
 import useVtoRating from '../../hooks/useVtoRating';
@@ -37,7 +37,7 @@ import { isClientVersionRefused } from '../../store/clientVersionRefusalStore';
 import type { PostVtoGenerationsBody } from '../../api/model/postVtoGenerationsBody';
 
 /** The sentence a sixth tick shows: refused on the Client, before any request. */
-const TOO_MANY_SELECTED = `You can try on up to ${MAX_TICKED_ITEMS} at a time. Deselect one to add another.`;
+const TOO_MANY_SELECTED = `You can try on up to ${MAX_TICKED_ITEMS} at a time. Unselect one to add another.`;
 
 /**
  * Issue 313 — the Fitting Room, the only place an outfit is composed.
@@ -47,6 +47,11 @@ const TOO_MANY_SELECTED = `You can try on up to ${MAX_TICKED_ITEMS} at a time. D
  * outfit from the ticked subset: render it (default, 1 credit) or save it without a
  * look (no credit). The staged set is the room's server state; which of those rows
  * is ticked is this page's view state and is never persisted.
+ *
+ * Issue 351 — a `Wardrobe` tile stages or unstages the piece it shows, and a
+ * `To try on` tile ticks it. The page numbers the whole path in the order it is
+ * taken: `Wardrobe` is Step 1, `To try on` Step 2, then the base photo, the
+ * compose panel and the result. `Style Prompt` and `History` carry no number.
  *
  * Both write paths and the lookup share one refusal handler: the Service names the
  * refused ids in `details`, the page unticks exactly those, re-reads the room and
@@ -90,6 +95,8 @@ export default function FittingRoomPage() {
   });
   const room = activeRoomId ? roomQuery.data ?? null : null;
   const stagedItems = useMemo(() => room?.items ?? [], [room]);
+  /** The open room's staged ids: what a `Wardrobe` tile reads its own state from. */
+  const stagedIds = useMemo(() => stagedItems.map((item) => item.id), [stagedItems]);
   const refetchRoom = roomQuery.refetch;
 
   const { mutateAsync: stageItems, isPending: isStaging } = usePostFittingRoomsFittingRoomIdItems();
@@ -222,8 +229,9 @@ export default function FittingRoomPage() {
     setRoomActionError(null);
     try {
       if (nameDialogMode === 'create') {
-        // A blank name is a valid create: the Service stores `Fitting Room`, so
-        // the body simply omits it.
+        // A blank name is a valid create: the Service stores the name the dialog's
+        // hint states (the default label when this room is the caller's first, the
+        // unnamed label otherwise), so the body simply omits it.
         const created = await createRoom({ data: trimmed ? { name: trimmed } : {} });
         setSelectedRoomId(created.id);
         setTickedIds([]);
@@ -281,6 +289,24 @@ export default function FittingRoomPage() {
     } catch (error) {
       handleRefusal(error);
     }
+  };
+
+  /**
+   * Issue 351 — one `Wardrobe` tile press, one delivered write.
+   *
+   * The tile states membership, so the press needs no separate add and remove
+   * buttons: an id already staged in the open room is removed with the same
+   * `DELETE …/items/{wearable_item_id}` the `To try on` row's `Remove` sends, and
+   * an id that is not staged is added with `POST …/items`. Staging never ticks
+   * the piece, so the 1–5 bound stays on the `To try on` choice.
+   */
+  const handleToggleStaged = async (itemId: string) => {
+    if (!activeRoomId) return;
+    if (stagedItems.some((item) => item.id === itemId)) {
+      await handleRemoveFromTryOn(itemId);
+      return;
+    }
+    await handleAddToTryOn(itemId);
   };
 
   /** A history record's items join this room's staging area and are ticked. */
@@ -398,17 +424,23 @@ export default function FittingRoomPage() {
         )}
 
         <section aria-labelledby="fitting-room-wardrobe-heading" className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6">
-          <h2 id="fitting-room-wardrobe-heading" className="text-lg font-semibold text-gray-900">Wardrobe</h2>
+          <p data-testid="step-label" className="text-xs font-semibold uppercase tracking-wide text-gray-500">Step 1</p>
+          <h2 id="fitting-room-wardrobe-heading" className="mt-1 text-lg font-semibold text-gray-900">Wardrobe</h2>
           <p className="mb-4 mt-1 text-sm text-gray-600">
-            Every piece you own. Add the ones you want to compare to To try on — adding stages a piece, it does not try it on.
+            Every piece you own. Click a piece's tile to stage it in To try on; click the tile again to take it out. Staging adds a piece — it does not try it on.
           </p>
-          <RoomWardrobeList onAdd={handleAddToTryOn} isAdding={isStaging} />
+          <RoomWardrobeList
+            onToggle={(itemId) => { void handleToggleStaged(itemId); }}
+            stagedIds={stagedIds}
+            isMutating={isStaging || isRemoving}
+          />
         </section>
 
         <section aria-labelledby="fitting-room-to-try-on-heading" className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6">
-          <h2 id="fitting-room-to-try-on-heading" className="text-lg font-semibold text-gray-900">To try on</h2>
+          <p data-testid="step-label" className="text-xs font-semibold uppercase tracking-wide text-gray-500">Step 2</p>
+          <h2 id="fitting-room-to-try-on-heading" className="mt-1 text-lg font-semibold text-gray-900">To try on</h2>
           <p className="mb-4 mt-1 text-sm text-gray-600">
-            The pieces staged in this room. Select up to {MAX_TICKED_ITEMS} of them — the list itself can hold as many as you like.
+            The pieces staged in this room. Click the tiles to choose up to {MAX_TICKED_ITEMS} for this try-on — the list itself can hold as many as you like. Remove takes a piece out of this room.
           </p>
           <ToTryOnList
             items={stagedItems}
@@ -422,7 +454,7 @@ export default function FittingRoomPage() {
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6">
             <div className="mb-4">
-              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Step 1</p>
+              <p data-testid="step-label" className="text-xs font-semibold uppercase tracking-wide text-gray-500">Step 3</p>
               <h2 className="mt-1 text-lg font-semibold text-gray-900">Choose a base photo</h2>
             </div>
             <BasePhotoSelector
@@ -443,7 +475,7 @@ export default function FittingRoomPage() {
         <div className="rounded-xl border border-indigo-100 bg-indigo-50/40 p-4 sm:p-6">
           <div className="mb-4 flex items-start justify-between gap-3">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Step 2</p>
+              <p data-testid="step-label" className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Step 4</p>
               <h2 className="mt-1 text-lg font-semibold text-gray-900">Compose your outfit</h2>
             </div>
             <CreditDisplay />
@@ -484,7 +516,7 @@ export default function FittingRoomPage() {
         </div>
 
         <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6" aria-labelledby="fitting-room-result-heading">
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Step 3</p>
+          <p data-testid="step-label" className="text-xs font-semibold uppercase tracking-wide text-gray-500">Step 5</p>
           <h2 id="fitting-room-result-heading" className="mb-4 mt-1 text-lg font-semibold text-gray-900">Your try-on result</h2>
           <ResultArea
             vtoId={vtoId}
@@ -513,6 +545,7 @@ export default function FittingRoomPage() {
           isOpen={isNameDialogOpen}
           mode={nameDialogMode}
           initialName={nameDialogMode === 'rename' ? room?.name ?? '' : ''}
+          blankRoomName={rooms.length === 0 ? DEFAULT_ROOM_NAME : UNNAMED_ROOM_NAME}
           isSubmitting={isCreatingRoom || isRenamingRoom}
           errorMessage={roomActionError}
           onSubmit={(name) => { void submitRoomName(name); }}

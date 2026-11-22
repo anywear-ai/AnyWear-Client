@@ -177,13 +177,27 @@ function renderPage() {
   return { ...rendered, queryClient, rerenderPage: () => rendered.rerender(element()) };
 }
 
-/** Clicks a staged row's Select control, which is the only way to tick a piece. */
+/**
+ * The two areas, as the accessible regions the page names. Both tile sets carry a
+ * `Remove <name> from try on` control, so every `Remove …` locator is scoped: the
+ * staged `Wardrobe` tile and the row's `Remove` are separate controls that send the
+ * same delete.
+ */
+function wardrobe() {
+  return within(screen.getByRole('region', { name: 'Wardrobe' }));
+}
+
+function toTryOn() {
+  return within(screen.getByRole('region', { name: 'To try on' }));
+}
+
+/** Clicks a staged row's tile, which is the only way to tick a piece. */
 function tick(name: string) {
-  fireEvent.click(screen.getByRole('button', { name: `Select ${name}` }));
+  fireEvent.click(toTryOn().getByRole('button', { name: `Select ${name}` }));
 }
 
 function untick(name: string) {
-  fireEvent.click(screen.getByRole('button', { name: `Deselect ${name}` }));
+  fireEvent.click(toTryOn().getByRole('button', { name: `Selected ${name}` }));
 }
 
 describe('a seventh tick is refused', () => {
@@ -205,7 +219,7 @@ describe('a seventh tick is refused', () => {
     expect(screen.getByTestId('to-try-on-counter')).toHaveTextContent('4 / 5');
     tick('Six');
     expect(screen.getByTestId('to-try-on-counter')).toHaveTextContent('5 / 5');
-    expect(screen.getByRole('button', { name: 'Deselect Six' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Selected Six' })).toBeInTheDocument();
   });
 });
 
@@ -299,15 +313,20 @@ describe('FittingRoomPage hierarchy and room', () => {
   it('names the two areas exactly Wardrobe and To try on, each with one purpose sentence', () => {
     renderPage();
 
-    const wardrobe = screen.getByRole('heading', { level: 2, name: 'Wardrobe' });
-    const toTryOn = screen.getByRole('heading', { level: 2, name: 'To try on' });
-    expect(wardrobe).toBeInTheDocument();
-    expect(toTryOn).toBeInTheDocument();
+    const wardrobeHeading = screen.getByRole('heading', { level: 2, name: 'Wardrobe' });
+    const toTryOnHeading = screen.getByRole('heading', { level: 2, name: 'To try on' });
+    expect(wardrobeHeading).toBeInTheDocument();
+    expect(toTryOnHeading).toBeInTheDocument();
     // The tab has the same name as one area on purpose; the level and the
     // sentence are what tell the two apart.
-    expect(wardrobe.tagName).toBe('H2');
+    expect(wardrobeHeading.tagName).toBe('H2');
+    // The two sentences describe the tile interaction, not the replaced buttons.
     expect(screen.getByText(/Every piece you own\./)).toBeInTheDocument();
+    expect(screen.getByText(/Click a piece's tile to stage it in To try on/)).toBeInTheDocument();
     expect(screen.getByText(/The pieces staged in this room\./)).toBeInTheDocument();
+    expect(screen.getByText(/Click the tiles to choose up to 5 for this try-on/)).toBeInTheDocument();
+    expect(screen.queryByText('Add to try on')).toBeNull();
+    expect(screen.queryByText('Deselect')).toBeNull();
   });
 
   it('opens the first room the list read returns and lists its staged members', () => {
@@ -318,18 +337,60 @@ describe('FittingRoomPage hierarchy and room', () => {
     expect(screen.getByRole('button', { name: /Fitting Room/ })).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('stages a piece from the Wardrobe area with Add … to try on and never ticks it', async () => {
-    stageItems.mockResolvedValue(roomDetail([stagedItem(), stagedItem({ id: 'item-2', name: 'Jeans' })]));
-    renderPage();
+  it('stages an unstaged tile with one POST, presses it, and never ticks the piece', async () => {
+    mockRoom(roomDetail([]));
+    stageItems.mockImplementation(async () => {
+      const staged = roomDetail([stagedItem()]);
+      mockRoom(staged);
+      return staged;
+    });
+    const { rerenderPage } = renderPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add T-Shirt to try on' }));
+    const tile = wardrobe().getByRole('button', { name: 'Add T-Shirt to try on' });
+    expect(tile).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(tile);
 
     await waitFor(() => expect(stageItems).toHaveBeenCalledWith({
       fittingRoomId: ROOM_ID,
       data: { wearable_item_ids: ['item-1'] },
     }));
-    // Adding stages: the tick belongs to the To try on area only.
-    expect(screen.queryByRole('button', { name: 'Deselect T-Shirt' })).toBeNull();
+    // One press is one batch: nothing else writes.
+    expect(stageItems).toHaveBeenCalledTimes(1);
+    expect(removeStagedItem).not.toHaveBeenCalled();
+
+    // The tile states the staged set itself: pressed, renamed, chipped.
+    rerenderPage();
+    const stagedTile = wardrobe().getByRole('button', { name: 'Remove T-Shirt from try on' });
+    expect(stagedTile).toHaveAttribute('aria-pressed', 'true');
+    expect(within(stagedTile).getByText('Selected')).toBeInTheDocument();
+    // Staging adds a piece; the tick belongs to the To try on area only.
+    expect(screen.getByTestId('to-try-on-counter')).toHaveTextContent('0 / 5');
+    // The garment is still listed by the wardrobe read that paints the grid.
+    expect(wardrobe().getByRole('button', { name: /T-Shirt/ })).toBeInTheDocument();
+  });
+
+  it('un-stages a staged tile with one DELETE and leaves the garment in the wardrobe', async () => {
+    removeStagedItem.mockImplementation(async () => {
+      mockRoom(roomDetail([]));
+    });
+    const { rerenderPage } = renderPage();
+
+    const tile = wardrobe().getByRole('button', { name: 'Remove T-Shirt from try on' });
+    expect(tile).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(tile);
+
+    await waitFor(() => expect(removeStagedItem).toHaveBeenCalledWith({
+      fittingRoomId: ROOM_ID,
+      wearableItemId: 'item-1',
+    }));
+    expect(removeStagedItem).toHaveBeenCalledTimes(1);
+    // Un-staging is the delivered row delete, not a staging write.
+    expect(stageItems).not.toHaveBeenCalled();
+
+    rerenderPage();
+    expect(wardrobe().getByRole('button', { name: 'Add T-Shirt to try on' })).toHaveAttribute('aria-pressed', 'false');
+    // The row left To try on; the garment itself is untouched and still listed.
+    expect(screen.getByText('Nothing is staged yet. Click pieces in Wardrobe above to keep them here for this room.')).toBeInTheDocument();
   });
 
   it('stages six or more pieces and only bounds the ticked subset', () => {
@@ -339,6 +400,49 @@ describe('FittingRoomPage hierarchy and room', () => {
 
     expect(screen.getAllByTestId('to-try-on-row')).toHaveLength(6);
     expect(screen.getByTestId('to-try-on-counter')).toHaveTextContent('0 / 5');
+  });
+});
+
+describe('FittingRoomPage step model', () => {
+  it('numbers the whole path Step 1 to Step 5 in document order, on the right areas', () => {
+    renderPage();
+
+    const labels = screen.getAllByTestId('step-label');
+    expect(labels).toHaveLength(5);
+    expect(labels.map((label) => label.textContent)).toEqual([
+      'Step 1',
+      'Step 2',
+      'Step 3',
+      'Step 4',
+      'Step 5',
+    ]);
+
+    // Each label is a sibling of its own area's h2, so it numbers the section the
+    // person is on rather than an arbitrary paragraph.
+    const headingOf = (label: HTMLElement) => {
+      const scope = label.closest('section') ?? label.parentElement;
+      return within(scope as HTMLElement).getByRole('heading', { level: 2 }).textContent;
+    };
+    expect(labels.map(headingOf)).toEqual([
+      'Wardrobe',
+      'To try on',
+      'Choose a base photo',
+      'Compose your outfit',
+      'Your try-on result',
+    ]);
+    expect(labels.every((label) => label.tagName === 'P')).toBe(true);
+  });
+
+  it('leaves Style Prompt and History unnumbered', () => {
+    renderPage();
+
+    const stylePromptPanel = screen.getByRole('heading', { level: 2, name: /Style Prompt/ }).parentElement as HTMLElement;
+    const historyPanel = screen.getByRole('heading', { level: 2, name: 'History' }).parentElement as HTMLElement;
+
+    expect(within(stylePromptPanel).queryAllByTestId('step-label')).toHaveLength(0);
+    expect(within(historyPanel).queryAllByTestId('step-label')).toHaveLength(0);
+    // The optional field keeps saying it is optional instead of becoming a step.
+    expect(screen.getByText('(optional)')).toBeInTheDocument();
   });
 });
 
@@ -379,7 +483,7 @@ describe('FittingRoomPage selection bounds', () => {
 
     expect(screen.getByTestId('to-try-on-archived')).toHaveTextContent('Archived');
     expect(screen.getByRole('button', { name: 'Select Jeans' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Remove Jeans from try on' })).toBeEnabled();
+    expect(toTryOn().getByRole('button', { name: 'Remove Jeans from try on' })).toBeEnabled();
   });
 
   it('keeps the primary button disabled when only archived members are staged', () => {
@@ -411,7 +515,7 @@ describe('FittingRoomPage compose paths', () => {
     expect(screen.getByRole('switch', { name: 'Try it on now (1 credit)' })).toHaveAttribute('aria-checked', 'false');
     expect(screen.getByRole('button', { name: 'Save outfit' })).toBeEnabled();
     expect(screen.getByText('No credit is charged for saving an outfit.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Deselect T-Shirt' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Selected T-Shirt' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('saves the ticked set with the member list only, and keeps To try on populated', async () => {
@@ -432,7 +536,7 @@ describe('FittingRoomPage compose paths', () => {
     expect(screen.queryByLabelText(/outfit name/i)).toBeNull();
     // The staging area survives the compose attempt.
     expect(screen.getAllByTestId('to-try-on-row')).toHaveLength(2);
-    expect(screen.getByRole('button', { name: 'Deselect T-Shirt' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Selected T-Shirt' })).toBeInTheDocument();
   });
 
   /**
@@ -598,7 +702,7 @@ describe('FittingRoomPage compose paths', () => {
     expect(screen.getByRole('status')).toHaveTextContent('in the Storage Box');
     // Exactly the named id is unticked; the other one stays selected.
     expect(screen.getByRole('button', { name: 'Select Jeans' })).toHaveAttribute('aria-pressed', 'false');
-    expect(screen.getByRole('button', { name: 'Deselect T-Shirt' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Selected T-Shirt' })).toHaveAttribute('aria-pressed', 'true');
     expect(refetchRoom).toHaveBeenCalled();
     // The request was never silently shrunk and retried.
     expect(generate).toHaveBeenCalledTimes(1);
@@ -641,8 +745,8 @@ describe('FittingRoomPage compose paths', () => {
       fittingRoomId: ROOM_ID,
       data: { wearable_item_ids: ['item-1', 'item-2'] },
     });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Deselect T-Shirt' })).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: 'Deselect Jeans' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Selected T-Shirt' })).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Selected Jeans' })).toBeInTheDocument();
   });
 });
 
@@ -710,12 +814,35 @@ describe('FittingRoomPage room actions', () => {
     renderPage();
 
     tick('T-Shirt');
-    fireEvent.click(screen.getByRole('button', { name: 'Remove T-Shirt from try on' }));
+    fireEvent.click(toTryOn().getByRole('button', { name: 'Remove T-Shirt from try on' }));
 
     await waitFor(() => expect(removeStagedItem).toHaveBeenCalledWith({
       fittingRoomId: ROOM_ID,
       wearableItemId: 'item-1',
     }));
     expect(refetchRoom).toHaveBeenCalled();
+  });
+
+  it('states the unnamed label for a blank name when the caller already owns a room', () => {
+    renderPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New room' }));
+
+    // Beside an existing room the create is not the default, so the hint keeps
+    // stating the ordinary name-less result.
+    expect(screen.getByText(/Leave the name blank to store it as “Fitting Room”/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Room name')).toHaveAttribute('placeholder', 'Fitting Room');
+  });
+
+  it('states the default label for a blank name when the create would be the first room', () => {
+    mockRoom(undefined);
+    renderPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New room' }));
+
+    // The hint states what will actually be stored: a first room is the default,
+    // and the default is now labelled distinctly from a room the person named.
+    expect(screen.getByText(/Leave the name blank to store it as “Default Fitting Room”/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Room name')).toHaveAttribute('placeholder', 'Default Fitting Room');
   });
 });

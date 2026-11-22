@@ -14,10 +14,15 @@ import type { GetWardrobeParams } from '../../api/model/getWardrobeParams';
 type RoomWardrobeFilters = Pick<GetWardrobeParams, 'category' | 'color' | 'material'>;
 
 interface RoomWardrobeListProps {
-  /** Stages one wardrobe item in the current room — never a tick. */
-  onAdd: (itemId: string) => void;
-  /** The action is held while a staging request is out, so one click is one batch. */
-  isAdding?: boolean;
+  /**
+   * Stages or unstages one wardrobe item in the open room — never a tick. The
+   * page decides which write runs from whether the id is already staged.
+   */
+  onToggle: (itemId: string) => void;
+  /** The ids staged in the open room, so a tile can state its own membership. */
+  stagedIds: string[];
+  /** Both writes are held by one flag, so one press is one request. */
+  isMutating?: boolean;
 }
 
 function styleAttribute(item: GetWardrobe200Item, key: 'color' | 'material'): string | null {
@@ -67,19 +72,26 @@ function FilterSelect({
 }
 
 /**
- * Issue 313 — the room's `Wardrobe` area.
+ * Issue 313 — the room's `Wardrobe` area. Issue 351 made the card the control.
  *
  * It lists the caller's active wardrobe with `GET /wardrobe`, filtered only by
  * the three tag parameters the interface already has. The search box narrows the
  * list the page already fetched: it sends no request and adds no parameter. Each
- * card's one action stages the piece in `To try on`; ticking happens there, which
- * is what keeps "which pieces exist in the room" and "which pieces are being
- * tried" two separate facts.
+ * card is one toggle button over its own image, name and tag line: activating it
+ * stages the piece in `To try on`, activating it again takes it out. Ticking
+ * happens there, which is what keeps "which pieces exist in the room" and "which
+ * pieces are being tried" two separate facts.
+ *
+ * The staged set is readable from this area alone: a staged card carries
+ * `aria-pressed`, an indigo border and ring, and a visible `Selected` chip, so
+ * colour is never the only carrier. The accessible name states the action and
+ * flips with the state, and the image is `alt=""` because that name already
+ * carries the label.
  *
  * An archived piece is absent rather than marked: this is a picking surface, so
  * the Storage Box's own wording and restore path stay in the Wardrobe tab.
  */
-export default function RoomWardrobeList({ onAdd, isAdding = false }: RoomWardrobeListProps) {
+export default function RoomWardrobeList({ onToggle, stagedIds, isMutating = false }: RoomWardrobeListProps) {
   const [category, setCategory] = useState('');
   const [color, setColor] = useState('');
   const [material, setMaterial] = useState('');
@@ -198,46 +210,68 @@ export default function RoomWardrobeList({ onAdd, isAdding = false }: RoomWardro
           </p>
         </div>
       ) : (
-        <div data-testid="room-wardrobe-grid" className="grid max-h-96 grid-cols-2 gap-3 overflow-y-auto sm:grid-cols-3 md:grid-cols-4">
+        <div
+          data-testid="room-wardrobe-grid"
+          role="group"
+          aria-label="Wardrobe pieces"
+          className="grid max-h-96 grid-cols-2 gap-3 overflow-y-auto sm:grid-cols-3 md:grid-cols-4"
+        >
           {visibleItems.map((item) => {
             const imageUrl = getPrimaryImageUrl(item.images);
             const primaryImageId = item.images.find((image) => image.isPrimary)?.imageId
               ?? item.images[0]?.imageId;
             const itemColor = styleAttribute(item, 'color');
             const itemMaterial = styleAttribute(item, 'material');
+            const label = itemLabel(item);
+            const staged = stagedIds.includes(item.id);
             return (
-              <article
+              <button
                 key={item.id}
-                className="relative overflow-hidden rounded-xl border border-gray-200 bg-white"
+                type="button"
+                onClick={() => onToggle(item.id)}
+                disabled={isMutating}
+                aria-pressed={staged}
+                aria-label={staged ? `Remove ${label} from try on` : `Add ${label} to try on`}
+                className={`relative overflow-hidden rounded-xl border bg-white text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+                  staged
+                    ? 'border-indigo-600 ring-1 ring-indigo-600'
+                    : 'border-gray-200 hover:border-gray-400'
+                }`}
               >
-                <div className="aspect-[4/5] bg-gray-100">
+                <span className="block aspect-[4/5] bg-gray-100">
                   {imageUrl && primaryImageId ? (
                     <CachedImage
                       src={imageUrl}
                       cacheKey={primaryImageId}
-                      alt={itemLabel(item)}
+                      alt=""
                       className="h-full w-full object-cover"
                     />
                   ) : (
-                    <div className="flex h-full items-center justify-center text-xs text-gray-400">No Image</div>
+                    <span className="flex h-full items-center justify-center text-xs text-gray-400">No Image</span>
                   )}
-                </div>
-                <div className="p-2">
-                  <p className="truncate text-xs font-medium text-gray-900">{itemLabel(item)}</p>
-                  <p className="truncate text-xs text-gray-600">{[item.category, itemColor, itemMaterial].filter(Boolean).join(' • ')}</p>
-                </div>
-                <div className="border-t border-gray-100 p-2">
-                  <button
-                    type="button"
-                    onClick={() => onAdd(item.id)}
-                    disabled={isAdding}
-                    aria-label={`Add ${itemLabel(item)} to try on`}
-                    className="w-full rounded-md bg-indigo-50 px-2 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Add to try on
-                  </button>
-                </div>
-              </article>
+                </span>
+                {staged && (
+                  <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm">
+                    <svg
+                      aria-hidden="true"
+                      className="h-3 w-3"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={3}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M5 13l4 4L19 7" />
+                    </svg>
+                    Selected
+                  </span>
+                )}
+                <span className="block p-2">
+                  <span className="block truncate text-xs font-medium text-gray-900">{label}</span>
+                  <span className="block truncate text-xs text-gray-600">{[item.category, itemColor, itemMaterial].filter(Boolean).join(' • ')}</span>
+                </span>
+              </button>
             );
           })}
         </div>

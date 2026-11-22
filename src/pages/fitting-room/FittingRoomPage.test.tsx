@@ -564,6 +564,28 @@ describe('FittingRoomPage compose paths', () => {
     expect(Object.keys(body)).not.toContain('outfit_name');
   });
 
+  /**
+   * Issue 350 — the lookup answer belongs to the result area, beside the try-on
+   * that would spend the credit, not to the compose card above the button that
+   * starts it.
+   */
+  it('renders the matched outfit inside the Your try-on result region', () => {
+    lookupHit({ id: 'outfit-9', name: 'Weekend Casual', generationCount: 2, wearableItems: [], latestGeneration: null, look: null });
+    renderPage();
+
+    tick('T-Shirt');
+
+    const result = screen.getByRole('region', { name: 'Your try-on result' });
+    const notice = within(result).getByTestId('outfit-lookup-hit');
+    expect(notice).toHaveTextContent('Weekend Casual');
+    expect(notice).toHaveTextContent('2 try-on records');
+    expect(notice).toHaveTextContent('no credit is spent until you press Generate try-on');
+    // It is the result area's own child, not a second copy inside the compose step.
+    expect(notice.parentElement).not.toBeNull();
+    expect(result.contains(notice)).toBe(true);
+    expect(screen.getAllByTestId('outfit-lookup-hit')).toHaveLength(1);
+  });
+
   it('generates the item list on a lookup miss and sends no outfit name', async () => {
     renderPage();
 

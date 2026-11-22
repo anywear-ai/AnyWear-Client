@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   useDeleteWardrobeItemsItemId,
   useGetWardrobeCategories,
-  useGetWardrobeItemsItemIdDependentOutfits,
   usePostWardrobeItemsItemIdArchive,
   usePostWardrobeItemsItemIdRestore,
 } from '../../api/endpoints/wardrobe/wardrobe';
@@ -29,6 +28,7 @@ import {
 import { connectSse } from '../../lib/sse';
 import { mergeWardrobeStatus } from '../../lib/status-arbitration';
 import { useWardrobeList } from '../../hooks/useWardrobeList';
+import { useDependentOutfitPreview } from '../../hooks/useDependentOutfitPreview';
 import { isClientVersionRefused } from '../../store/clientVersionRefusalStore';
 import { GetWardrobe200Item } from '../../api/model/getWardrobe200Item';
 import { GetWardrobeParams } from '../../api/model/getWardrobeParams';
@@ -73,29 +73,22 @@ function getMaterialFromAttributes(styleAttributes: unknown): string | null {
   return typeof sa.material === 'string' ? sa.material : null;
 }
 
-/** The page-level notice a delete that still owes image cleanup leaves behind. */
-function cleanupNoticeText(retainedObjectKeys: number): string {
-  return `Outfit deleted. ${retainedObjectKeys} image${retainedObjectKeys === 1 ? ' is' : 's are'} still being cleaned up in the background.`;
-}
-
 /** The message a started re-tag leaves in the page notice after its dialog closes. */
 const RETAG_STARTED_TEXT = 'Re-tagging started. Check back shortly.';
 
 /**
- * Everything the page states in its one `role="status"` notice: an outfit delete
- * that still owes image cleanup, a re-tag that outlives the dialog that started
- * it, and a delete whose row was already gone.
+ * Everything the page states in its one `role="status"` notice: a re-tag that
+ * outlives the dialog that started it, and a delete whose row was already gone.
+ * Issue 350 — no outfit delete owes image cleanup since #332 shrank it to removing
+ * the outfit alone, so the page states no cleanup outcome for one.
  */
 type PageNotice =
-  | { kind: 'outfit-cleanup'; retainedObjectKeys: number }
   | { kind: 'retag-started' }
   | { kind: 'item-already-gone' }
   | { kind: 'item-cleanup-pending' };
 
 function noticeText(notice: PageNotice): string {
   switch (notice.kind) {
-    case 'outfit-cleanup':
-      return cleanupNoticeText(notice.retainedObjectKeys);
     case 'retag-started':
       return RETAG_STARTED_TEXT;
     case 'item-already-gone':
@@ -145,9 +138,9 @@ export default function WardrobePage() {
   // Set by a delete that took the card with it; the effect below moves focus to
   // the grid region once the panel has actually left the document.
   const restoreFocusToList = useRef(false);
-  // The page's one notice, outside every dialog: an outfit whose rows are gone
-  // while the Service still owes stored-image cleanup, a re-tag that outlives
-  // the dialog that started it, and a row that was already gone.
+  // The page's one notice, outside every dialog: a re-tag that outlives the dialog
+  // that started it, and a row that was already gone (or whose images are still
+  // being cleaned up).
   const [notice, setNotice] = useState<PageNotice | null>(null);
 
   const listRegionRef = useRef<HTMLDivElement>(null);
@@ -175,19 +168,11 @@ export default function WardrobePage() {
   const { mutateAsync: deleteItem, isPending: isDeleting } = useDeleteWardrobeItemsItemId();
   const { mutateAsync: archiveItem, isPending: isArchiving } = usePostWardrobeItemsItemIdArchive();
   const { mutateAsync: restoreItem, isPending: isRestoring } = usePostWardrobeItemsItemIdRestore();
-  // Issue 332 — the delete confirmation renders from this preview. The dialog
+  // Issue 332/350 — the delete confirmation renders from this preview. The dialog
   // enables confirmation only when the page holds every entry the Service counts,
-  // so the request pages to `total` rather than accepting the first page.
-  const deletePreview = useGetWardrobeItemsItemIdDependentOutfits(
-    deleteTarget?.id ?? '',
-    { limit: 100, offset: 0 },
-    {
-      query: {
-        enabled: !!deleteTarget,
-        retry: false,
-      },
-    },
-  );
+  // so the hook sweeps the paged endpoint to the Service's exact `total`; nothing
+  // renders until that sweep resolves, and reopening the panel re-reads it.
+  const deletePreview = useDependentOutfitPreview(deleteTarget?.id);
   const { data: outfitsResponse } = useGetOutfits({
     query: {
       // Poll only while an outfit has a Pending or Processing generation; the
@@ -751,14 +736,14 @@ export default function WardrobePage() {
         isOpen={deleteTarget !== null}
         itemName={deleteTarget?.name}
         itemCategory={deleteTarget?.category}
-        dependentOutfits={deletePreview.data?.outfits ?? null}
-        dependentTotal={deletePreview.data?.total ?? null}
+        dependentOutfits={deletePreview.outfits}
+        dependentTotal={deletePreview.total}
         previewFailed={deletePreview.isError}
         isSubmitting={isDeleting}
         failureMessage={deleteFailure}
         onCancel={cancelDeleteConfirmation}
         onConfirm={confirmDeleteItem}
-        onRetryPreview={() => { void deletePreview.refetch(); }}
+        onRetryPreview={deletePreview.refetch}
       />
 
       {selectedItem && (

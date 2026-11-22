@@ -56,8 +56,8 @@ describe('OutfitLookupNotice', () => {
     const notice = screen.getByTestId('outfit-lookup-hit');
     expect(notice).toHaveTextContent('Weekend Casual');
     expect(notice).toHaveTextContent('3 try-on records');
-    // The credit promise is stated where the choice is made.
-    expect(notice).toHaveTextContent('no credit is spent until you press Try on');
+    // Issue 350 — the credit promise names the control that actually spends it.
+    expect(notice).toHaveTextContent('no credit is spent until you press Generate try-on');
   });
 
   it('uses the singular for one record and a true zero for none', () => {

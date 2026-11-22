@@ -450,9 +450,6 @@ export default function FittingRoomPage() {
           </div>
           <div className="space-y-3">
             <TryItOnSwitch checked={tryItOnNow} onChange={setTryItOnNow} disabled={isBusy} />
-            {tryItOnNow && (
-              <OutfitLookupNotice outfit={matchedOutfit} isLoading={isLookingUpOutfit} />
-            )}
             <ComposeActionButton
               tryItOnNow={tryItOnNow}
               onClick={() => { void (tryItOnNow ? handleGenerate() : handleSaveOutfit()); }}
@@ -486,6 +483,14 @@ export default function FittingRoomPage() {
         <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6" aria-labelledby="fitting-room-result-heading">
           <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Step 3</p>
           <h2 id="fitting-room-result-heading" className="mb-4 mt-1 text-lg font-semibold text-gray-900">Your try-on result</h2>
+          {/* Issue 350 — the lookup's answer is the result area's, not the compose
+              card's: it belongs beside the try-on that would spend the credit, not
+              above the control that starts it. */}
+          {tryItOnNow && (
+            <div className="mb-4">
+              <OutfitLookupNotice outfit={matchedOutfit} isLoading={isLookingUpOutfit} />
+            </div>
+          )}
           <ResultArea
             vtoId={vtoId}
             result={result}

@@ -1,4 +1,5 @@
 import { getErrorMessage, getHttpStatus, getStringProperty } from './errors';
+import { generationInProgressRefusal } from './generationInProgress';
 
 /**
  * What a refused `DELETE /wardrobe/items/{item_id}` should say, and whether the
@@ -62,24 +63,6 @@ function errorCode(error: unknown): string | null {
   return isRecord(data) ? (getStringProperty(data, 'error') ?? null) : null;
 }
 
-/** The one running try-on a `409 GENERATION_IN_PROGRESS` named first. */
-function firstBlocker(error: unknown): { outfitName: string | null; status: string | null } {
-  const data = responseData(error);
-  const details = isRecord(data) ? data.details : undefined;
-  const blocking = isRecord(details) ? details.blocking : undefined;
-  const first = Array.isArray(blocking) && isRecord(blocking[0]) ? blocking[0] : undefined;
-  if (!first) {
-    return {
-      outfitName: null,
-      status: isRecord(details) ? (getStringProperty(details, 'status') ?? null) : null,
-    };
-  }
-  return {
-    outfitName: getStringProperty(first, 'outfitName') ?? null,
-    status: getStringProperty(first, 'status') ?? null,
-  };
-}
-
 /**
  * Describe a rejected `DELETE /wardrobe/items/{item_id}`.
  *
@@ -125,11 +108,11 @@ export function describeWardrobeItemDeleteFailure(error: unknown): WardrobeItemD
       return { message: ARCHIVE_FIRST_SENTENCE, gone: false, cleanupPending: false };
     }
     if (code === 'GENERATION_IN_PROGRESS') {
-      const blocker = firstBlocker(error);
-      const which = blocker.outfitName ? `"${blocker.outfitName}"` : 'An outfit in this list';
-      const running = blocker.status ? ` (${blocker.status})` : '';
       return {
-        message: `Nothing was deleted: ${which} has a try-on still running${running}. Wait for it to finish, then delete this item.`,
+        message: generationInProgressRefusal(error, {
+          fallbackName: 'An outfit in this list',
+          target: 'item',
+        }),
         gone: false,
         cleanupPending: false,
       };

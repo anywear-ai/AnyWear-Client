@@ -18,12 +18,17 @@
 //   2. Dispatch `mutate.yml` on `ref=main` with `return_run_details: true` and
 //      exactly the six `publish-client` inputs. A dispatch that names no run id is
 //      a failure, never a silent skip.
-//   3. Read that run back by id, requiring the id the dispatch returned.
+//   3. Read that run back by id through the shared created-run module
+//      (`scripts/created-run-read.mjs`), which owns the by-id path, retries a `404`
+//      against the same id, and requires the id the dispatch returned.
 //   4. Poll the run's job list on a fixed interval until the `deploy` job's
-//      conclusion is non-null, under a bounded ceiling. `success` records the Infra
+//      conclusion is non-null, under a bounded ceiling. A `success` records the Infra
 //      run URL and the conclusion in the step summary and succeeds; `skipped` fails
 //      naming the run, because a skipped run published nothing; `failure` or
-//      `cancelled` fails naming the run and the conclusion. It does not wait for
+//      `cancelled` fails naming the run and the conclusion. A run that has already
+//      completed without succeeding is not polled: its job list is read once, so the
+//      handoff reports the publication when the `deploy` job succeeded and fails at
+//      once naming the run's conclusion when the job did not. It does not wait for
 //      Infra's `qualify-hold`, which owns that verdict.
 //
 // The `run`, `wait`, `now`, `log` and `summary` dependencies are injected so the node
@@ -33,6 +38,8 @@ import { execFile } from 'node:child_process';
 import { appendFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+import { completedWithoutSuccess, readCreatedRunById } from './created-run-read.mjs';
 
 /** The dispatch target and its fixed bounds. */
 export const infraHandoff = {
@@ -182,14 +189,65 @@ export async function dispatchHandoff(run, target) {
   return { runId, runUrl: typeof response?.html_url === 'string' ? response.html_url : undefined };
 }
 
-/** The created run, read back by id and required to be the run the handoff named. */
-export async function readRunById(run, target, runId) {
-  const created = await run(['api', `repos/${target.owner}/${target.repository}/actions/runs/${runId}`]);
-  if (created?.id !== runId) {
-    throw new Error(`the handoff named Infra run ${runId}, but the runs API returned '${created?.id}'`);
+/** The browsable URL of a run in the dispatch target, from the target and the id. */
+function createdRunUrl(target, runId) {
+  return `https://github.com/${target.owner}/${target.repository}/actions/runs/${runId}`;
+}
+
+/**
+ * The created run, read back by id through the shared module, which owns the by-id
+ * path, the bounded `404` retry, the identity check and the failure message. The
+ * run's own conclusion is returned, so a run that already completed without
+ * succeeding is judged on its `deploy` job instead of being polled to the ceiling.
+ * `wait` and `log` are injected so a test drives the retry without a clock or a
+ * real run; both default inside the module.
+ */
+export async function readRunById(run, target, runId, { wait, log } = {}) {
+  const body = await readCreatedRunById({
+    read: async (path) => run(['api', path]),
+    repository: `${target.owner}/${target.repository}`,
+    runId,
+    runUrl: createdRunUrl(target, runId),
+    label: 'the created Infra run',
+    requireSuccess: false,
+    wait,
+    log,
+  });
+  return {
+    runId,
+    runUrl: typeof body.html_url === 'string' && body.html_url !== '' ? body.html_url : createdRunUrl(target, runId),
+    terminalNonSuccess: completedWithoutSuccess(body),
+    conclusion: typeof body.conclusion === 'string' ? body.conclusion : null,
+  };
+}
+
+/**
+ * The `deploy` job's conclusion for a run that has already completed without
+ * succeeding. The run cannot change any more, so its job list is read once: the
+ * handoff reports the publication when the job succeeded, and otherwise fails at
+ * once naming the run and the conclusion instead of holding the job for 150
+ * minutes. A job list that cannot be read, that is not a list, or that names no
+ * `deploy` job is a failure here, because the handoff cannot prove publication.
+ */
+async function readConcludedDeployJob({ run, target, runId, runUrl, runConclusion }) {
+  const unusable = (why) => new Error(`the Infra run ${runUrl} concluded ${runConclusion}, ${why}`);
+  let jobs;
+  try {
+    jobs = await run(['api', `repos/${target.owner}/${target.repository}/actions/runs/${runId}/jobs?per_page=100`]);
+  } catch (error) {
+    throw unusable(`but its job list could not be read: ${error.message}`);
   }
-  const url = typeof created.html_url === 'string' && created.html_url !== '' ? created.html_url : `run ${runId}`;
-  return { runId, runUrl: url };
+  if (!Array.isArray(jobs?.jobs)) {
+    throw unusable(`but its job list carried no jobs, so the Infra ${infraHandoff.deployJob} job cannot be named`);
+  }
+  const deploy = jobs.jobs.find((job) => job?.name === infraHandoff.deployJob);
+  if (deploy === undefined) {
+    throw unusable(`and names no Infra ${infraHandoff.deployJob} job, so the bundle was not published`);
+  }
+  if (deploy.conclusion === null || deploy.conclusion === undefined) {
+    throw unusable(`and its Infra ${infraHandoff.deployJob} job carries no conclusion, so the bundle was not published`);
+  }
+  return deploy.conclusion;
 }
 
 /**
@@ -279,8 +337,10 @@ export async function publishClientHandoff(options = {}) {
     log(`Dispatched ${target.repository}/${target.workflow}: ${created.runUrl ?? `run ${created.runId}`}`);
   }
 
-  const { runUrl } = await readRunById(run, target, created.runId);
-  const conclusion = await waitForDeployConclusion({ run, wait, now, target, runId: created.runId, runUrl, log });
+  const { runUrl, terminalNonSuccess, conclusion: runConclusion } = await readRunById(run, target, created.runId, { wait, log });
+  const conclusion = terminalNonSuccess
+    ? await readConcludedDeployJob({ run, target, runId: created.runId, runUrl, runConclusion })
+    : await waitForDeployConclusion({ run, wait, now, target, runId: created.runId, runUrl, log });
   if (conclusion !== 'success') {
     if (conclusion === 'skipped') {
       throw new Error(`the Infra ${infraHandoff.deployJob} job was skipped, so the bundle was not published: Infra run ${runUrl}`);

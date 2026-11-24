@@ -68,6 +68,11 @@ function runResponse(id = infraRunId) {
   return { id, html_url: infraRunUrl, status: 'in_progress', conclusion: null };
 }
 
+/** One run read-back the API has already finished without succeeding. */
+function completedRunResponse(conclusion = 'failure') {
+  return { id: infraRunId, html_url: infraRunUrl, status: 'completed', conclusion };
+}
+
 /** A job list whose `deploy` job is still running. */
 function runningJobs() {
   return { total_count: 2, jobs: [{ name: 'preflight', conclusion: 'success' }, { name: 'deploy', conclusion: null }] };
@@ -121,13 +126,107 @@ test('the created run is read back by id, and a different id is refused', async 
   assert.deepEqual(await readRunById(matched.run, handoffTarget(environment), infraRunId), {
     runId: infraRunId,
     runUrl: infraRunUrl,
+    terminalNonSuccess: false,
+    conclusion: null,
   });
 
   const mismatched = fakeRun({ [paths.created(infraRunId)]: runResponse(9999) });
   await assert.rejects(
     () => readRunById(mismatched.run, handoffTarget(environment), infraRunId),
-    /the handoff named Infra run 7171, but the runs API returned '9999'/,
+    /was not returned by id: the run API answered run 9999, not the dispatched run 7171 \(1 read over 15000 ms of waits\)/,
   );
+});
+
+test('a first read that answers 404 is retried against the same id and succeeds', async () => {
+  let createdReads = 0;
+  const { run, calls } = fakeRun({
+    ...emptyListings(),
+    [paths.dispatch]: dispatchResponse(),
+    [paths.created(infraRunId)]: () => {
+      createdReads += 1;
+      if (createdReads === 1) throw new Error('gh: Not Found (HTTP 404)');
+      return runResponse();
+    },
+    [paths.jobs(infraRunId)]: concludedJobs('success'),
+  });
+  const waits = [];
+  const logs = [];
+  let summary;
+  const result = await publishClientHandoff({
+    environment,
+    run,
+    wait: async (milliseconds) => { waits.push(milliseconds); },
+    now: () => 0,
+    log: (message) => logs.push(message),
+    summary: async (text) => { summary = text; },
+  });
+
+  assert.equal(result.conclusion, 'success');
+  assert.equal(createdReads, 2);
+  const createdCalls = calls.filter((call) => call.target === paths.created(infraRunId));
+  assert.deepEqual(createdCalls.map((call) => call.args[1]), [paths.created(infraRunId), paths.created(infraRunId)],
+    'the retry reads the same run id, never another');
+  assert.equal(calls.filter((call) => call.target === paths.dispatch).length, 1, 'the dispatch is sent exactly once');
+  assert.deepEqual(waits, [1000], 'one bounded 1 000 ms wait between the two reads');
+  assert.match(logs.join('\n'),
+    new RegExp(`the by-id read of the created Infra run ${infraRunUrl} answered 404 on attempt 1/5; retrying in 1000 ms`));
+  assert.match(logs.join('\n'), new RegExp(`the created Infra run ${infraRunUrl} is run 7171 \\(read attempt 2/5\\)`));
+  assert.match(summary, /Infra deploy conclusion: `success`/);
+});
+
+test('every read answering 404 fails after five reads dispatching once', async () => {
+  const { run, calls } = fakeRun({
+    ...emptyListings(),
+    [paths.dispatch]: dispatchResponse(),
+    [paths.created(infraRunId)]: () => { throw new Error('gh: Not Found (HTTP 404)'); },
+  });
+  const waits = [];
+  const logs = [];
+  await assert.rejects(
+    () => publishClientHandoff({
+      environment,
+      run,
+      wait: async (milliseconds) => { waits.push(milliseconds); },
+      now: () => 0,
+      log: (message) => logs.push(message),
+      summary: async () => { throw new Error('an unreadable run must not be summarised as a handoff'); },
+    }),
+    new RegExp(`the created Infra run ${infraRunUrl} was not readable after 5 reads over 15000 ms, every read answering 404;`
+      + ' the dispatch was accepted once and not repeated, so the run was dropped or not accepted'),
+  );
+  const createdCalls = calls.filter((call) => call.target === paths.created(infraRunId));
+  assert.equal(createdCalls.length, 5);
+  assert.deepEqual(createdCalls.map((call) => call.args[1]), Array(5).fill(paths.created(infraRunId)));
+  assert.equal(calls.filter((call) => call.target === paths.dispatch).length, 1, 'the dispatch is sent exactly once');
+  assert.equal(calls.some((call) => call.target === paths.jobs(infraRunId)), false, 'an unreadable run has no job list to read');
+  assert.deepEqual(waits, [1000, 2000, 4000, 8000], 'the waits are the module\'s 15 000 ms schedule');
+  assert.equal(logs.filter((message) => message.includes('answered 404 on attempt')).length, 4,
+    'the fifth read emits no retry line');
+});
+
+test('a non-404 read failure is not retried', async () => {
+  const { run, calls } = fakeRun({
+    ...emptyListings(),
+    [paths.dispatch]: dispatchResponse(),
+    [paths.created(infraRunId)]: () => { throw new Error('gh: Server Error (HTTP 502)'); },
+  });
+  const waits = [];
+  await assert.rejects(
+    () => publishClientHandoff({
+      environment,
+      run,
+      wait: async (milliseconds) => { waits.push(milliseconds); },
+      now: () => 0,
+      log: () => {},
+      summary: async () => { throw new Error('an unreadable run must not be summarised as a handoff'); },
+    }),
+    new RegExp(`the created Infra run ${infraRunUrl} could not be read: gh: Server Error \\(HTTP 502\\)`
+      + ' \\(1 read over 15000 ms of waits\\)'),
+  );
+  assert.equal(calls.filter((call) => call.target === paths.created(infraRunId)).length, 1,
+    'waiting cannot change a non-404 failure, so it consumes no retry');
+  assert.equal(calls.filter((call) => call.target === paths.dispatch).length, 1);
+  assert.deepEqual(waits, []);
 });
 
 test('a queued Infra run already naming this Client run is adopted, not duplicated', async () => {
@@ -226,6 +325,89 @@ test('a deploy job that concluded success records the run and the conclusion', a
   assert.match(summary, new RegExp(`Infra run: ${infraRunUrl}`));
   assert.match(summary, /Infra deploy conclusion: `success`/);
   assert.match(summary, /handed to the single writer/);
+});
+
+test('a completed run whose deploy job succeeded still reports the publication', async () => {
+  // The Infra run's own conclusion can be non-success (its held `smoke`
+  // qualification failed) while the `deploy` job published: the handoff's claim is
+  // about that job, so a completed run is not polled and is not rejected as a whole.
+  const { run, calls } = fakeRun({
+    ...emptyListings(),
+    [paths.dispatch]: dispatchResponse(),
+    [paths.created(infraRunId)]: completedRunResponse('failure'),
+    [paths.jobs(infraRunId)]: concludedJobs('success'),
+  });
+  let summary;
+  const result = await publishClientHandoff({
+    environment,
+    run,
+    wait: async () => { throw new Error('a completed run must not be polled'); },
+    now: () => 0,
+    log: () => {},
+    summary: async (text) => { summary = text; },
+  });
+
+  assert.deepEqual(result, { runId: infraRunId, runUrl: infraRunUrl, conclusion: 'success', digest });
+  assert.equal(calls.filter((call) => call.target === paths.jobs(infraRunId)).length, 1,
+    'the job list of a completed run is read exactly once');
+  assert.match(summary, /Infra run: https:\/\/github\.com\/anywear-ai\/AnyWear-Infra\/actions\/runs\/7171/);
+  assert.match(summary, /Infra deploy conclusion: `success`/);
+  assert.match(summary, /handed to the single writer/);
+});
+
+test('a completed run whose deploy job failed fails at once naming the conclusion', async () => {
+  const { run, calls } = fakeRun({
+    ...emptyListings(),
+    [paths.dispatch]: dispatchResponse(),
+    [paths.created(infraRunId)]: completedRunResponse('failure'),
+    [paths.jobs(infraRunId)]: concludedJobs('failure'),
+  });
+  await assert.rejects(
+    () => publishClientHandoff({
+      environment,
+      run,
+      wait: async () => { throw new Error('a completed run must not be polled'); },
+      now: () => 0,
+      log: () => {},
+      summary: async () => { throw new Error('a failed deploy must not be summarised as a handoff'); },
+    }),
+    new RegExp(`the Infra deploy job concluded failure, so the bundle was not published: Infra run ${infraRunUrl}`),
+  );
+  assert.equal(calls.filter((call) => call.target === paths.jobs(infraRunId)).length, 1,
+    'the failure is named from one job-list read, not a 150-minute poll');
+});
+
+test('a completed run whose job list cannot name the deploy job fails at once naming the conclusion', async () => {
+  const cases = [
+    [{}, 'but its job list carried no jobs, so the Infra deploy job cannot be named'],
+    [{ jobs: 'nope' }, 'but its job list carried no jobs, so the Infra deploy job cannot be named'],
+    [null, 'but its job list carried no jobs, so the Infra deploy job cannot be named'],
+    [{ jobs: [{ name: 'preflight', conclusion: 'success' }] }, 'and names no Infra deploy job, so the bundle was not published'],
+    [concludedJobs(null), 'and its Infra deploy job carries no conclusion, so the bundle was not published'],
+    [new Error('HTTP 503'), 'but its job list could not be read: HTTP 503'],
+  ];
+  for (const [jobs, expected] of cases) {
+    const { run, calls } = fakeRun({
+      ...emptyListings(),
+      [paths.dispatch]: dispatchResponse(),
+      [paths.created(infraRunId)]: completedRunResponse('timed_out'),
+      [paths.jobs(infraRunId)]: jobs,
+    });
+    await assert.rejects(
+      () => publishClientHandoff({
+        environment,
+        run,
+        wait: async () => { throw new Error('a completed run must not be polled'); },
+        now: () => 0,
+        log: () => {},
+        summary: async () => { throw new Error('a failed deploy must not be summarised as a handoff'); },
+      }),
+      new RegExp(`the Infra run ${infraRunUrl} concluded timed_out, ${expected}`),
+      `expected ${JSON.stringify(jobs)} to fail naming the run and its conclusion`,
+    );
+    assert.equal(calls.filter((call) => call.target === paths.jobs(infraRunId)).length, 1,
+      'one job-list read is the whole observation of a completed run');
+  }
 });
 
 test('it polls until the deploy job concludes, and a skipped run is not a publication', async () => {

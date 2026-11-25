@@ -40,9 +40,9 @@ export default tseslint.config(
     },
   },
   {
-    // #356: `.mjs` scripts were traversed with no rules before this block; this
-    // block puts the module's read policy on the same script files.
-    files: ['scripts/**/*.mjs'],
+    // #356: `.mjs` scripts carried no rules before this block; the block puts the
+    // module's read policy on both script directories the deleted census scanned.
+    files: ['.github/scripts/**/*.mjs', 'scripts/**/*.mjs'],
     ignores: ['scripts/created-run-read.mjs', '**/*.node-test.mjs'],
     rules: {
       'no-restricted-syntax': [

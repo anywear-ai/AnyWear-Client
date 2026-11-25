@@ -39,4 +39,31 @@ export default tseslint.config(
       'react-hooks/rules-of-hooks': 'off',
     },
   },
+  {
+    // #356: `.mjs` scripts were traversed with no rules before this block; this
+    // block puts the module's read policy on the same script files.
+    files: ['scripts/**/*.mjs'],
+    ignores: ['scripts/created-run-read.mjs', '**/*.node-test.mjs'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: 'Literal[value=/^repos\\/[^/]+\\/[^/]+\\/actions\\/runs\\/(?:[^/]+)?$/]',
+          message: 'Call readCreatedRunById() from scripts/created-run-read.mjs: the module owns the 404 retry, the identity check and the failure message.',
+        },
+        {
+          selector: 'TemplateElement[value.raw=/repos\\/$/] ~ TemplateElement[value.raw="/actions/runs/"]:nth-last-child(2) ~ TemplateElement[value.raw=""]:last-child',
+          message: 'Call readCreatedRunById() from scripts/created-run-read.mjs: the module owns the 404 retry, the identity check and the failure message.',
+        },
+        {
+          selector: 'TemplateElement[value.raw=/^repos\\/[^/]+\\/[^/]+\\/actions\\/runs\\/(?:[^/]+)?$/]:nth-last-child(2) ~ TemplateElement[value.raw=""]:last-child',
+          message: 'Call readCreatedRunById() from scripts/created-run-read.mjs: the module owns the 404 retry, the identity check and the failure message.',
+        },
+        {
+          selector: 'TemplateElement[value.raw=/^repos\\/[^/]+\\/[^/]+\\/actions\\/runs\\/[^/]+$/]:first-child:last-child',
+          message: 'Call readCreatedRunById() from scripts/created-run-read.mjs: the module owns the 404 retry, the identity check and the failure message.',
+        },
+      ],
+    },
+  },
 );

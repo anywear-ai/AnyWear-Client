@@ -10,14 +10,15 @@
 // identity is read from `HEAD`, never from a working-tree file that a change could
 // leave behind, and the `api` gitlink is read from the index of that same checkout.
 //
-// Base resolution is fail-closed inside GitHub Actions: a pull request compares
-// against `origin/main`, and a push compares against the event's `before`
-// revision, where an all-zero `before` means the push introduces the ref. A
-// `workflow_dispatch` is an explicit build/release trigger with no base revision,
-// so it validates HEAD and states that no comparison was made; any other trigger,
-// a malformed event payload or an unresolvable revision fails the check instead
-// of skipping it. Local runs outside Actions skip only the base comparison; the
-// current identity is still validated.
+// Base resolution is fail-closed inside GitHub Actions: a pull request or the
+// merge queue's `merge_group` compares against `origin/main`, and a push
+// compares against the event's `before` revision, where an all-zero `before`
+// means the push introduces the ref. A `workflow_dispatch` is an explicit
+// build/release trigger with no base revision, so it validates HEAD and states
+// that no comparison was made; any other trigger, a malformed event payload or
+// an unresolvable revision fails the check instead of skipping it. Local runs
+// outside Actions skip only the base comparison; the current identity is still
+// validated.
 
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -118,6 +119,11 @@ export function resolvePreviousRevision(environment = {}, event) {
 
   const eventName = environment.GITHUB_EVENT_NAME;
   if (eventName === 'pull_request') return { mode: 'revision', revision: 'origin/main' };
+  // The merge queue's serial re-test re-validates the same comparison as the
+  // pull request it carries: the queue's temporary branch is main plus the
+  // queued PR, and the workflow checkout's `fetch-depth: 0` keeps `origin/main`
+  // resolvable there.
+  if (eventName === 'merge_group') return { mode: 'revision', revision: 'origin/main' };
   // A workflow_dispatch is an explicit build/release trigger, not a change event:
   // it has no comparison base, so validate HEAD and report that nothing was
   // compared instead of pretending to compare or failing closed.
@@ -135,7 +141,7 @@ export function resolvePreviousRevision(environment = {}, event) {
   }
 
   throw new ClientVersionBumpError(
-    `GITHUB_EVENT_NAME=${eventName ?? '(unset)'} is not pull_request, push or workflow_dispatch; refusing to skip the base comparison`,
+    `GITHUB_EVENT_NAME=${eventName ?? '(unset)'} is not pull_request, merge_group, push or workflow_dispatch; refusing to skip the base comparison`,
   );
 }
 

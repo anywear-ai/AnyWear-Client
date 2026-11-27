@@ -178,9 +178,10 @@ test('the repository exposes exactly four entries, in a closed trigger map', () 
 
   // The trigger classes are a closed map, not mutually exclusive three ways: the
   // repository now has two dispatch entries, so each entry's own trigger set is
-  // pinned instead of counting how many classes it belongs to.
+  // pinned instead of counting how many classes it belongs to. `check.yml` adds the
+  // merge queue's serial re-test to its pull-request-and-push set.
   const entryTriggers = {
-    [automaticEntry]: ['pull_request', 'push'],
+    [automaticEntry]: ['merge_group', 'pull_request', 'push'],
     [mergeAndroidEntry]: ['push', 'workflow_dispatch'],
     [tagEntry]: ['push'],
     [manualEntry]: ['push', 'workflow_dispatch'],
@@ -204,10 +205,11 @@ test('the repository exposes exactly four entries, in a closed trigger map', () 
 
   // `check.yml` stays the only automatic check: it is the only workflow that runs on
   // pull requests, and the only one whose push event is a check rather than a
-  // publication.
+  // publication. Its `merge_group` trigger re-runs the same checks on the merge
+  // queue's temporary branch.
   const checks = workflowFiles.filter((name) => triggers(read(name)).includes('pull_request'));
   assert.deepEqual(checks, [automaticEntry]);
-  assert.deepEqual(triggers(read(automaticEntry)).sort(), ['pull_request', 'push']);
+  assert.deepEqual(triggers(read(automaticEntry)).sort(), ['merge_group', 'pull_request', 'push']);
 
   for (const name of calledWorkflows) {
     assert.deepEqual(triggers(read(name)), ['workflow_call'], `${name} is a called workflow, not an entry`);

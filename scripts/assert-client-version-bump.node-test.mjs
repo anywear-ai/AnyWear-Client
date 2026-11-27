@@ -173,6 +173,10 @@ test('resolves the previous revision from an explicit trigger and event', () => 
     { mode: 'revision', revision: 'origin/main' },
   );
   assert.deepEqual(
+    resolvePreviousRevision({ GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'merge_group' }),
+    { mode: 'revision', revision: 'origin/main' },
+  );
+  assert.deepEqual(
     resolvePreviousRevision({ GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch' }),
     { mode: 'no-base' },
   );
@@ -189,7 +193,7 @@ test('resolves the previous revision from an explicit trigger and event', () => 
 test('fails closed on an unknown trigger or a malformed push payload', () => {
   assert.throws(
     () => resolvePreviousRevision({ GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'schedule' }),
-    /not pull_request, push or workflow_dispatch; refusing to skip the base comparison/,
+    /not pull_request, merge_group, push or workflow_dispatch; refusing to skip the base comparison/,
   );
   assert.throws(
     () => resolvePreviousRevision({ GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'push' }),
@@ -414,9 +418,10 @@ test('fails when HEAD has no readable client-version.json', async (t) => {
 
 test('runs the checker entry against the real checkout with the ambient CI environment', async () => {
   // This is the gate the test workflow itself runs: in CI the ambient trigger
-  // (push, pull_request or a manual workflow_dispatch) drives the real checker
-  // against the real checkout; locally the same call must still parse the real
-  // HEAD file and report that only the base comparison was skipped.
+  // (push, pull_request, the merge queue's merge_group or a manual
+  // workflow_dispatch) drives the real checker against the real checkout;
+  // locally the same call must still parse the real HEAD file and report that
+  // only the base comparison was skipped.
   const root = fileURLToPath(new URL('../', import.meta.url));
   const previousExitCode = process.exitCode;
   const output = [];
@@ -441,7 +446,8 @@ test('runs the checker entry against the real checkout with the ambient CI envir
     if (process.env.GITHUB_ACTIONS === 'true') {
       const ambientEvent = process.env.GITHUB_EVENT_NAME;
       assert.ok(
-        ambientEvent === 'pull_request' || ambientEvent === 'push' || ambientEvent === 'workflow_dispatch',
+        ambientEvent === 'pull_request' || ambientEvent === 'push'
+          || ambientEvent === 'workflow_dispatch' || ambientEvent === 'merge_group',
         `unexpected CI event ${String(ambientEvent)}`,
       );
       if (ambientEvent === 'workflow_dispatch') {
